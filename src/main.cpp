@@ -1,16 +1,13 @@
 #include <QApplication>
-#include <QCoreApplication>
-#include <QMainWindow>
+
+#include "MainWindow.h"
 
 int main(int argc, char* argv[])
 {
+    QApplication app(argc, argv);
 
-    QApplication application(argc, argv);
-
-    QMainWindow window;
-    window.setWindowTitle("OpenScope");
-    window.resize(1280, 720);
+    MainWindow window;
     window.show();
 
-    return application.exec();
+    return app.exec();
 }

@@ -15,6 +15,8 @@ qt_standard_project_setup()
 
 qt_add_executable(OpenScope
     src/main.cpp
+    src/MainWindow.cpp
+    src/MainWindow.h
 )
 
 target_link_libraries(OpenScope
@@ -32,3 +34,8 @@ if(WIN32)
             "$<TARGET_FILE_DIR:OpenScope>/platforms/"
     )
 endif()
+
+target_sources(OpenScope PRIVATE
+    src/main.cpp
+    src/MainWindow.cpp
+)
