@@ -1,6 +1,7 @@
 #include "DeckLinkProbe.h"
 
 #include <DeckLinkAPI_h.h>
+#include "DeckLinkInputCallback.h"
 
 #include <QDebug>
 #include <QString>
@@ -87,6 +88,9 @@ static void dumpDisplayModes(IDeckLink* deckLink)
     input->Release();
 }
 
+static IDeckLinkInput* activeInput = nullptr;
+static DeckLinkInputCallback* activeCallback = nullptr;
+
 static void testPalInput(IDeckLink* deckLink)
 {
     IDeckLinkInput* input = nullptr;
@@ -99,25 +103,46 @@ static void testPalInput(IDeckLink* deckLink)
         return;
     }
 
-    const HRESULT result = input->EnableVideoInput(
+    activeCallback = new DeckLinkInputCallback();
+
+    HRESULT result = input->SetCallback(activeCallback);
+
+    if (FAILED(result))
+    {
+        qDebug() << "  Failed to set input callback";
+        activeCallback->Release();
+        input->Release();
+        return;
+    }
+
+    result = input->EnableVideoInput(
         bmdModePAL,
         bmdFormat8BitYUV,
         bmdVideoInputFlagDefault
     );
 
-    if (SUCCEEDED(result))
+    if (FAILED(result))
     {
-        qDebug() << "  PAL input enabled";
-        input->DisableVideoInput();
-    }
-    else
-    {
-        qDebug() << "  Failed to enable PAL input. HRESULT:"
-            << QString::number(
-                static_cast<unsigned long>(result), 16);
+        qDebug() << "  Failed to enable PAL input";
+        input->SetCallback(nullptr);
+        activeCallback->Release();
+        input->Release();
+        return;
     }
 
-    input->Release();
+    result = input->StartStreams();
+
+    if (SUCCEEDED(result))
+        qDebug() << "  PAL capture started";
+    else
+        qDebug() << "  Failed to start PAL capture";
+
+    //    input->StopStreams();
+    //input->DisableVideoInput();
+    //input->SetCallback(nullptr);
+
+    //callback->Release();
+    //input->Release();
 }
 
 static void dumpDevice(IDeckLink* deckLink, int index)

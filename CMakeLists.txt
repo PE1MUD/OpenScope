@@ -81,6 +81,8 @@ qt_add_executable(OpenScope
     src/VideoSource.h
     src/DeckLinkProbe.cpp
     src/DeckLinkProbe.h
+    src/DeckLinkInputCallback.cpp
+    src/DeckLinkInputCallback.h
 
     "${DECKLINK_GENERATED_IID}"
 )
