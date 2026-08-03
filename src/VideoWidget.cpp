@@ -6,19 +6,12 @@ VideoWidget::VideoWidget(QWidget* parent)
     : QWidget(parent)
     , image_(720, 576, QImage::Format_RGB32)
 {
-    for (int y = 0; y < image_.height(); ++y) {
-        for (int x = 0; x < image_.width(); ++x) {
-            image_.setPixelColor(
-                x,
-                y,
-                QColor(
-                    x * 255 / image_.width(),
-                    y * 255 / image_.height(),
-                    128
-                )
-            );
-        }
-    }
+}
+
+void VideoWidget::setImage(const QImage& image)
+{
+    image_ = image;
+    update();
 }
 
 void VideoWidget::paintEvent(QPaintEvent* event)
@@ -26,5 +19,28 @@ void VideoWidget::paintEvent(QPaintEvent* event)
     Q_UNUSED(event);
 
     QPainter painter(this);
-    painter.drawImage(rect(), image_);
+    painter.fillRect(rect(), Qt::black);
+
+    if (image_.isNull()) {
+        return;
+    }
+
+    constexpr double displayAspectRatio = 4.0 / 3.0;
+
+    int targetWidth = width();
+    int targetHeight =
+        static_cast<int>(targetWidth / displayAspectRatio);
+
+    if (targetHeight > height()) {
+        targetHeight = height();
+        targetWidth =
+            static_cast<int>(targetHeight * displayAspectRatio);
+    }
+
+    const int x = (width() - targetWidth) / 2;
+    const int y = (height() - targetHeight) / 2;
+
+    painter.drawImage(
+        QRect(x, y, targetWidth, targetHeight),
+        image_);
 }
