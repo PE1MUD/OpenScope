@@ -17,6 +17,8 @@ qt_add_executable(OpenScope
     src/main.cpp
     src/MainWindow.cpp
     src/MainWindow.h
+	src/VideoWidget.cpp
+	src/VideoWidget.h
 )
 
 target_link_libraries(OpenScope
