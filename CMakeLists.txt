@@ -5,6 +5,19 @@ project(OpenScope
     LANGUAGES CXX
 )
 
+set(DECKLINK_SDK_ROOT
+    "C:/Users/David/Documents/Blackmagic_DeckLink_SDK_16.0"
+    CACHE PATH
+    "Path to the Blackmagic DeckLink SDK"
+)
+
+if(NOT DECKLINK_SDK_ROOT)
+    message(FATAL_ERROR
+        "DECKLINK_SDK_ROOT is not set. "
+        "Point it to the root of the DeckLink SDK."
+    )
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -25,6 +38,12 @@ qt_add_executable(OpenScope
     src/VideoEngine.h
     src/VideoSource.cpp
     src/VideoSource.h
+    src/DeckLinkProbe.cpp
+)
+
+target_include_directories(OpenScope
+    PRIVATE
+        "${DECKLINK_SDK_ROOT}/Win/include"
 )
 
 target_link_libraries(OpenScope
