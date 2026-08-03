@@ -6,9 +6,7 @@ project(OpenScope
 )
 
 set(DECKLINK_SDK_ROOT
-    "C:/Users/David/Documents/Blackmagic_DeckLink_SDK_16.0"
-    CACHE PATH
-    "Path to the Blackmagic DeckLink SDK"
+    "C:/Users/David/Documents/SDK/Blackmagic DeckLink SDK 16.0"
 )
 
 if(NOT DECKLINK_SDK_ROOT)
@@ -26,6 +24,31 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 qt_standard_project_setup()
 
+set(DECKLINK_IDL
+    "${DECKLINK_SDK_ROOT}/Win/include/DeckLinkAPI.idl"
+)
+
+set(DECKLINK_GENERATED_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/decklink_generated"
+)
+
+file(MAKE_DIRECTORY "${DECKLINK_GENERATED_DIR}")
+
+add_custom_command(
+    OUTPUT
+        "${DECKLINK_GENERATED_DIR}/DeckLinkAPI_h.h"
+        "${DECKLINK_GENERATED_DIR}/DeckLinkAPI_i.c"
+    COMMAND midl
+        /nologo
+        /env x64
+        /h DeckLinkAPI_h.h
+        /iid DeckLinkAPI_i.c
+        /out "${DECKLINK_GENERATED_DIR}"
+        "${DECKLINK_IDL}"
+    DEPENDS "${DECKLINK_IDL}"
+    VERBATIM
+)
+
 qt_add_executable(OpenScope
     src/main.cpp
     src/MainWindow.cpp
@@ -39,11 +62,13 @@ qt_add_executable(OpenScope
     src/VideoSource.cpp
     src/VideoSource.h
     src/DeckLinkProbe.cpp
+    "${DECKLINK_GENERATED_DIR}/DeckLinkAPI_i.c"
 )
 
 target_include_directories(OpenScope
     PRIVATE
         "${DECKLINK_SDK_ROOT}/Win/include"
+        "${DECKLINK_GENERATED_DIR}"
 )
 
 target_link_libraries(OpenScope
