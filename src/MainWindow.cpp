@@ -1,10 +1,12 @@
 #include "MainWindow.h"
 
 #include "TestPatternGenerator.h"
+#include "VideoEngine.h"
 #include "VideoWidget.h"
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
+    , videoEngine_(new VideoEngine(this))
     , videoWidget_(new VideoWidget(this))
 {
     setWindowTitle("OpenScope");
@@ -12,6 +14,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     setCentralWidget(videoWidget_);
 
-    videoWidget_->setImage(
+    connect(
+        videoEngine_,
+        &VideoEngine::frameChanged,
+        videoWidget_,
+        &VideoWidget::setImage);
+
+    videoEngine_->setFrame(
         TestPatternGenerator::generate(720, 576));
 }

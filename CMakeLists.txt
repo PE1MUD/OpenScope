@@ -21,6 +21,8 @@ qt_add_executable(OpenScope
     src/VideoWidget.h
     src/TestPatternGenerator.cpp
     src/TestPatternGenerator.h
+    src/VideoEngine.cpp
+    src/VideoEngine.h
 )
 
 target_link_libraries(OpenScope
