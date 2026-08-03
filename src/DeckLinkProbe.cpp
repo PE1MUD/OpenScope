@@ -91,7 +91,7 @@ static void dumpDisplayModes(IDeckLink* deckLink)
 static IDeckLinkInput* activeInput = nullptr;
 static DeckLinkInputCallback* activeCallback = nullptr;
 
-static void testPalInput(IDeckLink* deckLink)
+static void testPalInput(IDeckLink* deckLink, VideoWidget* videoWidget)
 {
     IDeckLinkInput* input = nullptr;
 
@@ -103,7 +103,7 @@ static void testPalInput(IDeckLink* deckLink)
         return;
     }
 
-    activeCallback = new DeckLinkInputCallback();
+    activeCallback = new DeckLinkInputCallback(videoWidget);
 
     HRESULT result = input->SetCallback(activeCallback);
 
@@ -145,7 +145,10 @@ static void testPalInput(IDeckLink* deckLink)
     //input->Release();
 }
 
-static void dumpDevice(IDeckLink* deckLink, int index)
+static void dumpDevice(
+    IDeckLink* deckLink,
+    int index,
+    VideoWidget* videoWidget)
 {
     BSTR name = nullptr;
 
@@ -177,10 +180,10 @@ static void dumpDevice(IDeckLink* deckLink, int index)
         attributes->Release();
     }
     dumpDisplayModes(deckLink);
-    testPalInput(deckLink);
+    testPalInput(deckLink, videoWidget);
 }
 
-void deckLinkProbe()
+void deckLinkProbe(VideoWidget* videoWidget)
 {
     IDeckLinkIterator* iterator = nullptr;
 
@@ -204,7 +207,7 @@ void deckLinkProbe()
 
     while (iterator->Next(&deckLink) == S_OK)
     {
-        dumpDevice(deckLink, index);
+        dumpDevice(deckLink, index, videoWidget);
 
         deckLink->Release();
         deckLink = nullptr;

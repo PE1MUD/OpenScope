@@ -1,9 +1,7 @@
 #pragma once
 
-#include <QWidget>
 #include <QImage>
-
-void setImage(const QImage& image);
+#include <QWidget>
 
 class VideoWidget : public QWidget
 {

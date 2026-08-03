@@ -23,3 +23,8 @@ MainWindow::MainWindow(QWidget* parent)
     videoEngine_->setFrame(
         TestPatternGenerator::generate(720, 576));
 }
+
+VideoWidget* MainWindow::videoWidget() const
+{
+    return videoWidget_;
+}

@@ -1,3 +1,5 @@
 #pragma once
 
-void deckLinkProbe();
+class VideoWidget;
+
+void deckLinkProbe(VideoWidget* videoWidget);
