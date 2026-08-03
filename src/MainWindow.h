@@ -12,7 +12,6 @@ class MainWindow : public QMainWindow
 private:
     VideoWidget* videoWidget_;
     VideoEngine* videoEngine_;
-    VideoWidget* videoWidget_;
 public:
     explicit MainWindow(QWidget* parent = nullptr);
 
