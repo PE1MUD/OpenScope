@@ -6,8 +6,17 @@ project(OpenScope
 )
 
 set(DECKLINK_SDK_ROOT
-    "C:/Users/David/Documents/SDK/Blackmagic DeckLink SDK 16.0"
+    ""
+    CACHE PATH
+    "Path to the Blackmagic DeckLink SDK"
 )
+
+if(NOT DECKLINK_SDK_ROOT)
+    message(FATAL_ERROR
+        "DECKLINK_SDK_ROOT is not set. "
+        "Set it in CMakeUserPresets.json or via -DDECKLINK_SDK_ROOT=..."
+    )
+endif()
 
 if(NOT EXISTS "${DECKLINK_SDK_ROOT}/Win/include/DeckLinkAPI.idl")
     message(FATAL_ERROR
