@@ -43,25 +43,11 @@ void VideoEngine::setFrame(const QImage& frame)
     emit frameChanged(currentFrame_);
 }
 
-const QImage& VideoEngine::currentFrame() const
-{
-    return currentFrame_;
-}
-
 void VideoEngine::setFrame(const Yuv444Frame& frame)
 {
+    waveformAnalyzer_.analyze(frame);
+    emit waveformChanged(waveformAnalyzer_.image());
     setFrame(displayConverter_.convert(frame));
-}
-
-void VideoEngine::submitFrame(const Yuv444Frame& frame)
-{
-    QMetaObject::invokeMethod(
-        this,
-        [this, frame]()
-        {
-            setFrame(frame);
-        },
-        Qt::QueuedConnection);
 }
 
 void VideoEngine::cancelWriteFrame()

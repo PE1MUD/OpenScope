@@ -1,8 +1,9 @@
+#include <QSplitter>
 #include "MainWindow.h"
-
 #include "TestPatternGenerator.h"
 #include "VideoEngine.h"
 #include "VideoWidget.h"
+#include "WaveformWidget.h"
 #include "DeckLinkProbe.h"
 
 MainWindow::MainWindow(QWidget* parent)
@@ -11,9 +12,19 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget(this))
 {
     setWindowTitle("OpenScope");
-    resize(900, 720);
+    resize(1800, 720);
 
-    setCentralWidget(videoWidget_);
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+
+    splitter->addWidget(videoWidget_);
+
+    waveformWidget_ = new WaveformWidget(this);
+    splitter->addWidget(waveformWidget_);
+
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 1);
+
+    setCentralWidget(splitter);
 
     connect(
         videoEngine_,
@@ -21,8 +32,11 @@ MainWindow::MainWindow(QWidget* parent)
         videoWidget_,
         &VideoWidget::setImage);
 
-    videoEngine_->setFrame(
-        TestPatternGenerator::generate(720, 576));
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformChanged,
+        waveformWidget_,
+        &WaveformWidget::setImage);
 }
 
 VideoWidget* MainWindow::videoWidget() const

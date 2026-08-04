@@ -82,6 +82,8 @@ qt_add_executable(OpenScope
     src/MainWindow.h
     src/VideoWidget.cpp
     src/VideoWidget.h
+    src/WaveformWidget.h
+    src/WaveformWidget.cpp
     src/TestPatternGenerator.cpp
     src/TestPatternGenerator.h
     src/VideoEngine.cpp
@@ -92,13 +94,16 @@ qt_add_executable(OpenScope
     src/DeckLinkProbe.h
     src/DeckLinkInputCallback.cpp
     src/DeckLinkInputCallback.h
-    src/video/Yuv444Frame.h
-    src/video/Uyvy422ToYuv444Converter.h
-    src/video/Uyvy422ToYuv444Converter.cpp
+    src/Video/Yuv444Frame.h
+    src/Video/Uyvy422ToYuv444Converter.h
+    src/Video/Uyvy422ToYuv444Converter.cpp
     src/Video/DisplayConverter.h
     src/Video/DisplayConverter.cpp
     src/Video/FrameBufferPool.h
     src/Video/FrameBufferPool.cpp
+    src/Analysis/Analyzer.h
+    src/Analysis/WaveformAnalyzer.h
+    src/Analysis/WaveformAnalyzer.cpp
 
     "${DECKLINK_GENERATED_IID}"
 )
@@ -109,6 +114,7 @@ target_include_directories(OpenScope
     PRIVATE
         "${DECKLINK_SDK_ROOT}/Win/include"
         "${DECKLINK_GENERATED_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 target_link_libraries(OpenScope

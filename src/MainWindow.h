@@ -4,6 +4,7 @@
 
 class VideoEngine;
 class VideoWidget;
+class WaveformWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -12,10 +13,12 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
+
     VideoWidget* videoWidget() const;
     VideoEngine* videoEngine() const;
 
 private:
-    VideoWidget* videoWidget_;
-    VideoEngine* videoEngine_;
+    VideoWidget* videoWidget_ = nullptr;
+    VideoEngine* videoEngine_ = nullptr;
+    WaveformWidget* waveformWidget_ = nullptr;
 };
