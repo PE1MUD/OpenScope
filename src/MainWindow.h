@@ -13,6 +13,7 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
     VideoWidget* videoWidget() const;
+    VideoEngine* videoEngine() const;
 
 private:
     VideoWidget* videoWidget_;

@@ -1,5 +1,5 @@
 #include "DeckLinkProbe.h"
-
+#include "VideoEngine.h"
 #include <DeckLinkAPI_h.h>
 #include "DeckLinkInputCallback.h"
 
@@ -91,7 +91,9 @@ static void dumpDisplayModes(IDeckLink* deckLink)
 static IDeckLinkInput* activeInput = nullptr;
 static DeckLinkInputCallback* activeCallback = nullptr;
 
-static void testPalInput(IDeckLink* deckLink, VideoWidget* videoWidget)
+static void testPalInput(
+    IDeckLink* deckLink,
+    VideoEngine* videoEngine)
 {
     IDeckLinkInput* input = nullptr;
 
@@ -102,50 +104,68 @@ static void testPalInput(IDeckLink* deckLink, VideoWidget* videoWidget)
         qDebug() << "  No capture interface";
         return;
     }
+
     activeInput = input;
-    activeCallback = new DeckLinkInputCallback(videoWidget);
+    activeCallback = new DeckLinkInputCallback(videoEngine);
 
     HRESULT result = input->SetCallback(activeCallback);
 
     if (FAILED(result))
     {
         qDebug() << "  Failed to set input callback";
+
         activeCallback->Release();
+        activeCallback = nullptr;
+
         input->Release();
+        activeInput = nullptr;
         return;
     }
 
     result = input->EnableVideoInput(
         bmdModePAL,
         bmdFormat8BitYUV,
-        bmdVideoInputFlagDefault
-    );
+        bmdVideoInputFlagDefault);
 
     if (FAILED(result))
     {
         qDebug() << "  Failed to enable PAL input";
+
         input->SetCallback(nullptr);
+
         activeCallback->Release();
+        activeCallback = nullptr;
+
         input->Release();
+        activeInput = nullptr;
         return;
     }
 
     result = input->StartStreams();
 
     if (SUCCEEDED(result))
+    {
         qDebug() << "  PAL capture started";
+    }
     else
+    {
         qDebug() << "  Failed to start PAL capture";
 
-    //input->StopStreams();
-    //input->DisableVideoInput();
-    //input->SetCallback(nullptr);
+        input->DisableVideoInput();
+        input->SetCallback(nullptr);
+
+        activeCallback->Release();
+        activeCallback = nullptr;
+
+        input->Release();
+        activeInput = nullptr;
+    }
 }
 
 static void dumpDevice(
     IDeckLink* deckLink,
     int index,
-    VideoWidget* videoWidget)
+    VideoEngine* videoEngine)
 {
     BSTR name = nullptr;
 
@@ -159,28 +179,34 @@ static void dumpDevice(
 
     IDeckLinkProfileAttributes* attributes = nullptr;
 
-    if (deckLink->QueryInterface(IID_IDeckLinkProfileAttributes,
-        (void**)&attributes) == S_OK)
+    if (deckLink->QueryInterface(
+        IID_IDeckLinkProfileAttributes,
+        reinterpret_cast<void**>(&attributes)) == S_OK)
     {
         int64_t value = 0;
 
-        if (attributes->GetInt(BMDDeckLinkVideoInputConnections, &value) == S_OK)
+        if (attributes->GetInt(
+            BMDDeckLinkVideoInputConnections,
+            &value) == S_OK)
         {
             dumpConnections("  Video inputs:", value);
         }
 
-        if (attributes->GetInt(BMDDeckLinkVideoOutputConnections, &value) == S_OK)
+        if (attributes->GetInt(
+            BMDDeckLinkVideoOutputConnections,
+            &value) == S_OK)
         {
             dumpConnections("  Video outputs:", value);
         }
 
         attributes->Release();
     }
+
     dumpDisplayModes(deckLink);
-    testPalInput(deckLink, videoWidget);
+    testPalInput(deckLink, videoEngine);
 }
 
-void deckLinkProbe(VideoWidget* videoWidget)
+void deckLinkProbe(VideoEngine* videoEngine)
 {
     IDeckLinkIterator* iterator = nullptr;
 
@@ -189,13 +215,14 @@ void deckLinkProbe(VideoWidget* videoWidget)
         nullptr,
         CLSCTX_ALL,
         IID_IDeckLinkIterator,
-        reinterpret_cast<void**>(&iterator)
-    );
+        reinterpret_cast<void**>(&iterator));
 
     if (FAILED(result))
     {
         qDebug() << "No DeckLink driver found. HRESULT:"
-            << QString::number(static_cast<unsigned long>(result), 16);
+            << QString::number(
+                static_cast<unsigned long>(result),
+                16);
         return;
     }
 
@@ -204,7 +231,7 @@ void deckLinkProbe(VideoWidget* videoWidget)
 
     while (iterator->Next(&deckLink) == S_OK)
     {
-        dumpDevice(deckLink, index, videoWidget);
+        dumpDevice(deckLink, index, videoEngine);
 
         deckLink->Release();
         deckLink = nullptr;
@@ -221,9 +248,9 @@ void deckLinkStop()
 {
     if (activeInput != nullptr)
     {
+        activeInput->SetCallback(nullptr);
         activeInput->StopStreams();
         activeInput->DisableVideoInput();
-        activeInput->SetCallback(nullptr);
 
         activeInput->Release();
         activeInput = nullptr;

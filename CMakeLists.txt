@@ -95,6 +95,10 @@ qt_add_executable(OpenScope
     src/video/Yuv444Frame.h
     src/video/Uyvy422ToYuv444Converter.h
     src/video/Uyvy422ToYuv444Converter.cpp
+    src/Video/DisplayConverter.h
+    src/Video/DisplayConverter.cpp
+    src/Video/FrameBufferPool.h
+    src/Video/FrameBufferPool.cpp
 
     "${DECKLINK_GENERATED_IID}"
 )

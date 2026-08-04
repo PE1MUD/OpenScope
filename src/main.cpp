@@ -10,7 +10,7 @@ int main(int argc, char* argv[])
     MainWindow window;
     window.show();
 
-    deckLinkProbe(window.videoWidget());
+    deckLinkProbe(window.videoEngine());
 
     return app.exec();
 }

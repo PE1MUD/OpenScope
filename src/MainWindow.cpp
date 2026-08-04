@@ -34,3 +34,8 @@ MainWindow::~MainWindow()
 {
     deckLinkStop();
 }
+
+VideoEngine* MainWindow::videoEngine() const
+{
+    return videoEngine_;
+}

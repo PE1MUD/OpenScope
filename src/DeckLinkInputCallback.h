@@ -4,12 +4,12 @@
 #include "video/Uyvy422ToYuv444Converter.h"
 #include "video/Yuv444Frame.h"
 
-class VideoWidget;
+class VideoEngine;
 
 class DeckLinkInputCallback final : public IDeckLinkInputCallback
 {
 public:
-    explicit DeckLinkInputCallback(VideoWidget* videoWidget);
+    explicit DeckLinkInputCallback(VideoEngine* videoEngine);
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, LPVOID* ppv) override;
     ULONG STDMETHODCALLTYPE AddRef() override;
@@ -27,7 +27,6 @@ public:
 private:
     ULONG refCount_ = 1;
     unsigned int frameCount_ = 0;
-    VideoWidget* videoWidget_ = nullptr;
+    VideoEngine* videoEngine_ = nullptr;
     Uyvy422ToYuv444Converter converter_;
-    Yuv444Frame convertedFrame_;
 };

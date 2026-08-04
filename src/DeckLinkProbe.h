@@ -1,6 +1,6 @@
 #pragma once
 
-class VideoWidget;
+class VideoEngine;
 
-void deckLinkProbe(VideoWidget* videoWidget);
+void deckLinkProbe(VideoEngine* videoEngine);
 void deckLinkStop();
