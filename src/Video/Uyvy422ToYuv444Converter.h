@@ -1,18 +1,18 @@
 #pragma once
 
 #include "Yuv444Frame.h"
-
+#include "Video/VideoConverter.h"
 #include <cstdint>
 
-class Uyvy422ToYuv444Converter
+class Uyvy422ToYuv444Converter final : public VideoConverter
 {
 public:
     bool convert(
         const std::uint8_t* source,
-        int sourceRowBytes,
+        int rowBytes,
         int width,
         int height,
-        Yuv444Frame& destination) const;
+        Yuv444Frame& destination) const override;
 
 private:
     static constexpr std::uint16_t expand8To16(std::uint8_t value) noexcept

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
 #include "Analyzer.h"
 
 #include <QImage>
@@ -15,4 +17,5 @@ public:
 
 private:
     QImage image_;
+    std::vector<std::uint16_t> hits_;
 };

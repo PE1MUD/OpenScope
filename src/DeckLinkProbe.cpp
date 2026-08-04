@@ -2,9 +2,14 @@
 #include "VideoEngine.h"
 #include <DeckLinkAPI_h.h>
 #include "DeckLinkInputCallback.h"
+#include "Video/Uyvy422ToYuv444Converter.h"
+#include "Video/V210ToYuv444Converter.h"
 
 #include <QDebug>
 #include <QString>
+
+static Uyvy422ToYuv444Converter uyvyConverter;
+static V210ToYuv444Converter v210Converter;
 
 static void dumpConnections(const char* label, int64_t value)
 {
@@ -106,7 +111,9 @@ static void testPalInput(
     }
 
     activeInput = input;
-    activeCallback = new DeckLinkInputCallback(videoEngine);
+    activeCallback = new DeckLinkInputCallback(
+        videoEngine,
+        &v210Converter);
 
     HRESULT result = input->SetCallback(activeCallback);
 
@@ -124,7 +131,7 @@ static void testPalInput(
 
     result = input->EnableVideoInput(
         bmdModePAL,
-        bmdFormat8BitYUV,
+        bmdFormat10BitYUV,
         bmdVideoInputFlagDefault);
 
     if (FAILED(result))

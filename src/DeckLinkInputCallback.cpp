@@ -5,8 +5,10 @@
 
 
 DeckLinkInputCallback::DeckLinkInputCallback(
-    VideoEngine* videoEngine)
+    VideoEngine* videoEngine,
+    const VideoConverter* converter)
     : videoEngine_(videoEngine)
+    , converter_(converter)
 {}
 
 HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::QueryInterface(
@@ -98,19 +100,18 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
 
     if (auto* frame = videoEngine_->tryAcquireWriteFrame())
     {
-        if (converter_.convert(
-            source,
-            rowBytes,
-            width,
-            height,
-            *frame))
-        {
+        const bool ok =
+            converter_->convert(
+                source,
+                rowBytes,
+                width,
+                height,
+                *frame);
+
+        if (ok)
             videoEngine_->submitWriteFrame();
-        }
         else
-        {
             videoEngine_->cancelWriteFrame();
-        }
     }
 
     videoBuffer->EndAccess(bmdBufferAccessRead);

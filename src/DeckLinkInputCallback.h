@@ -1,17 +1,22 @@
 #pragma once
 
 #include <DeckLinkAPI_h.h>
-#include "video/Uyvy422ToYuv444Converter.h"
-#include "video/Yuv444Frame.h"
+
+#include "Video/VideoConverter.h"
 
 class VideoEngine;
 
 class DeckLinkInputCallback final : public IDeckLinkInputCallback
 {
 public:
-    explicit DeckLinkInputCallback(VideoEngine* videoEngine);
+    DeckLinkInputCallback(
+        VideoEngine* videoEngine,
+        const VideoConverter* converter);
 
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, LPVOID* ppv) override;
+    HRESULT STDMETHODCALLTYPE QueryInterface(
+        REFIID iid,
+        LPVOID* ppv) override;
+
     ULONG STDMETHODCALLTYPE AddRef() override;
     ULONG STDMETHODCALLTYPE Release() override;
 
@@ -27,6 +32,7 @@ public:
 private:
     ULONG refCount_ = 1;
     unsigned int frameCount_ = 0;
+
     VideoEngine* videoEngine_ = nullptr;
-    Uyvy422ToYuv444Converter converter_;
+    const VideoConverter* converter_ = nullptr;
 };

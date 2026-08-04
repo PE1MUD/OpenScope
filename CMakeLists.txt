@@ -97,6 +97,9 @@ qt_add_executable(OpenScope
     src/Video/Yuv444Frame.h
     src/Video/Uyvy422ToYuv444Converter.h
     src/Video/Uyvy422ToYuv444Converter.cpp
+    src/Video/V210ToYuv444Converter.h
+    src/Video/V210ToYuv444Converter.cpp
+    src/Video/VideoConverter.h
     src/Video/DisplayConverter.h
     src/Video/DisplayConverter.cpp
     src/Video/FrameBufferPool.h
