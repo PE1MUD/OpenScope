@@ -8,4 +8,5 @@ class WaveformWidget : public VideoWidget
 
 public:
     explicit WaveformWidget(QWidget* parent = nullptr);
+
 };

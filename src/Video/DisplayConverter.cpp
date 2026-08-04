@@ -2,6 +2,11 @@
 
 #include <QtGlobal>
 
+void DisplayConverter::setHighlightedLine(int line)
+{
+    highlightedLine_ = line;
+}
+
 QImage DisplayConverter::convert(const Yuv444Frame& frame) const
 {
     if (frame.width <= 0 ||
@@ -31,21 +36,45 @@ QImage DisplayConverter::convert(const Yuv444Frame& frame) const
         const auto* srcU = frame.u.data() + lineOffset;
         const auto* srcV = frame.v.data() + lineOffset;
 
+        const bool invertLine =
+            y == highlightedLine_;
+
         for (int x = 0; x < frame.width; ++x)
         {
-            const int yy = static_cast<int>(srcY[x] >> 8) - 16;
-            const int u = static_cast<int>(srcU[x] >> 8) - 128;
-            const int v = static_cast<int>(srcV[x] >> 8) - 128;
+            // The internal frame uses a 16-bit container.
+            // The display target is currently 8-bit RGB.
+            const int yy =
+                static_cast<int>(srcY[x] >> 8) - 16;
+
+            const int u =
+                static_cast<int>(srcU[x] >> 8) - 128;
+
+            const int v =
+                static_cast<int>(srcV[x] >> 8) - 128;
 
             const int c = 298 * yy;
-            const int r = (c + 409 * v + 128) >> 8;
-            const int g = (c - 100 * u - 208 * v + 128) >> 8;
-            const int b = (c + 516 * u + 128) >> 8;
 
-            dst[x] = qRgb(
-                qBound(0, r, 255),
-                qBound(0, g, 255),
-                qBound(0, b, 255));
+            const int r =
+                (c + 409 * v + 128) >> 8;
+
+            const int g =
+                (c - 100 * u - 208 * v + 128) >> 8;
+
+            const int b =
+                (c + 516 * u + 128) >> 8;
+
+            int outR = qBound(0, r, 255);
+            int outG = qBound(0, g, 255);
+            int outB = qBound(0, b, 255);
+
+            if (invertLine)
+            {
+                outR = 255 - outR;
+                outG = 255 - outG;
+                outB = 255 - outB;
+            }
+
+            dst[x] = qRgb(outR, outG, outB);
         }
     }
 

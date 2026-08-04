@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QImage>
 #include <atomic>
+
 #include "video/DisplayConverter.h"
 #include "video/Yuv444Frame.h"
 #include "video/FrameBufferPool.h"
@@ -17,11 +18,15 @@ public:
 
     void setFrame(const QImage& frame);
     void setFrame(const Yuv444Frame& frame);
+
     Yuv444Frame* tryAcquireWriteFrame();
     void submitWriteFrame();
     void cancelWriteFrame();
 
+    void setSelectedLine(int line);
+
     const QImage& currentFrame() const;
+    void setWaveformPersistence(int persistence);
 
 signals:
     void frameChanged(const QImage& image);

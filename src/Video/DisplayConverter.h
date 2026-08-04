@@ -8,4 +8,7 @@ class DisplayConverter
 {
 public:
     QImage convert(const Yuv444Frame& frame) const;
+    void setHighlightedLine(int line);
+private:
+    int highlightedLine_ = -1;
 };

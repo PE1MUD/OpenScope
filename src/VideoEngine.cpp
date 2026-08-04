@@ -3,7 +3,9 @@
 
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
-{}
+{
+    setSelectedLine(288);
+}
 
 Yuv444Frame* VideoEngine::tryAcquireWriteFrame()
 {
@@ -53,4 +55,15 @@ void VideoEngine::setFrame(const Yuv444Frame& frame)
 void VideoEngine::cancelWriteFrame()
 {
     framePending_.store(false, std::memory_order_release);
+}
+
+void VideoEngine::setSelectedLine(int line)
+{
+    waveformAnalyzer_.setSelectedLine(line);
+    displayConverter_.setHighlightedLine(line);
+}
+
+void VideoEngine::setWaveformPersistence(int persistence)
+{
+    waveformAnalyzer_.setPersistence(persistence);
 }
