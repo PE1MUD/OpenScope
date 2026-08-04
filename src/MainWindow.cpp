@@ -3,6 +3,7 @@
 #include "TestPatternGenerator.h"
 #include "VideoEngine.h"
 #include "VideoWidget.h"
+#include "DeckLinkProbe.h"
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -27,4 +28,9 @@ MainWindow::MainWindow(QWidget* parent)
 VideoWidget* MainWindow::videoWidget() const
 {
     return videoWidget_;
+}
+
+MainWindow::~MainWindow()
+{
+    deckLinkStop();
 }

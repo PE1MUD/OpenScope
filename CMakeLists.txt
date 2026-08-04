@@ -92,6 +92,9 @@ qt_add_executable(OpenScope
     src/DeckLinkProbe.h
     src/DeckLinkInputCallback.cpp
     src/DeckLinkInputCallback.h
+    src/video/Yuv444Frame.h
+    src/video/Uyvy422ToYuv444Converter.h
+    src/video/Uyvy422ToYuv444Converter.cpp
 
     "${DECKLINK_GENERATED_IID}"
 )

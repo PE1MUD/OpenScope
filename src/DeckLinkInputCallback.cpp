@@ -3,6 +3,7 @@
 #include "DeckLinkInputCallback.h"
 #include "VideoWidget.h"
 #include <QDebug>
+#include <QPointer>
 
 DeckLinkInputCallback::DeckLinkInputCallback(VideoWidget* videoWidget)
     : videoWidget_(videoWidget)
@@ -36,6 +37,7 @@ ULONG STDMETHODCALLTYPE DeckLinkInputCallback::AddRef()
 ULONG STDMETHODCALLTYPE DeckLinkInputCallback::Release()
 {
     const ULONG count = --refCount_;
+    //qDebug() << "Release =" << count;
 
     if (count == 0)
         delete this;
@@ -56,6 +58,9 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
     IDeckLinkVideoInputFrame* videoFrame,
     IDeckLinkAudioInputPacket*)
 {
+    static int counter = 0;
+    //qDebug() << "Frame" << ++counter;
+
     if (videoFrame == nullptr || videoWidget_ == nullptr)
         return S_OK;
 
@@ -87,52 +92,67 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
     const int height = static_cast<int>(videoFrame->GetHeight());
     const int rowBytes = static_cast<int>(videoFrame->GetRowBytes());
 
-    QImage image(width, height, QImage::Format_RGB32);
+    //QImage image(width, height, QImage::Format_RGB32);
 
-    const auto* source = static_cast<const unsigned char*>(bytes);
+    const auto* source = static_cast<const std::uint8_t*>(bytes);
+
+    if (!converter_.convert(
+        source,
+        rowBytes,
+        width,
+        height,
+        convertedFrame_))
+    {
+        videoBuffer->EndAccess(bmdBufferAccessRead);
+        videoBuffer->Release();
+        return S_OK;
+    }
+
+    QImage image(width, height, QImage::Format_RGB32);
 
     for (int y = 0; y < height; ++y)
     {
-        const auto* src = source + y * rowBytes;
         auto* dst = reinterpret_cast<QRgb*>(image.scanLine(y));
 
-        for (int x = 0; x < width; x += 2)
+        const std::size_t lineOffset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(width);
+
+        const auto* srcY = convertedFrame_.y.data() + lineOffset;
+        const auto* srcU = convertedFrame_.u.data() + lineOffset;
+        const auto* srcV = convertedFrame_.v.data() + lineOffset;
+
+        for (int x = 0; x < width; ++x)
         {
-            const int u = src[0] - 128;
-            const int y0 = src[1] - 16;
-            const int v = src[2] - 128;
-            const int y1 = src[3] - 16;
+            // Temporarily reduce the internal 16-bit samples back to their
+            // original 8-bit code values for the existing RGB conversion.
+            const int yy = static_cast<int>(srcY[x] >> 8) - 16;
+            const int u = static_cast<int>(srcU[x] >> 8) - 128;
+            const int v = static_cast<int>(srcV[x] >> 8) - 128;
 
-            auto convert = [u, v](int yy)
-                {
-                    const int c = 298 * yy;
-                    const int r = (c + 409 * v + 128) >> 8;
-                    const int g = (c - 100 * u - 208 * v + 128) >> 8;
-                    const int b = (c + 516 * u + 128) >> 8;
+            const int c = 298 * yy;
+            const int r = (c + 409 * v + 128) >> 8;
+            const int g = (c - 100 * u - 208 * v + 128) >> 8;
+            const int b = (c + 516 * u + 128) >> 8;
 
-                    return qRgb(
-                        qBound(0, r, 255),
-                        qBound(0, g, 255),
-                        qBound(0, b, 255));
-                };
-
-            dst[x] = convert(y0);
-
-            if (x + 1 < width)
-                dst[x + 1] = convert(y1);
-
-            src += 4;
+            dst[x] = qRgb(
+                qBound(0, r, 255),
+                qBound(0, g, 255),
+                qBound(0, b, 255));
         }
     }
 
     videoBuffer->EndAccess(bmdBufferAccessRead);
     videoBuffer->Release();
 
+    QPointer<VideoWidget> widget = videoWidget_;
+
     QMetaObject::invokeMethod(
         videoWidget_,
-        [widget = videoWidget_, image = std::move(image)]() mutable
+        [widget, image = std::move(image)]() mutable
         {
-            widget->setImage(image);
+            if (widget)
+                widget->setImage(image);
         },
         Qt::QueuedConnection);
 

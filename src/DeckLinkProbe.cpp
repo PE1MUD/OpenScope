@@ -102,7 +102,7 @@ static void testPalInput(IDeckLink* deckLink, VideoWidget* videoWidget)
         qDebug() << "  No capture interface";
         return;
     }
-
+    activeInput = input;
     activeCallback = new DeckLinkInputCallback(videoWidget);
 
     HRESULT result = input->SetCallback(activeCallback);
@@ -137,12 +137,9 @@ static void testPalInput(IDeckLink* deckLink, VideoWidget* videoWidget)
     else
         qDebug() << "  Failed to start PAL capture";
 
-    //    input->StopStreams();
+    //input->StopStreams();
     //input->DisableVideoInput();
     //input->SetCallback(nullptr);
-
-    //callback->Release();
-    //input->Release();
 }
 
 static void dumpDevice(
@@ -218,4 +215,25 @@ void deckLinkProbe(VideoWidget* videoWidget)
 
     if (index == 0)
         qDebug() << "No DeckLink devices found.";
+}
+
+void deckLinkStop()
+{
+    if (activeInput != nullptr)
+    {
+        activeInput->StopStreams();
+        activeInput->DisableVideoInput();
+        activeInput->SetCallback(nullptr);
+
+        activeInput->Release();
+        activeInput = nullptr;
+    }
+
+    if (activeCallback != nullptr)
+    {
+        activeCallback->Release();
+        activeCallback = nullptr;
+    }
+
+    qDebug() << "DeckLink capture stopped";
 }
