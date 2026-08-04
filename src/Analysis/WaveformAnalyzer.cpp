@@ -1,18 +1,24 @@
 #include "WaveformAnalyzer.h"
 
 #include <algorithm>
+#include <cmath>
 
 
 WaveformAnalyzer::WaveformAnalyzer()
     : image_(720, 576, QImage::Format_RGB32)
     , hits_(720 * 576)
-    , trace_(720 * 576)
+    , traceRed_(720 * 576)
+    , traceGreen_(720 * 576)
+    , traceBlue_(720 * 576)
+    , chroma_(720 * 576)
 {
     image_.fill(Qt::black);
 }
 
 void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
 {
+    std::fill(chroma_.begin(), chroma_.end(), 0.0f);
+
     if (persistence_ == 0)
     {
         image_.fill(Qt::black);
@@ -39,7 +45,9 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
 
     if (frame.width <= 0 ||
         frame.height <= 0 ||
-        frame.y.empty())
+        frame.y.empty() ||
+        frame.u.empty() ||
+        frame.v.empty())
     {
         return;
     }
@@ -53,20 +61,52 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
     if (selectedLine_ >= 0 &&
         selectedLine_ < frame.height)
     {
-        for (auto& value : trace_)
+        for (std::size_t i = 0; i < traceRed_.size(); ++i)
         {
-            value =
+            traceRed_[i] =
                 static_cast<std::uint16_t>(
-                    (static_cast<std::uint32_t>(value) * persistence_) >> 8);
+                    (static_cast<std::uint32_t>(traceRed_[i]) * persistence_) >> 8);
+
+            traceGreen_[i] =
+                static_cast<std::uint16_t>(
+                    (static_cast<std::uint32_t>(traceGreen_[i]) * persistence_) >> 8);
+
+            traceBlue_[i] =
+                static_cast<std::uint16_t>(
+                    (static_cast<std::uint32_t>(traceBlue_[i]) * persistence_) >> 8);
         }
+
         const std::size_t lineOffset =
             static_cast<std::size_t>(selectedLine_) *
             static_cast<std::size_t>(frame.width);
+
         int previousY = -1;
+
         for (int x = 0; x < frame.width; ++x)
         {
+            const std::size_t sampleIndex =
+                lineOffset + static_cast<std::size_t>(x);
+
             const std::uint16_t y16 =
-                frame.y[lineOffset + static_cast<std::size_t>(x)];
+                frame.y[sampleIndex];
+
+            const std::uint16_t u16 =
+                frame.u[sampleIndex];
+
+            const std::uint16_t v16 =
+                frame.v[sampleIndex];
+
+            const double chromaU =
+                static_cast<double>(u16) - 32768.0;
+
+            const double chromaV =
+                static_cast<double>(v16) - 32768.0;
+
+            chroma_[sampleIndex] =
+                static_cast<float>(
+                    std::sqrt(
+                        chromaU * chromaU +
+                        chromaV * chromaV));
 
             const double plotY =
                 static_cast<double>(displayHeight - 1) -
@@ -79,6 +119,7 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
                     static_cast<int>(plotY),
                     0,
                     displayHeight - 1);
+
             if (previousY >= 0)
             {
                 const int first =
@@ -92,8 +133,10 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
                 for (int i = 0; i < distance; ++i)
                 {
                     const double t =
-                        static_cast<double>(i) /
-                        static_cast<double>(distance - 1);
+                        distance > 1
+                        ? static_cast<double>(i) /
+                        static_cast<double>(distance - 1)
+                        : 0.0;
 
                     const double y =
                         previousY +
@@ -102,6 +145,7 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
                     plotBeam(x, y, 128);
                 }
             }
+
             const int y1 =
                 std::min(y0 + 1, displayHeight - 1);
 
@@ -118,7 +162,90 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
                 static_cast<std::size_t>(frame.width) +
                 static_cast<std::size_t>(x);
 
-            plotBeam(x, plotY); 
+            (void)fraction;
+            (void)index0;
+            (void)index1;
+
+            const double chromaAmplitude =
+                static_cast<double>(chroma_[sampleIndex]) / 32768.0;
+
+            const double spread =
+                chromaAmplitude *
+                static_cast<double>(displayHeight - 1) *
+                0.18;
+
+            /*
+             * Convert chroma direction to RGB, independent of luminance.
+             * The envelope height already represents chroma magnitude.
+             */
+            double redValue =
+                1.402 * chromaV;
+
+            double greenValue =
+                -0.344136 * chromaU -
+                0.714136 * chromaV;
+
+            double blueValue =
+                1.772 * chromaU;
+
+            /*
+             * Shift so the smallest channel becomes zero, then normalize
+             * the largest channel to 255. This produces maximum saturation
+             * and maximum display brightness.
+             */
+            const double minimum =
+                std::min({
+                    redValue,
+                    greenValue,
+                    blueValue
+                    });
+
+            redValue -= minimum;
+            greenValue -= minimum;
+            blueValue -= minimum;
+
+            const double maximum =
+                std::max({
+                    redValue,
+                    greenValue,
+                    blueValue
+                    });
+
+            int red = 0;
+            int green = 0;
+            int blue = 0;
+
+            if (maximum > 0.0)
+            {
+                red =
+                    static_cast<int>(
+                        std::clamp(redValue * 255.0 / maximum, 0.0, 255.0));
+
+                green =
+                    static_cast<int>(
+                        std::clamp(greenValue * 255.0 / maximum, 0.0, 255.0));
+
+                blue =
+                    static_cast<int>(
+                        std::clamp(blueValue * 255.0 / maximum, 0.0, 255.0));
+            }
+
+            // Sharp luminance trace.
+            plotBeam(x, plotY, 96, 0, 255, 0);
+
+            // Softer chroma outline.
+            const auto plotChromaGlow =
+                [&](double y)
+                {
+                    plotBeam(x, y, 255, red, green, blue);
+                    plotBeam(x, y - 1.0, 96, red, green, blue);
+                    plotBeam(x, y + 1.0, 96, red, green, blue);
+                    plotBeam(x, y - 2.0, 32, red, green, blue);
+                    plotBeam(x, y + 2.0, 32, red, green, blue);
+                };
+
+            plotChromaGlow(plotY - spread);
+            plotChromaGlow(plotY + spread);
 
             previousY = y0;
         }
@@ -130,22 +257,24 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
 
             for (int x = 0; x < frame.width; ++x)
             {
-                const std::uint16_t value =
-                    trace_[
-                        static_cast<std::size_t>(y) *
-                            static_cast<std::size_t>(frame.width) +
-                            static_cast<std::size_t>(x)];
+                const std::size_t index =
+                    static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(frame.width) +
+                    static_cast<std::size_t>(x);
+
+                const int red =
+                    std::min(255, static_cast<int>(traceRed_[index]));
 
                 const int green =
-                    std::min(
-                        255,
-                        static_cast<int>(value));
+                    std::min(255, static_cast<int>(traceGreen_[index]));
 
-                dst[x] = qRgb(0, green, 0);
+                const int blue =
+                    std::min(255, static_cast<int>(traceBlue_[index]));
+
+                dst[x] = qRgb(red, green, blue);
             }
         }
 
-       
         return;
     }
 
@@ -248,7 +377,10 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
 void WaveformAnalyzer::plotBeam(
     int x,
     double y,
-    int intensity)
+    int intensity,
+    int red,
+    int green,
+    int blue)
 {
     if (x < 0 || x >= image_.width())
         return;
@@ -261,14 +393,6 @@ void WaveformAnalyzer::plotBeam(
 
     const double fraction =
         y - static_cast<double>(y0);
-
-    const std::size_t index0 =
-        static_cast<std::size_t>(y0) *
-        static_cast<std::size_t>(image_.width()) +
-        static_cast<std::size_t>(x);
-
-    const std::size_t index1 =
-        index0 + static_cast<std::size_t>(image_.width());
 
     const auto add =
         [&](int yy, double weight)
@@ -285,14 +409,26 @@ void WaveformAnalyzer::plotBeam(
                 static_cast<std::uint16_t>(
                     weight * static_cast<double>(intensity));
 
-            trace_[index] =
-                static_cast<std::uint16_t>(
-                    std::min<std::uint32_t>(
-                        65535u,
-                        static_cast<std::uint32_t>(trace_[index]) +
-                        contribution));
+            const auto addChannel =
+                [&](std::vector<std::uint16_t>& buffer, int channel)
+                {
+                    const std::uint32_t scaledContribution =
+                        static_cast<std::uint32_t>(contribution) *
+                        static_cast<std::uint32_t>(channel) / 255u;
+
+                    buffer[index] =
+                        static_cast<std::uint16_t>(
+                            std::min<std::uint32_t>(
+                                65535u,
+                                static_cast<std::uint32_t>(buffer[index]) +
+                                scaledContribution));
+                };
+
+            addChannel(traceRed_, red);
+            addChannel(traceGreen_, green);
+            addChannel(traceBlue_, blue);
         };
-    
+
     add(y0 - 1, (1.0 - fraction) * 0.15);
     add(y0, (1.0 - fraction) * 0.85);
     add(y0 + 1, fraction * 0.85);

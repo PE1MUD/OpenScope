@@ -4,7 +4,7 @@
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
 {
-    setSelectedLine(288);
+    setSelectedLine(88);
 }
 
 Yuv444Frame* VideoEngine::tryAcquireWriteFrame()

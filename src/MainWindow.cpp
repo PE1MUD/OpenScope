@@ -33,7 +33,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* lineSelector = new QSpinBox(toolbar);
     lineSelector->setRange(-1, 575);
-    lineSelector->setValue(288);
+    lineSelector->setValue(88);
     lineSelector->setSpecialValueText("All");
 
     toolbar->addWidget(lineSelector);

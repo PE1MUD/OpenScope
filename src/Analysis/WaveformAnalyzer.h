@@ -20,11 +20,17 @@ public:
 private:
     QImage image_;
     std::vector<std::uint32_t> hits_;
-    std::vector<std::uint16_t> trace_;
+    std::vector<std::uint16_t> traceRed_;
+    std::vector<std::uint16_t> traceGreen_;
+    std::vector<std::uint16_t> traceBlue_;
+    std::vector<float> chroma_;
     int selectedLine_ = -1;
     int persistence_ = 0;
     void plotBeam(
         int x,
         double y,
-        int intensity = 255);
+        int intensity = 255,
+        int red = 0,
+        int green = 255,
+        int blue = 0);
 };
