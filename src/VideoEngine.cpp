@@ -54,12 +54,16 @@ void VideoEngine::setFrame(const Yuv444Frame& frame)
     timer.start();
 
     waveformRenderer_.analyze(frame);
+    vectorscopeAnalyzer_.analyze(frame);
 
     const qint64 analyzeMs =
         timer.restart();
 
     emit waveformChanged(
         waveformRenderer_.image());
+
+    emit vectorscopeChanged(
+        vectorscopeAnalyzer_.image());
 
     const qint64 emitMs =
         timer.restart();
@@ -75,6 +79,7 @@ void VideoEngine::setFrame(const Yuv444Frame& frame)
             << "Emit:" << emitMs << "ms"
             << "Total:" << analyzeMs + emitMs << "ms";
     }
+
     setFrame(
         displayConverter_.convert(
             frame,
@@ -90,6 +95,8 @@ void VideoEngine::cancelWriteFrame()
 void VideoEngine::setSelectedLine(int line)
 {
     waveformRenderer_.setSelectedLine(line);
+    vectorscopeAnalyzer_.setSelectedLine(line);
+
     displayConverter_.setHighlightedLine(line);
 }
 

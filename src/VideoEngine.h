@@ -9,6 +9,7 @@
 #include "video/FrameBufferPool.h"
 #include "rendering/WaveformRenderer.h"
 #include "processing/SignalReconstructor.h"
+#include "analysis/VectorscopeAnalyzer.h"
 
 class VideoEngine : public QObject
 {
@@ -42,6 +43,7 @@ public:
 signals:
     void frameChanged(const QImage& image);
     void waveformChanged(const QImage& image);
+    void vectorscopeChanged(const QImage& image);
 
 private:
     QImage currentFrame_;
@@ -50,6 +52,7 @@ private:
     std::atomic_bool framePending_{ false };
     WaveformRenderer waveformRenderer_;
     LineResampler lineResampler_;
+    VectorscopeAnalyzer vectorscopeAnalyzer_;
     int videoOutputWidth_ = 720;
     int videoOutputHeight_ = 576;
 };

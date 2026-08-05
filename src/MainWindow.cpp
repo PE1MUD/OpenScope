@@ -5,6 +5,7 @@
 #include "VideoWidget.h"
 #include "WaveformWidget.h"
 #include "DeckLinkProbe.h"
+#include "VectorscopeWidget.h"
 #include <QSpinBox>
 #include <QToolBar>
 #include <QSlider>
@@ -20,9 +21,13 @@ MainWindow::MainWindow(QWidget* parent)
 
     waveformWidget_ = new WaveformWidget;
 
+    vectorscopeWidget_ =
+        new VectorscopeWidget;
+
     workspace_ = new ScopeWorkspace(
         videoWidget_,
         waveformWidget_,
+        vectorscopeWidget_,
         this);
 
     setCentralWidget(workspace_);
@@ -50,7 +55,11 @@ MainWindow::MainWindow(QWidget* parent)
     persistenceSlider->setFixedWidth(140);
 
     toolbar->addWidget(persistenceSlider);
-
+    connect(
+        videoEngine_,
+        &VideoEngine::vectorscopeChanged,
+        vectorscopeWidget_,
+        &VectorscopeWidget::setImage);
     connect(
         persistenceSlider,
         &QSlider::valueChanged,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+class VectorscopeWidget;
 
 class VideoEngine;
 class VideoWidget;
@@ -23,4 +24,5 @@ private:
     VideoEngine* videoEngine_ = nullptr;
     WaveformWidget* waveformWidget_ = nullptr;
     ScopeWorkspace* workspace_ = nullptr;
+    VectorscopeWidget* vectorscopeWidget_ = nullptr;
 };

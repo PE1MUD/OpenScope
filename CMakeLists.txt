@@ -98,6 +98,8 @@ qt_add_executable(OpenScope
     src/ScopeViewport.cpp
     src/ScopeWorkspace.cpp
     src/ScopeWorkspace.h
+    src/VectorscopeWidget.h
+    src/VectorscopeWidget.cpp
     src/video/Yuv444Frame.h
     src/video/Uyvy422ToYuv444Converter.h
     src/video/Uyvy422ToYuv444Converter.cpp
@@ -109,6 +111,8 @@ qt_add_executable(OpenScope
     src/video/FrameBufferPool.h
     src/video/FrameBufferPool.cpp
     src/analysis/Analyzer.h
+    src/analysis/VectorscopeAnalyzer.h
+    src/analysis/VectorscopeAnalyzer.cpp
     src/rendering/WaveformRenderer.h
     src/rendering/WaveformRenderer.cpp
     src/processing/SignalReconstructor.cpp

@@ -13,8 +13,8 @@ public:
     explicit ScopeWorkspace(
         QWidget* videoWidget,
         QWidget* waveformWidget,
+        QWidget* vectorscopeWidget,
         QWidget* parent = nullptr);
-
 private:
     QGridLayout* layout_ = nullptr;
 

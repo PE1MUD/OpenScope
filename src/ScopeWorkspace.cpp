@@ -32,6 +32,7 @@ namespace
 ScopeWorkspace::ScopeWorkspace(
     QWidget* videoWidget,
     QWidget* waveformWidget,
+    QWidget* vectorscopeWidget,
     QWidget* parent)
     : QWidget(parent)
 {
@@ -48,7 +49,7 @@ ScopeWorkspace::ScopeWorkspace(
 
     vectorscopeViewport_ =
         new ScopeViewport(
-            createPlaceholder("Vectorscope"),
+            vectorscopeWidget,
             this);
 
     yuvViewport_ =

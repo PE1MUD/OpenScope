@@ -1,6 +1,7 @@
 #include "rendering/WaveformRenderer.h"
 #include "processing/SignalReconstructor.h"
-
+//#include <QElapsedTimer>
+#include <QDebug>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -96,7 +97,10 @@ void WaveformRenderer::setOutputSize(int width, int height)
 {
     width = std::max(width, 1);
     height = std::clamp(height, 1, 576);
-
+    qDebug()
+        << "Waveform size"
+        << width
+        << height;
     if (image_.width() == width && image_.height() == height)
     {
         return;
