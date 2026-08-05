@@ -67,3 +67,17 @@ void VideoEngine::setWaveformPersistence(int persistence)
 {
     waveformRenderer_.setPersistence(persistence);
 }
+
+void VideoEngine::setWaveformOutputSize(
+    int width,
+    int height)
+{
+    waveformRenderer_.setOutputSize(
+        width,
+        height);
+}
+
+double VideoEngine::traceBandwidthMHz() const
+{
+    return waveformRenderer_.traceBandwidthMHz();
+}

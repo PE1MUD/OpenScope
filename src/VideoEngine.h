@@ -24,7 +24,13 @@ public:
     void cancelWriteFrame();
 
     void setSelectedLine(int line);
+    
+    void setWaveformOutputSize(
+        int width,
+        int height);
 
+    double displayBandwidthMHz() const;
+    double traceBandwidthMHz() const;
     const QImage& currentFrame() const;
     void setWaveformPersistence(int persistence);
 

@@ -33,10 +33,10 @@ void LineResampler::resample(
         static_cast<float>(output.size()) /
         static_cast<float>(input.size());
 
-    // When reducing the number of samples, also reduce the cutoff
-    // to prevent aliasing.
-    const float effectiveCutoff =
-        cutoff_ * std::min(1.0f, scale);
+    // Preserve the full input bandwidth.
+    // When the display is too narrow, visible aliasing is preferred
+    // over silently filtering high-frequency content away.
+    const float effectiveCutoff = cutoff_;
 
     for (std::size_t outputIndex = 0;
         outputIndex < output.size();

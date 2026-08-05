@@ -57,16 +57,45 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::setWaveformPersistence);
     connect(
+        waveformWidget_,
+        &WaveformWidget::outputSizeChanged,
+        videoEngine_,
+        &VideoEngine::setWaveformOutputSize);
+    connect(
         videoEngine_,
         &VideoEngine::frameChanged,
         videoWidget_,
         &VideoWidget::setImage);
-
     connect(
         videoEngine_,
         &VideoEngine::waveformChanged,
         waveformWidget_,
         &WaveformWidget::setImage);
+    connect(
+        waveformWidget_,
+        &WaveformWidget::outputSizeChanged,
+        this,
+        [this](int w, int h)
+        {
+            Q_UNUSED(h);
+
+            videoEngine_->setWaveformOutputSize(
+                w,
+                waveformWidget_->height());
+
+            constexpr double captureSampleRateMHz = 13.5;
+            constexpr double captureSamplesPerLine = 720.0;
+            constexpr double pixelsPerCycleForAccurateTrace = 8.0;
+
+            const double waveformBandwidthMHz =
+                captureSampleRateMHz *
+                static_cast<double>(w) /
+                (captureSamplesPerLine *
+                    pixelsPerCycleForAccurateTrace);
+
+            waveformWidget_->setDisplayBandwidthMHz(
+                videoEngine_->traceBandwidthMHz());
+        });
 }
 
 VideoWidget* MainWindow::videoWidget() const

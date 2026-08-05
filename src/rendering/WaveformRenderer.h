@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <vector>
 
+// Minimum horizontal pixels per cycle for a visually pleasing waveform.
+static constexpr double kPixelsPerCycleForTraceBW = 6.0;
+
 class WaveformRenderer final : public Analyzer
 {
 public:
@@ -17,7 +20,8 @@ public:
 
     void setSelectedLine(int line);
     void setPersistence(int persistence);
-
+    void setOutputSize(int width, int height);
+    double traceBandwidthMHz() const;
     const QImage& image() const;
 
 private:

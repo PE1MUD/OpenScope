@@ -3,29 +3,57 @@
 #include <algorithm>
 #include <cmath>
 
-namespace
-{
-
-    constexpr int waveformWidth = 1440;
-    constexpr int waveformHeight = 576;
-
-}
-
 WaveformRenderer::WaveformRenderer()
-    : image_(
-        waveformWidth,
-        waveformHeight,
-        QImage::Format_RGB32)
-    , hits_(waveformWidth* waveformHeight)
-    , traceRed_(waveformWidth* waveformHeight)
-    , traceGreen_(waveformWidth* waveformHeight)
-    , traceBlue_(waveformWidth* waveformHeight)
-    , chroma_(waveformWidth)
-    , displayY_(waveformWidth)
-    , displayU_(waveformWidth)
-    , displayV_(waveformWidth)
+    : image_(720, 576, QImage::Format_RGB32)
+    , hits_(720 * 576)
+    , traceRed_(720 * 576)
+    , traceGreen_(720 * 576)
+    , traceBlue_(720 * 576)
+    , chroma_(720)
+    , displayY_(720)
+    , displayU_(720)
+    , displayV_(720)
 {
     image_.fill(Qt::black);
+}
+
+void WaveformRenderer::setOutputSize(
+    int width,
+    int height)
+{
+    width = std::max(width, 1);
+    height = std::max(height, 1);
+
+    if (image_.width() == width &&
+        image_.height() == height)
+    {
+        return;
+    }
+
+    image_ = QImage(
+        width,
+        height,
+        QImage::Format_RGB32);
+
+    image_.fill(Qt::black);
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height);
+
+    hits_.assign(pixelCount, 0u);
+
+    traceRed_.assign(pixelCount, 0u);
+    traceGreen_.assign(pixelCount, 0u);
+    traceBlue_.assign(pixelCount, 0u);
+
+    chroma_.assign(
+        static_cast<std::size_t>(width),
+        0.0f);
+
+    displayY_.resize(static_cast<std::size_t>(width));
+    displayU_.resize(static_cast<std::size_t>(width));
+    displayV_.resize(static_cast<std::size_t>(width));
 }
 
 void WaveformRenderer::analyze(const Yuv444Frame& frame)
@@ -495,4 +523,15 @@ const QImage& WaveformRenderer::image() const
 void WaveformRenderer::setPersistence(int persistence)
 {
     persistence_ = std::clamp(persistence, 0, 255);
+}
+double WaveformRenderer::traceBandwidthMHz() const
+{
+    constexpr double captureSampleRateMHz = 13.5;
+    constexpr double captureSamplesPerLine = 720.0;
+
+    return
+        captureSampleRateMHz *
+        static_cast<double>(image_.width()) /
+        (captureSamplesPerLine *
+            kPixelsPerCycleForTraceBW);
 }
