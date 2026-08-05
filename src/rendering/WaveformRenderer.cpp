@@ -65,64 +65,6 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
     QElapsedTimer timer;
     timer.start();
 
-    std::fill(chroma_.begin(), chroma_.end(), 0.0f);
-
-    if (selectedLine_ < 0)
-    {
-        if (persistence_ == 0)
-        {
-            image_.fill(Qt::black);
-        }
-        else
-        {
-            for (int y = 0; y < image_.height(); ++y)
-            {
-                auto* dst =
-                    reinterpret_cast<QRgb*>(image_.scanLine(y));
-
-                for (int x = 0; x < image_.width(); ++x)
-                {
-                    const int green =
-                        qGreen(dst[x]);
-
-                    const int faded =
-                        (green * persistence_) / 256;
-
-                    dst[x] = qRgb(0, faded, 0);
-                }
-            }
-        }
-        qDebug() << "SelectedLine < 0:" << timer.restart() << "ms";
-    }
-    if (persistence_ == 0)
-    {
-        std::fill(
-            trace_.begin(),
-            trace_.end(),
-            TracePixel{});
-    }
-    else
-    {
-        for (TracePixel& pixel : trace_)
-        {
-            pixel.red =
-                static_cast<std::uint16_t>(
-                    (static_cast<std::uint32_t>(pixel.red) *
-                        static_cast<std::uint32_t>(persistence_)) >> 8);
-
-            pixel.green =
-                static_cast<std::uint16_t>(
-                    (static_cast<std::uint32_t>(pixel.green) *
-                        static_cast<std::uint32_t>(persistence_)) >> 8);
-
-            pixel.blue =
-                static_cast<std::uint16_t>(
-                    (static_cast<std::uint32_t>(pixel.blue) *
-                        static_cast<std::uint32_t>(persistence_)) >> 8);
-        }
-    }
-    const qint64 persistenceMs = timer.restart();
-
     if (frame.width <= 0 ||
         frame.height <= 0 ||
         frame.y.empty() ||
@@ -132,15 +74,53 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
         return;
     }
 
+    const int displayWidth = image_.width();
     const int displayHeight = image_.height();
 
     /*
      * Single-line mode:
-     * draw one continuous trace directly, without using the hitmap.
+     * draw one continuous trace using the persistent trace buffer.
      */
     if (selectedLine_ >= 0 &&
         selectedLine_ < frame.height)
     {
+        /*
+         * Persistence belongs only to single-line mode.
+         * All-lines mode renders from hits_ and does not use trace_.
+         */
+        if (persistence_ == 0)
+        {
+            std::fill(
+                trace_.begin(),
+                trace_.end(),
+                TracePixel{});
+        }
+        else
+        {
+            const std::uint32_t persistence =
+                static_cast<std::uint32_t>(persistence_);
+
+            for (TracePixel& pixel : trace_)
+            {
+                pixel.red =
+                    static_cast<std::uint16_t>(
+                        (static_cast<std::uint32_t>(pixel.red) *
+                            persistence) >> 8);
+
+                pixel.green =
+                    static_cast<std::uint16_t>(
+                        (static_cast<std::uint32_t>(pixel.green) *
+                            persistence) >> 8);
+
+                pixel.blue =
+                    static_cast<std::uint16_t>(
+                        (static_cast<std::uint32_t>(pixel.blue) *
+                            persistence) >> 8);
+            }
+        }
+
+        const qint64 persistenceMs = timer.restart();
+
         const std::size_t lineOffset =
             static_cast<std::size_t>(selectedLine_) *
             static_cast<std::size_t>(frame.width);
@@ -233,12 +213,6 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
                     static_cast<double>(displayHeight - 1) /
                     65535.0);
 
-            const int y0 =
-                std::clamp(
-                    static_cast<int>(plotY),
-                    0,
-                    displayHeight - 1);
-
             /*
              * Join adjacent reconstructed points with a lightweight green
              * connector. Unlike the old implementation this writes each
@@ -272,13 +246,6 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
                         static_cast<std::size_t>(image_.width()) +
                         static_cast<std::size_t>(x);
 
-                    //traceGreen_[connectorIndex] =
-                    //    static_cast<std::uint16_t>(
-                    //        std::min<std::uint32_t>(
-                    //            65535u,
-                    //            static_cast<std::uint32_t>(
-                    //                traceGreen_[connectorIndex]) +
-                    //            connectorIntensity));
                     trace_[connectorIndex].green =
                         static_cast<std::uint16_t>(
                             std::min<std::uint32_t>(
@@ -453,7 +420,7 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
      */
     std::fill(hits_.begin(), hits_.end(), 0u);
 
-    const int displayWidth = image_.width();
+
 
     for (int line = 0; line < frame.height; ++line)
     {

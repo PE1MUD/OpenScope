@@ -10,7 +10,89 @@ LineResampler::LineResampler(
     : kernelRadius_(std::max(kernelRadius, 1))
     , cutoff_(std::clamp(cutoff, 0.01f, 1.0f))
 {}
+void LineResampler::rebuildCache(
+    std::size_t inputSize,
+    std::size_t outputSize) const
+{
+    cachedInputSize_ = inputSize;
+    cachedOutputSize_ = outputSize;
 
+    cache_.clear();
+    cache_.resize(outputSize);
+
+    const float scale =
+        static_cast<float>(outputSize) /
+        static_cast<float>(inputSize);
+
+    const float effectiveCutoff = cutoff_;
+
+    for (std::size_t outputIndex = 0;
+        outputIndex < outputSize;
+        ++outputIndex)
+    {
+        const float sourcePosition =
+            (static_cast<float>(outputIndex) + 0.5f) /
+            scale - 0.5f;
+
+        const int centre =
+            static_cast<int>(std::floor(sourcePosition));
+
+        const int firstSample =
+            centre - kernelRadius_ + 1;
+
+        auto& sample =
+            cache_[outputIndex];
+
+        sample.firstInputIndex =
+            firstSample;
+
+        sample.weights.resize(
+            static_cast<std::size_t>(
+                kernelRadius_ * 2));
+
+        for (int tap = 0;
+            tap < kernelRadius_ * 2;
+            ++tap)
+        {
+            const int sourceIndex =
+                firstSample + tap;
+
+            const float distance =
+                sourcePosition -
+                static_cast<float>(sourceIndex);
+
+            sample.weights[
+                static_cast<std::size_t>(tap)] =
+                kernel(
+                    distance,
+                    effectiveCutoff);
+        }
+        float weightSum = 0.0f;
+
+        for (int tap = 0;
+            tap < kernelRadius_ * 2;
+            ++tap)
+        {
+            const int sourceIndex =
+                firstSample + tap;
+
+            if (sourceIndex < 0 ||
+                sourceIndex >= static_cast<int>(inputSize))
+            {
+                continue;
+            }
+
+            weightSum +=
+                sample.weights[
+                    static_cast<std::size_t>(tap)];
+        }
+
+        sample.inverseWeightSum =
+            std::abs(weightSum) > 1.0e-8f
+            ? 1.0f / weightSum
+            : 0.0f;
+    }
+}
 void LineResampler::resample(
     std::span<const float> input,
     std::span<float> output) const
@@ -27,6 +109,23 @@ void LineResampler::resample(
     if (input.size() == 1) {
         std::fill(output.begin(), output.end(), input.front());
         return;
+    }
+    if (input.size() == 1)
+    {
+        std::fill(
+            output.begin(),
+            output.end(),
+            input.front());
+
+        return;
+    }
+
+    if (cachedInputSize_ != input.size() ||
+        cachedOutputSize_ != output.size())
+    {
+        rebuildCache(
+            input.size(),
+            output.size());
     }
 
     const float scale =
@@ -57,38 +156,34 @@ void LineResampler::resample(
             centre + kernelRadius_;
 
         float weightedSum = 0.0f;
-        float weightSum = 0.0f;
+
+        const auto& cached =
+            cache_[outputIndex];
 
         for (int sourceIndex = firstSample;
             sourceIndex <= lastSample;
-            ++sourceIndex) {
-
+            ++sourceIndex)
+        {
             if (sourceIndex < 0 ||
-                sourceIndex >= static_cast<int>(input.size())) {
+                sourceIndex >= static_cast<int>(input.size()))
+            {
                 continue;
             }
 
-            const float distance =
-                sourcePosition -
-                static_cast<float>(sourceIndex);
-
             const float weight =
-                kernel(distance, effectiveCutoff);
+                cached.weights[
+                    static_cast<std::size_t>(
+                        sourceIndex -
+                        cached.firstInputIndex)];
 
             weightedSum +=
                 input[static_cast<std::size_t>(sourceIndex)] *
                 weight;
-
-            weightSum += weight;
         }
 
-        if (std::abs(weightSum) > 1.0e-8f) {
-            output[outputIndex] =
-                weightedSum / weightSum;
-        }
-        else {
-            output[outputIndex] = 0.0f;
-        }
+        output[outputIndex] =
+            weightedSum *
+            cached.inverseWeightSum;
     }
 }
 
