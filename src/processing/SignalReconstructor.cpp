@@ -1,4 +1,4 @@
-#include "LineResampler.h"
+#include "SignalReconstructor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -93,6 +93,10 @@ void LineResampler::rebuildCache(
             : 0.0f;
     }
 }
+
+
+
+
 void LineResampler::resample(
     std::span<const float> input,
     std::span<float> output) const

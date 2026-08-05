@@ -8,6 +8,7 @@
 #include "video/Yuv444Frame.h"
 #include "video/FrameBufferPool.h"
 #include "rendering/WaveformRenderer.h"
+#include "processing/SignalReconstructor.h"
 
 class VideoEngine : public QObject
 {
@@ -44,4 +45,5 @@ private:
     FrameBufferPool frameBufferPool_{ 720, 576 };
     std::atomic_bool framePending_{ false };
     WaveformRenderer waveformRenderer_;
+    LineResampler lineResampler_;
 };

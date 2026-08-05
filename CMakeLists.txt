@@ -111,8 +111,8 @@ qt_add_executable(OpenScope
     src/analysis/Analyzer.h
     src/rendering/WaveformRenderer.h
     src/rendering/WaveformRenderer.cpp
-    src/processing/LineResampler.cpp
-    src/processing/LineResampler.h
+    src/processing/SignalReconstructor.cpp
+    src/processing/SignalReconstructor.h
 
     "${DECKLINK_GENERATED_IID}"
 )
