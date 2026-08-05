@@ -6,8 +6,8 @@ class LineResampler
 {
 public:
     explicit LineResampler(
-        int kernelRadius = 8,
-        float cutoff = 0.85f);
+        int kernelRadius = 24,
+        float cutoff = 0.98f);
 
     void resample(
         std::span<const float> input,

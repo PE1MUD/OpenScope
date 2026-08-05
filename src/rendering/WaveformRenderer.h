@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analysis/Analyzer.h"
+#include "processing/LineResampler.h"
 
 #include <QImage>
 
@@ -35,6 +36,16 @@ private:
     std::vector<std::uint16_t> traceGreen_;
     std::vector<std::uint16_t> traceBlue_;
     std::vector<float> chroma_;
+
+    LineResampler lineResampler_;
+
+    std::vector<float> sourceY_;
+    std::vector<float> sourceU_;
+    std::vector<float> sourceV_;
+
+    std::vector<float> displayY_;
+    std::vector<float> displayU_;
+    std::vector<float> displayV_;
 
     int selectedLine_ = -1;
     int persistence_ = 0;

@@ -2,11 +2,15 @@
 
 #include "VideoWidget.h"
 
-class WaveformWidget : public VideoWidget
+class QPaintEvent;
+
+class WaveformWidget final : public VideoWidget
 {
     Q_OBJECT
 
 public:
     explicit WaveformWidget(QWidget* parent = nullptr);
 
+protected:
+    void paintEvent(QPaintEvent* event) override;
 };

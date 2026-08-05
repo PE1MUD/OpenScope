@@ -3,14 +3,27 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+
+    constexpr int waveformWidth = 1440;
+    constexpr int waveformHeight = 576;
+
+}
 
 WaveformRenderer::WaveformRenderer()
-    : image_(720, 576, QImage::Format_RGB32)
-    , hits_(720 * 576)
-    , traceRed_(720 * 576)
-    , traceGreen_(720 * 576)
-    , traceBlue_(720 * 576)
-    , chroma_(720 * 576)
+    : image_(
+        waveformWidth,
+        waveformHeight,
+        QImage::Format_RGB32)
+    , hits_(waveformWidth* waveformHeight)
+    , traceRed_(waveformWidth* waveformHeight)
+    , traceGreen_(waveformWidth* waveformHeight)
+    , traceBlue_(waveformWidth* waveformHeight)
+    , chroma_(waveformWidth)
+    , displayY_(waveformWidth)
+    , displayU_(waveformWidth)
+    , displayV_(waveformWidth)
 {
     image_.fill(Qt::black);
 }
@@ -80,29 +93,61 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
             static_cast<std::size_t>(selectedLine_) *
             static_cast<std::size_t>(frame.width);
 
-        int previousY = -1;
+        sourceY_.resize(static_cast<std::size_t>(frame.width));
+        sourceU_.resize(static_cast<std::size_t>(frame.width));
+        sourceV_.resize(static_cast<std::size_t>(frame.width));
 
         for (int x = 0; x < frame.width; ++x)
         {
             const std::size_t sampleIndex =
                 lineOffset + static_cast<std::size_t>(x);
 
-            const std::uint16_t y16 =
-                frame.y[sampleIndex];
+            sourceY_[static_cast<std::size_t>(x)] =
+                static_cast<float>(frame.y[sampleIndex]);
 
-            const std::uint16_t u16 =
-                frame.u[sampleIndex];
+            sourceU_[static_cast<std::size_t>(x)] =
+                static_cast<float>(frame.u[sampleIndex]);
 
-            const std::uint16_t v16 =
-                frame.v[sampleIndex];
+            sourceV_[static_cast<std::size_t>(x)] =
+                static_cast<float>(frame.v[sampleIndex]);
+        }
+
+        lineResampler_.resample(sourceY_, displayY_);
+        lineResampler_.resample(sourceU_, displayU_);
+        lineResampler_.resample(sourceV_, displayV_);
+
+        int previousY = -1;
+
+        for (int x = 0; x < image_.width(); ++x)
+        {
+            const double yValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayY_[static_cast<std::size_t>(x)]),
+                    0.0,
+                    65535.0);
+
+            const double uValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayU_[static_cast<std::size_t>(x)]),
+                    0.0,
+                    65535.0);
+
+            const double vValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayV_[static_cast<std::size_t>(x)]),
+                    0.0,
+                    65535.0);
 
             const double chromaU =
-                static_cast<double>(u16) - 32768.0;
+                uValue - 32768.0;
 
             const double chromaV =
-                static_cast<double>(v16) - 32768.0;
+                vValue - 32768.0;
 
-            chroma_[sampleIndex] =
+            chroma_[static_cast<std::size_t>(x)] =
                 static_cast<float>(
                     std::sqrt(
                         chromaU * chromaU +
@@ -110,7 +155,7 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
 
             const double plotY =
                 static_cast<double>(displayHeight - 1) -
-                (static_cast<double>(y16) *
+                (yValue *
                     static_cast<double>(displayHeight - 1) /
                     65535.0);
 
@@ -128,7 +173,8 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
                 const int last =
                     std::max(previousY, y0);
 
-                const int distance = last - first + 1;
+                const int distance =
+                    last - first + 1;
 
                 for (int i = 0; i < distance; ++i)
                 {
@@ -167,7 +213,9 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
             (void)index1;
 
             const double chromaAmplitude =
-                static_cast<double>(chroma_[sampleIndex]) / 32768.0;
+                static_cast<double>(
+                    chroma_[static_cast<std::size_t>(x)]) /
+                32768.0;
 
             const double spread =
                 chromaAmplitude *
@@ -255,11 +303,11 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
             auto* dst =
                 reinterpret_cast<QRgb*>(image_.scanLine(y));
 
-            for (int x = 0; x < frame.width; ++x)
+            for (int x = 0; x < image_.width(); ++x)
             {
                 const std::size_t index =
                     static_cast<std::size_t>(y) *
-                    static_cast<std::size_t>(frame.width) +
+                    static_cast<std::size_t>(image_.width()) +
                     static_cast<std::size_t>(x);
 
                 const int red =
@@ -434,7 +482,6 @@ void WaveformRenderer::plotBeam(
     add(y0 + 1, fraction * 0.85);
     add(y0 + 2, fraction * 0.15);
 }
-
 void WaveformRenderer::setSelectedLine(int line)
 {
     selectedLine_ = line;

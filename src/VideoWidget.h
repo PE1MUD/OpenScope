@@ -13,6 +13,7 @@ public:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    const QImage& image() const;
 
 private:
     QImage image_;

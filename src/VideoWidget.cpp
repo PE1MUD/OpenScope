@@ -44,3 +44,8 @@ void VideoWidget::paintEvent(QPaintEvent* event)
         QRect(x, y, targetWidth, targetHeight),
         image_);
 }
+
+const QImage& VideoWidget::image() const
+{
+    return image_;
+}
