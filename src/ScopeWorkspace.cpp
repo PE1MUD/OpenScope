@@ -66,4 +66,75 @@ ScopeWorkspace::ScopeWorkspace(
 
     layout_->setColumnStretch(0, 1);
     layout_->setColumnStretch(1, 1);
+
+    connect(
+        videoViewport_,
+        &ScopeViewport::doubleClicked,
+        this,
+        &ScopeWorkspace::toggleMaximized);
+
+    connect(
+        waveformViewport_,
+        &ScopeViewport::doubleClicked,
+        this,
+        &ScopeWorkspace::toggleMaximized);
+
+    connect(
+        vectorscopeViewport_,
+        &ScopeViewport::doubleClicked,
+        this,
+        &ScopeWorkspace::toggleMaximized);
+
+    connect(
+        yuvViewport_,
+        &ScopeViewport::doubleClicked,
+        this,
+        &ScopeWorkspace::toggleMaximized);
+}
+
+void ScopeWorkspace::toggleMaximized(
+    ScopeViewport* viewport)
+{
+    if (maximizedViewport_ == viewport) {
+        showGrid();
+    }
+    else {
+        showMaximized(viewport);
+    }
+}
+
+void ScopeWorkspace::showMaximized(
+    ScopeViewport* viewport)
+{
+    videoViewport_->hide();
+    waveformViewport_->hide();
+    vectorscopeViewport_->hide();
+    yuvViewport_->hide();
+
+    layout_->removeWidget(viewport);
+
+    viewport->show();
+    layout_->addWidget(viewport, 0, 0, 2, 2);
+
+    maximizedViewport_ = viewport;
+}
+
+void ScopeWorkspace::showGrid()
+{
+    layout_->removeWidget(videoViewport_);
+    layout_->removeWidget(waveformViewport_);
+    layout_->removeWidget(vectorscopeViewport_);
+    layout_->removeWidget(yuvViewport_);
+
+    layout_->addWidget(videoViewport_, 0, 0);
+    layout_->addWidget(waveformViewport_, 0, 1);
+    layout_->addWidget(vectorscopeViewport_, 1, 0);
+    layout_->addWidget(yuvViewport_, 1, 1);
+
+    videoViewport_->show();
+    waveformViewport_->show();
+    vectorscopeViewport_->show();
+    yuvViewport_->show();
+
+    maximizedViewport_ = nullptr;
 }

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <array>
 
 // Minimum horizontal pixels per cycle for a visually pleasing waveform.
 static constexpr double kPixelsPerCycleForTraceBW = 6.0;
@@ -32,13 +33,21 @@ private:
         int red = 0,
         int green = 255,
         int blue = 0);
-
+    std::array<std::uint8_t, 65536> displayLut_{};
     QImage image_;
 
     std::vector<std::uint32_t> hits_;
-    std::vector<std::uint16_t> traceRed_;
-    std::vector<std::uint16_t> traceGreen_;
-    std::vector<std::uint16_t> traceBlue_;
+
+    struct TracePixel
+    {
+        std::uint16_t blue = 0;
+        std::uint16_t green = 0;
+        std::uint16_t red = 0;
+        std::uint16_t alpha = 0;
+    };
+
+    std::vector<TracePixel> trace_;
+
     std::vector<float> chroma_;
 
     LineResampler lineResampler_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "VideoWidget.h"
+#include <QElapsedTimer>
 
 class QPaintEvent;
 class QResizeEvent;
@@ -13,6 +14,7 @@ class WaveformWidget final : public VideoWidget
 public:
     explicit WaveformWidget(QWidget* parent = nullptr);
     void setDisplayBandwidthMHz(double bandwidthMHz);
+    void notifyFrameRendered();
 
 
 signals:
@@ -21,6 +23,9 @@ signals:
         int height); 
 private:
     double displayBandwidthMHz_ = 6.75;
+    QElapsedTimer fpsTimer_;
+    int frameCounter_ = 0;
+    double fps_ = 0.0;
 
 protected:
     void paintEvent(QPaintEvent* event) override;

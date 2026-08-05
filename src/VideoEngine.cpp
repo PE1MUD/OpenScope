@@ -1,5 +1,7 @@
 #include <QMetaObject>
 #include "VideoEngine.h"
+#include <QElapsedTimer>
+#include <QDebug>
 
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
@@ -47,8 +49,31 @@ void VideoEngine::setFrame(const QImage& frame)
 
 void VideoEngine::setFrame(const Yuv444Frame& frame)
 {
+    QElapsedTimer timer;
+    timer.start();
+
     waveformRenderer_.analyze(frame);
-    emit waveformChanged(waveformRenderer_.image());
+
+    const qint64 analyzeMs =
+        timer.restart();
+
+    emit waveformChanged(
+        waveformRenderer_.image());
+
+    const qint64 emitMs =
+        timer.restart();
+
+    static int timingFrameCounter = 0;
+
+    if (++timingFrameCounter >= 25)
+    {
+        timingFrameCounter = 0;
+
+        qDebug()
+            << "Waveform analyze:" << analyzeMs << "ms"
+            << "Emit:" << emitMs << "ms"
+            << "Total:" << analyzeMs + emitMs << "ms";
+    }
     setFrame(displayConverter_.convert(frame));
 }
 

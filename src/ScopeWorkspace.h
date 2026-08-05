@@ -22,4 +22,12 @@ private:
     ScopeViewport* waveformViewport_ = nullptr;
     ScopeViewport* vectorscopeViewport_ = nullptr;
     ScopeViewport* yuvViewport_ = nullptr;
+    void showGrid();
+    void showMaximized(ScopeViewport* viewport);
+
+    ScopeViewport* maximizedViewport_ = nullptr;
+
+private slots:
+    void toggleMaximized(ScopeViewport* viewport);
+
 };

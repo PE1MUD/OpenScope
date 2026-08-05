@@ -70,7 +70,11 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::waveformChanged,
         waveformWidget_,
-        &WaveformWidget::setImage);
+        [this](const QImage& image)
+        {
+            waveformWidget_->setImage(image);
+            waveformWidget_->notifyFrameRendered();
+        });
     connect(
         waveformWidget_,
         &WaveformWidget::outputSizeChanged,
