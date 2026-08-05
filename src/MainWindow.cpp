@@ -1,5 +1,5 @@
-#include <QSplitter>
 #include "MainWindow.h"
+#include "ScopeWorkspace.h"
 #include "TestPatternGenerator.h"
 #include "VideoEngine.h"
 #include "VideoWidget.h"
@@ -13,22 +13,20 @@
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , videoEngine_(new VideoEngine(this))
-    , videoWidget_(new VideoWidget(this))
+    , videoWidget_(new VideoWidget)
 {
     setWindowTitle("OpenScope");
-    resize(1800, 720);
+    resize(900, 720);
 
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    waveformWidget_ = new WaveformWidget;
 
-    splitter->addWidget(videoWidget_);
+    workspace_ = new ScopeWorkspace(
+        videoWidget_,
+        waveformWidget_,
+        this);
 
-    waveformWidget_ = new WaveformWidget(this);
-    splitter->addWidget(waveformWidget_);
+    setCentralWidget(workspace_);
 
-    splitter->setStretchFactor(0, 1);
-    splitter->setStretchFactor(1, 1);
-
-    setCentralWidget(splitter);
     auto* toolbar = addToolBar("Line selector");
 
     auto* lineSelector = new QSpinBox(toolbar);

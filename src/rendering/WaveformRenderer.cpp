@@ -1,10 +1,10 @@
-#include "WaveformAnalyzer.h"
+#include "rendering/WaveformRenderer.h"
 
 #include <algorithm>
 #include <cmath>
 
 
-WaveformAnalyzer::WaveformAnalyzer()
+WaveformRenderer::WaveformRenderer()
     : image_(720, 576, QImage::Format_RGB32)
     , hits_(720 * 576)
     , traceRed_(720 * 576)
@@ -15,7 +15,7 @@ WaveformAnalyzer::WaveformAnalyzer()
     image_.fill(Qt::black);
 }
 
-void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
+void WaveformRenderer::analyze(const Yuv444Frame& frame)
 {
     std::fill(chroma_.begin(), chroma_.end(), 0.0f);
 
@@ -374,7 +374,7 @@ void WaveformAnalyzer::analyze(const Yuv444Frame& frame)
     }
 }
 
-void WaveformAnalyzer::plotBeam(
+void WaveformRenderer::plotBeam(
     int x,
     double y,
     int intensity,
@@ -435,17 +435,17 @@ void WaveformAnalyzer::plotBeam(
     add(y0 + 2, fraction * 0.15);
 }
 
-void WaveformAnalyzer::setSelectedLine(int line)
+void WaveformRenderer::setSelectedLine(int line)
 {
     selectedLine_ = line;
 }
 
-const QImage& WaveformAnalyzer::image() const
+const QImage& WaveformRenderer::image() const
 {
     return image_;
 }
 
-void WaveformAnalyzer::setPersistence(int persistence)
+void WaveformRenderer::setPersistence(int persistence)
 {
     persistence_ = std::clamp(persistence, 0, 255);
 }

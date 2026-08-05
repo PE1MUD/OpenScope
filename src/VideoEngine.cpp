@@ -47,8 +47,8 @@ void VideoEngine::setFrame(const QImage& frame)
 
 void VideoEngine::setFrame(const Yuv444Frame& frame)
 {
-    waveformAnalyzer_.analyze(frame);
-    emit waveformChanged(waveformAnalyzer_.image());
+    waveformRenderer_.analyze(frame);
+    emit waveformChanged(waveformRenderer_.image());
     setFrame(displayConverter_.convert(frame));
 }
 
@@ -59,11 +59,11 @@ void VideoEngine::cancelWriteFrame()
 
 void VideoEngine::setSelectedLine(int line)
 {
-    waveformAnalyzer_.setSelectedLine(line);
+    waveformRenderer_.setSelectedLine(line);
     displayConverter_.setHighlightedLine(line);
 }
 
 void VideoEngine::setWaveformPersistence(int persistence)
 {
-    waveformAnalyzer_.setPersistence(persistence);
+    waveformRenderer_.setPersistence(persistence);
 }

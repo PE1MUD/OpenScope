@@ -94,19 +94,25 @@ qt_add_executable(OpenScope
     src/DeckLinkProbe.h
     src/DeckLinkInputCallback.cpp
     src/DeckLinkInputCallback.h
-    src/Video/Yuv444Frame.h
-    src/Video/Uyvy422ToYuv444Converter.h
-    src/Video/Uyvy422ToYuv444Converter.cpp
-    src/Video/V210ToYuv444Converter.h
-    src/Video/V210ToYuv444Converter.cpp
-    src/Video/VideoConverter.h
-    src/Video/DisplayConverter.h
-    src/Video/DisplayConverter.cpp
-    src/Video/FrameBufferPool.h
-    src/Video/FrameBufferPool.cpp
-    src/Analysis/Analyzer.h
-    src/Analysis/WaveformAnalyzer.h
-    src/Analysis/WaveformAnalyzer.cpp
+    src/ScopeViewport.h
+    src/ScopeViewport.cpp
+    src/ScopeWorkspace.cpp
+    src/ScopeWorkspace.h
+    src/video/Yuv444Frame.h
+    src/video/Uyvy422ToYuv444Converter.h
+    src/video/Uyvy422ToYuv444Converter.cpp
+    src/video/V210ToYuv444Converter.h
+    src/video/V210ToYuv444Converter.cpp
+    src/video/VideoConverter.h
+    src/video/DisplayConverter.h
+    src/video/DisplayConverter.cpp
+    src/video/FrameBufferPool.h
+    src/video/FrameBufferPool.cpp
+    src/analysis/Analyzer.h
+    src/rendering/WaveformRenderer.h
+    src/rendering/WaveformRenderer.cpp
+    src/processing/LineResampler.cpp
+    src/processing/LineResampler.h
 
     "${DECKLINK_GENERATED_IID}"
 )

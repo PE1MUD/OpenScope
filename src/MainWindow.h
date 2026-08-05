@@ -5,6 +5,7 @@
 class VideoEngine;
 class VideoWidget;
 class WaveformWidget;
+class ScopeWorkspace;
 
 class MainWindow : public QMainWindow
 {
@@ -21,4 +22,5 @@ private:
     VideoWidget* videoWidget_ = nullptr;
     VideoEngine* videoEngine_ = nullptr;
     WaveformWidget* waveformWidget_ = nullptr;
+    ScopeWorkspace* workspace_ = nullptr;
 };

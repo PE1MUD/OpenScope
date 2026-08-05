@@ -7,7 +7,7 @@
 #include "video/DisplayConverter.h"
 #include "video/Yuv444Frame.h"
 #include "video/FrameBufferPool.h"
-#include "analysis/WaveformAnalyzer.h"
+#include "rendering/WaveformRenderer.h"
 
 class VideoEngine : public QObject
 {
@@ -37,5 +37,5 @@ private:
     DisplayConverter displayConverter_;
     FrameBufferPool frameBufferPool_{ 720, 576 };
     std::atomic_bool framePending_{ false };
-    WaveformAnalyzer waveformAnalyzer_;
+    WaveformRenderer waveformRenderer_;
 };
