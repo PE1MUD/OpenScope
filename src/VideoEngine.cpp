@@ -2,6 +2,7 @@
 #include "VideoEngine.h"
 #include <QElapsedTimer>
 #include <QDebug>
+#include <algorithm>
 
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
@@ -74,7 +75,11 @@ void VideoEngine::setFrame(const Yuv444Frame& frame)
             << "Emit:" << emitMs << "ms"
             << "Total:" << analyzeMs + emitMs << "ms";
     }
-    setFrame(displayConverter_.convert(frame));
+    setFrame(
+        displayConverter_.convert(
+            frame,
+            videoOutputWidth_,
+            frame.height));
 }
 
 void VideoEngine::cancelWriteFrame()
@@ -105,4 +110,12 @@ void VideoEngine::setWaveformOutputSize(
 double VideoEngine::traceBandwidthMHz() const
 {
     return waveformRenderer_.traceBandwidthMHz();
+}
+
+void VideoEngine::setVideoOutputSize(
+    int width,
+    int height)
+{
+    videoOutputWidth_ = std::max(width, 1);
+    videoOutputHeight_ = std::max(height, 1);
 }

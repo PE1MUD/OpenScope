@@ -62,6 +62,11 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::setWaveformOutputSize);
     connect(
+        videoWidget_,
+        &VideoWidget::outputSizeChanged,
+        videoEngine_,
+        &VideoEngine::setVideoOutputSize);
+    connect(
         videoEngine_,
         &VideoEngine::frameChanged,
         videoWidget_,
@@ -100,6 +105,9 @@ MainWindow::MainWindow(QWidget* parent)
             waveformWidget_->setDisplayBandwidthMHz(
                 videoEngine_->traceBandwidthMHz());
         });
+    videoEngine_->setVideoOutputSize(
+        videoWidget_->width(),
+        videoWidget_->height());
 }
 
 VideoWidget* MainWindow::videoWidget() const

@@ -1,6 +1,7 @@
 #include <QPainter>
 #include <QColor>
 #include "VideoWidget.h"
+#include <QResizeEvent>
 
 VideoWidget::VideoWidget(QWidget* parent)
     : QWidget(parent)
@@ -48,4 +49,13 @@ void VideoWidget::paintEvent(QPaintEvent* event)
 const QImage& VideoWidget::image() const
 {
     return image_;
+}
+
+void VideoWidget::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+
+    emit outputSizeChanged(
+        event->size().width(),
+        event->size().height());
 }

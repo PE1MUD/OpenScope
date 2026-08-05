@@ -35,6 +35,10 @@ public:
     const QImage& currentFrame() const;
     void setWaveformPersistence(int persistence);
 
+    void setVideoOutputSize(
+        int width,
+        int height);
+
 signals:
     void frameChanged(const QImage& image);
     void waveformChanged(const QImage& image);
@@ -46,4 +50,6 @@ private:
     std::atomic_bool framePending_{ false };
     WaveformRenderer waveformRenderer_;
     LineResampler lineResampler_;
+    int videoOutputWidth_ = 720;
+    int videoOutputHeight_ = 576;
 };
