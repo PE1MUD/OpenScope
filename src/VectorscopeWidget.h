@@ -1,7 +1,10 @@
 #pragma once
-
+#include "rendering/VectorscopeGraticule.h"
 #include <QImage>
 #include <QWidget>
+
+
+
 
 class VectorscopeWidget final : public QWidget
 {
@@ -18,4 +21,5 @@ protected:
 
 private:
     QImage image_;
+    VectorscopeGraticule graticule_;
 };

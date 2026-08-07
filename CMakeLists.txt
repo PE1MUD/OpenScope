@@ -115,6 +115,8 @@ qt_add_executable(OpenScope
     src/analysis/VectorscopeAnalyzer.cpp
     src/rendering/WaveformRenderer.h
     src/rendering/WaveformRenderer.cpp
+    src/rendering/VectorscopeGraticule.cpp
+    src/rendering/VectorscopeGraticule.h
     src/processing/SignalReconstructor.cpp
     src/processing/SignalReconstructor.h
 
