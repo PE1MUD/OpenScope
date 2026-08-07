@@ -30,7 +30,9 @@ public:
     void setWaveformOutputSize(
         int width,
         int height);
-
+    void setVectorscopeOutputSize(
+        int width,
+        int height);
     double displayBandwidthMHz() const;
     double traceBandwidthMHz() const;
     const QImage& currentFrame() const;

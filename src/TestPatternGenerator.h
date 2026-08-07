@@ -6,4 +6,5 @@ class TestPatternGenerator
 {
 public:
     static QImage generate(int width, int height);
+
 };

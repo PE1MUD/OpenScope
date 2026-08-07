@@ -2,8 +2,8 @@
 #include "rendering/VectorscopeGraticule.h"
 #include <QImage>
 #include <QWidget>
-
-
+#include <QResizeEvent>
+#include <QSize>
 
 
 class VectorscopeWidget final : public QWidget
@@ -16,8 +16,14 @@ public:
 public slots:
     void setImage(const QImage& image);
 
+signals:
+    void renderSizeChanged(
+        int width,
+        int height);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     QImage image_;

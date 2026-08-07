@@ -7,7 +7,7 @@
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
 {
-    setSelectedLine(88);
+    setSelectedLine(320);
 }
 
 Yuv444Frame* VideoEngine::tryAcquireWriteFrame()
@@ -113,7 +113,14 @@ void VideoEngine::setWaveformOutputSize(
         width,
         height);
 }
-
+void VideoEngine::setVectorscopeOutputSize(
+    int width,
+    int height)
+{
+    vectorscopeAnalyzer_.setOutputSize(
+        width,
+        height);
+}
 double VideoEngine::traceBandwidthMHz() const
 {
     return waveformRenderer_.traceBandwidthMHz();

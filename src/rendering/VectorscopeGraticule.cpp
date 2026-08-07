@@ -10,12 +10,220 @@
 
 namespace
 {
+
     struct Target
     {
         ColorBar color;
         double cb;
         double cr;
     };
+    struct PolarTarget
+    {
+        double radius;
+        double angleDegrees;
+    };
+
+    struct TargetTolerance
+    {
+        double hueDegrees;
+        double amplitudePercent;
+    };
+
+    constexpr TargetTolerance kSmallTolerance
+    {
+        3.0,
+        5.0
+    };
+
+    constexpr TargetTolerance kLargeTolerance
+    {
+        10.0,
+        20.0
+    };
+    inline PolarTarget toPolar(
+        const Target& target)
+    {
+        const double radius =
+            std::hypot(
+                target.cb,
+                target.cr);
+
+        const double angleDegrees =
+            std::atan2(
+                target.cr,
+                target.cb) *
+            180.0 /
+            std::numbers::pi;
+
+        return
+        {
+            radius,
+            angleDegrees
+        };
+    }
+    QPointF polarPoint(
+        const QPointF& center,
+        double radius,
+        double angleDegrees)
+    {
+        const double angleRadians =
+            angleDegrees *
+            std::numbers::pi /
+            180.0;
+
+        return QPointF(
+            center.x() +
+            std::cos(angleRadians) * radius,
+            center.y() -
+            std::sin(angleRadians) * radius);
+    }
+    void drawToleranceTarget(
+        QPainter& painter,
+        const QPointF& center,
+        double scopeRadius,
+        const Target& target,
+        const TargetTolerance& tolerance)
+    {
+        constexpr double kCbCrFullScale = 0.5;
+
+        const PolarTarget polar =
+            toPolar(target);
+
+        const double nominalRadius =
+            (polar.radius / kCbCrFullScale) *
+            scopeRadius;
+
+        const double amplitudeFraction =
+            tolerance.amplitudePercent /
+            100.0;
+
+        const double radiusMin =
+            nominalRadius *
+            (1.0 - amplitudeFraction);
+
+        const double radiusMax =
+            nominalRadius *
+            (1.0 + amplitudeFraction);
+
+        const double angleMinDegrees =
+            polar.angleDegrees -
+            tolerance.hueDegrees;
+
+        const double angleMaxDegrees =
+            polar.angleDegrees +
+            tolerance.hueDegrees;
+
+        const QPointF p1 =
+            polarPoint(
+                center,
+                radiusMin,
+                angleMinDegrees);
+
+        const QPointF p2 =
+            polarPoint(
+                center,
+                radiusMax,
+                angleMinDegrees);
+
+        const QPointF p3 =
+            polarPoint(
+                center,
+                radiusMax,
+                angleMaxDegrees);
+
+        const QPointF p4 =
+            polarPoint(
+                center,
+                radiusMin,
+                angleMaxDegrees);
+
+        //painter.drawLine(
+        //    p1,
+        //    p2);
+
+        //painter.drawLine(
+        //    p2,
+        //    p3);
+
+        //painter.drawLine(
+        //    p3,
+        //    p4);
+
+        //painter.drawLine(
+        //    p4,
+        //    p1);
+        const bool largeTolerance =
+            tolerance.amplitudePercent > 10.0;
+
+        if (!largeTolerance)
+        {
+            // Small tolerance: closed box
+
+            painter.drawLine(
+                p1,
+                p2);
+
+            painter.drawLine(
+                p2,
+                p3);
+
+            painter.drawLine(
+                p3,
+                p4);
+
+            painter.drawLine(
+                p4,
+                p1);
+        }
+        else
+        {
+            // Large tolerance: outer corner marker
+
+            constexpr double kCornerFraction = 0.15;
+
+            auto drawCorner =
+                [&](const QPointF& corner,
+                    const QPointF& a,
+                    const QPointF& b)
+                {
+                    painter.drawLine(
+                        corner,
+                        corner +
+                        (a - corner) *
+                        kCornerFraction);
+
+                    painter.drawLine(
+                        corner,
+                        corner +
+                        (b - corner) *
+                        kCornerFraction);
+                };
+
+
+            // Pick the outer corner of the tolerance box.
+
+            const double direction =
+                polar.radius >= 0.0
+                ? 1.0
+                : -1.0;
+
+
+            if (polar.angleDegrees >= 0.0)
+            {
+                drawCorner(
+                    p3,
+                    p2,
+                    p4);
+            }
+            else
+            {
+                drawCorner(
+                    p1,
+                    p2,
+                    p4);
+            }
+        }
+    }
     constexpr Target makeTarget(
         ColorBar color,
         ColorBarLevel level,
@@ -100,7 +308,6 @@ namespace
             ColorBarLevel::Percent100,
             VideoColorStandard::Rec601_625)
     };
-    constexpr double kTargetBoxSize = 18.0;
 
     void drawTargets(
         QPainter& painter,
@@ -130,30 +337,20 @@ namespace
                 (target.cb / kCbCrFullScale) * radius,
                 center.y() -
                 (target.cr / kCbCrFullScale) * radius);
-
-            const double angleDegrees =
-                std::atan2(
-                    -target.cr,
-                    target.cb) *
-                180.0 /
-                std::numbers::pi;
-
-            painter.save();
-
-            painter.translate(position);
-            painter.rotate(
-                angleDegrees + 90.0);
-
-            const QRectF box(
-                -kTargetBoxSize * 0.5,
-                -kTargetBoxSize * 0.5,
-                kTargetBoxSize,
-                kTargetBoxSize);
-
-            painter.drawRect(box);
-
-            painter.restore();
-
+            drawToleranceTarget(
+                painter,
+                center,
+                radius,
+                target,
+                kLargeTolerance);
+           
+            drawToleranceTarget(
+                painter,
+                center,
+                radius,
+                target,
+                kSmallTolerance);
+            
             painter.drawText(
                 QPointF(
                     position.x() + 12.0,

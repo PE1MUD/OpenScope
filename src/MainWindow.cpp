@@ -6,6 +6,7 @@
 #include "WaveformWidget.h"
 #include "DeckLinkProbe.h"
 #include "VectorscopeWidget.h"
+#include <algorithm>
 #include <QSpinBox>
 #include <QToolBar>
 #include <QSlider>
@@ -36,7 +37,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* lineSelector = new QSpinBox(toolbar);
     lineSelector->setRange(-1, 575);
-    lineSelector->setValue(88);
+    lineSelector->setValue(320);
     lineSelector->setSpecialValueText("All");
 
     toolbar->addWidget(lineSelector);
@@ -60,6 +61,19 @@ MainWindow::MainWindow(QWidget* parent)
         &VideoEngine::vectorscopeChanged,
         vectorscopeWidget_,
         &VectorscopeWidget::setImage);
+    connect(
+        vectorscopeWidget_,
+        &VectorscopeWidget::renderSizeChanged,
+        videoEngine_,
+        &VideoEngine::setVectorscopeOutputSize);
+    const int vectorscopeSize =
+        std::min(
+            vectorscopeWidget_->width(),
+            vectorscopeWidget_->height());
+
+    videoEngine_->setVectorscopeOutputSize(
+        vectorscopeSize,
+        vectorscopeSize);
     connect(
         persistenceSlider,
         &QSlider::valueChanged,

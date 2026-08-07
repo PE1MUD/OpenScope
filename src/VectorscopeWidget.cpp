@@ -15,7 +15,20 @@ void VectorscopeWidget::setImage(const QImage& image)
     image_ = image;
     update();
 }
+void VectorscopeWidget::resizeEvent(
+    QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
 
+    const int scopeSize =
+        std::min(
+            width(),
+            height());
+
+    emit renderSizeChanged(
+        scopeSize,
+        scopeSize);
+}
 void VectorscopeWidget::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
