@@ -119,6 +119,10 @@ qt_add_executable(OpenScope
     src/rendering/VectorscopeGraticule.h
     src/processing/SignalReconstructor.cpp
     src/processing/SignalReconstructor.h
+    src/standards/VideoStandard.h
+    src/standards/ColorBars.h
+    src/standards/ColorMatrices.h
+    src/resources/Colorimetry.h
 
     "${DECKLINK_GENERATED_IID}"
 )
