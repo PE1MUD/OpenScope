@@ -20,8 +20,8 @@ private:
     struct CachedOutputSample
     {
         int firstInputIndex = 0;
-        std::vector<float> weights;
         float inverseWeightSum = 0.0f;
+        std::size_t weightOffset = 0;
     };
     int kernelRadius_ = 8;
     void rebuildCache(
@@ -35,4 +35,5 @@ private:
     mutable std::size_t cachedOutputSize_ = 0;
 
     mutable std::vector<CachedOutputSample> cache_;
+    mutable std::vector<float> cachedWeights_;
 };

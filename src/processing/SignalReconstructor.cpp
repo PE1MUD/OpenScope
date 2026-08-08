@@ -1,5 +1,4 @@
 #include "SignalReconstructor.h"
-
 #include <algorithm>
 #include <cmath>
 #include <numbers>
@@ -19,6 +18,14 @@ void LineResampler::rebuildCache(
 
     cache_.clear();
     cache_.resize(outputSize);
+    
+    const std::size_t tapCount =
+        static_cast<std::size_t>(
+            kernelRadius_ * 2);
+
+    cachedWeights_.clear();
+    cachedWeights_.resize(
+        outputSize * tapCount);
 
     const float scale =
         static_cast<float>(outputSize) /
@@ -46,9 +53,8 @@ void LineResampler::rebuildCache(
         sample.firstInputIndex =
             firstSample;
 
-        sample.weights.resize(
-            static_cast<std::size_t>(
-                kernelRadius_ * 2));
+        sample.weightOffset =
+            outputIndex * tapCount;
 
         for (int tap = 0;
             tap < kernelRadius_ * 2;
@@ -61,8 +67,9 @@ void LineResampler::rebuildCache(
                 sourcePosition -
                 static_cast<float>(sourceIndex);
 
-            sample.weights[
-                static_cast<std::size_t>(tap)] =
+            cachedWeights_[
+                sample.weightOffset +
+                    static_cast<std::size_t>(tap)] =
                 kernel(
                     distance,
                     effectiveCutoff);
@@ -83,8 +90,9 @@ void LineResampler::rebuildCache(
             }
 
             weightSum +=
-                sample.weights[
-                    static_cast<std::size_t>(tap)];
+                cachedWeights_[
+                    sample.weightOffset +
+                        static_cast<std::size_t>(tap)];
         }
 
         sample.inverseWeightSum =
@@ -132,42 +140,24 @@ void LineResampler::resample(
             output.size());
     }
 
-    const float scale =
-        static_cast<float>(output.size()) /
-        static_cast<float>(input.size());
-
-    // Preserve the full input bandwidth.
-    // When the display is too narrow, visible aliasing is preferred
-    // over silently filtering high-frequency content away.
-    const float effectiveCutoff = cutoff_;
-
     for (std::size_t outputIndex = 0;
         outputIndex < output.size();
-        ++outputIndex) {
-
-        // Map sample centres instead of sample edges.
-        const float sourcePosition =
-            (static_cast<float>(outputIndex) + 0.5f) / scale
-            - 0.5f;
-
-        const int centre =
-            static_cast<int>(std::floor(sourcePosition));
-
-        const int firstSample =
-            centre - kernelRadius_ + 1;
-
-        const int lastSample =
-            centre + kernelRadius_;
-
+        ++outputIndex)
+    {
         float weightedSum = 0.0f;
 
         const auto& cached =
             cache_[outputIndex];
 
+        const int firstSample =
+            cached.firstInputIndex;
+
+        const int lastSample =
+            firstSample + kernelRadius_ * 2 - 1;
+
         for (int sourceIndex = firstSample;
             sourceIndex <= lastSample;
-            ++sourceIndex)
-        {
+            ++sourceIndex) {
             if (sourceIndex < 0 ||
                 sourceIndex >= static_cast<int>(input.size()))
             {
@@ -175,10 +165,11 @@ void LineResampler::resample(
             }
 
             const float weight =
-                cached.weights[
-                    static_cast<std::size_t>(
-                        sourceIndex -
-                        cached.firstInputIndex)];
+                cachedWeights_[
+                    cached.weightOffset +
+                        static_cast<std::size_t>(
+                            sourceIndex -
+                            cached.firstInputIndex)];
 
             weightedSum +=
                 input[static_cast<std::size_t>(sourceIndex)] *

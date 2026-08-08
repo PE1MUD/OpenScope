@@ -69,6 +69,8 @@ bool Uyvy422ToYuv444Converter::convert(
             // Odd pixel: halfway between adjacent chroma samples.
             dstU[x + 1] = interpolate(u0, u2);
             dstV[x + 1] = interpolate(v0, v2);
+            dstU[x + 1] = expand8To16(u0);
+            dstV[x + 1] = expand8To16(v0);
 
             src += 4;
         }

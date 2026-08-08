@@ -1,9 +1,11 @@
 #include "VectorscopeAnalyzer.h"
 #include <algorithm>
+#include <cmath>
 #include <QElapsedTimer>
 #include <QDebug>
 #include <QPainter>
 #include <QPointF>
+
 
 VectorscopeAnalyzer::VectorscopeAnalyzer()
     : image_(1, 1, QImage::Format_RGB32)
@@ -36,27 +38,10 @@ void VectorscopeAnalyzer::setOutputSize(
 }
 void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 {
+    QElapsedTimer timer;
+    timer.start();
+
     image_.fill(Qt::black);
-
-    static int counter = 0;
-
-    if (++counter == 25)
-    {
-        counter = 0;
-
-        qDebug()
-            << "Vectorscope image:"
-            << image_.width()
-            << "x"
-            << image_.height();
-    }
-    if (frame.width <= 0 ||
-        frame.height <= 0 ||
-        frame.u.empty() ||
-        frame.v.empty())
-    {
-        return;
-    }
 
     const double centerX =
         (image_.width() - 1) * 0.5;
@@ -84,6 +69,12 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
             firstSample +
             static_cast<std::size_t>(frame.width);
     }
+
+    const qint64 setupUs =
+        timer.nsecsElapsed() / 1000;
+
+    timer.restart();
+
     double sumU = 0.0;
     double sumV = 0.0;
     std::size_t sampleCount = 0;
@@ -91,6 +82,7 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
     std::uint16_t maxU = 0;
     std::uint16_t minV = 65535;
     std::uint16_t maxV = 0;
+
     constexpr double chromaCenter =
         32768.0;
 
@@ -111,49 +103,28 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
         };
 
     auto plotPoint =
-        [&](double x, double y)
+        [&](double x, double y, double intensity)
         {
-            const int x0 =
-                static_cast<int>(std::floor(x));
+            constexpr double radius = 1.6;
+            constexpr double sigma = 0.65;
 
-            const int y0 =
-                static_cast<int>(std::floor(y));
+            const int minX =
+                static_cast<int>(std::floor(x - radius));
 
-            const double fx =
-                x - static_cast<double>(x0);
+            const int maxX =
+                static_cast<int>(std::ceil(x + radius));
 
-            const double fy =
-                y - static_cast<double>(y0);
+            const int minY =
+                static_cast<int>(std::floor(y - radius));
 
-            const double weights[4] =
+            const int maxY =
+                static_cast<int>(std::ceil(y + radius));
+
+            for (int iy = minY;
+                iy <= maxY;
+                ++iy)
             {
-                (1.0 - fx) * (1.0 - fy),
-                fx * (1.0 - fy),
-                (1.0 - fx) * fy,
-                fx * fy
-            };
-
-            const int dx[4] =
-            {
-                0, 1, 0, 1
-            };
-
-            const int dy[4] =
-            {
-                0, 0, 1, 1
-            };
-
-            for (int i = 0; i < 4; ++i)
-            {
-                const int ix =
-                    x0 + dx[i];
-
-                const int iy =
-                    y0 + dy[i];
-
-                if (ix < 0 ||
-                    ix >= image_.width() ||
-                    iy < 0 ||
+                if (iy < 0 ||
                     iy >= image_.height())
                 {
                     continue;
@@ -163,18 +134,55 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                     reinterpret_cast<QRgb*>(
                         image_.scanLine(iy));
 
-                const int green =
-                    static_cast<int>(
-                        200.0 * weights[i]);
+                for (int ix = minX;
+                    ix <= maxX;
+                    ++ix)
+                {
+                    if (ix < 0 ||
+                        ix >= image_.width())
+                    {
+                        continue;
+                    }
 
-                const int oldGreen =
-                    qGreen(line[ix]);
+                    const double dx =
+                        (static_cast<double>(ix) + 0.5) - x;
 
-                line[ix] =
-                    qRgb(
-                        0,
-                        std::max(oldGreen, green),
-                        0);
+                    const double dy =
+                        (static_cast<double>(iy) + 0.5) - y;
+
+                    const double distanceSquared =
+                        dx * dx +
+                        dy * dy;
+
+                    if (distanceSquared >
+                        radius * radius)
+                    {
+                        continue;
+                    }
+
+                    const double weight =
+                        std::exp(
+                            -distanceSquared /
+                            (2.0 * sigma * sigma));
+
+                    const int green =
+                        static_cast<int>(
+                            intensity * weight);
+
+                    const int oldGreen =
+                        qGreen(line[ix]);
+
+                    const int newGreen =
+                        std::min(
+                            255,
+                            oldGreen + green);
+
+                    line[ix] =
+                        qRgb(
+                            0,
+                            newGreen,
+                            0);
+                }
             }
         };
 
@@ -191,6 +199,14 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
         minV = std::min(minV, frame.v[i]);
         maxV = std::max(maxV, frame.v[i]);
     }
+
+    const qint64 statisticsUs =
+        timer.nsecsElapsed() / 1000;
+
+    timer.restart();
+
+    std::size_t totalSubdivisions = 0;
+    std::size_t plottedPoints = 0;
 
     if (lastSample - firstSample >= 4)
     {
@@ -210,7 +226,55 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
             const QPointF p3 =
                 samplePoint(i + 2);
 
-            constexpr int subdivisions = 32;
+            const double dx =
+                p2.x() - p1.x();
+
+            const double dy =
+                p2.y() - p1.y();
+
+            const double distance =
+                std::hypot(dx, dy);
+
+            constexpr double targetStepPixels =
+                0.5;
+
+            const int subdivisions =
+                std::clamp(
+                    static_cast<int>(
+                        std::ceil(
+                            distance /
+                            targetStepPixels)),
+                    4,
+                    256);
+
+            totalSubdivisions +=
+                static_cast<std::size_t>(
+                    subdivisions);
+
+            constexpr double referenceSubdivisions =
+                32.0;
+
+            constexpr double referenceEnergy =
+                80.0;
+
+            constexpr double referenceSize =
+                576.0;
+
+            const double renderScale =
+                static_cast<double>(
+                    std::min(
+                        image_.width(),
+                        image_.height())) /
+                referenceSize;
+
+            const double beamEnergy =
+                referenceEnergy *
+                referenceSubdivisions *
+                std::pow(
+                    renderScale,
+                    1.2) /
+                static_cast<double>(
+                    subdivisions);
 
             for (int step = 0;
                 step < subdivisions;
@@ -218,7 +282,8 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
             {
                 const double t =
                     static_cast<double>(step) /
-                    static_cast<double>(subdivisions);
+                    static_cast<double>(
+                        subdivisions);
 
                 const double t2 = t * t;
                 const double t3 = t2 * t;
@@ -252,12 +317,39 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                             3.0 * p2.y() +
                             p3.y()) * t3
                         );
-                plotPoint(x, y);
+
+                plotPoint(
+                    x,
+                    y,
+                    beamEnergy);
+
+                ++plottedPoints;
             }
         }
     }
-}
 
+    const qint64 renderUs =
+        timer.nsecsElapsed() / 1000;
+
+    static int debugCounter = 0;
+
+    if (++debugCounter >= 25)
+    {
+        debugCounter = 0;
+
+        qDebug()
+            << "Vectorscope:"
+            << "mode =" << (selectedLine_ < 0 ? "ALL" : "LINE")
+            << "samples =" << (lastSample - firstSample)
+            << "subdivisions =" << totalSubdivisions
+            << "points =" << plottedPoints
+            << "setup =" << setupUs / 1000.0 << "ms"
+            << "stats =" << statisticsUs / 1000.0 << "ms"
+            << "render =" << renderUs / 1000.0 << "ms"
+            << "size =" << image_.width()
+            << "x" << image_.height();
+    }
+}
 const QImage& VectorscopeAnalyzer::image() const
 {
     return image_;

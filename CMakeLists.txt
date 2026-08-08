@@ -110,6 +110,7 @@ qt_add_executable(OpenScope
     src/video/DisplayConverter.cpp
     src/video/FrameBufferPool.h
     src/video/FrameBufferPool.cpp
+    src/video/ReconstructedLumaFrame.h
     src/analysis/Analyzer.h
     src/analysis/VectorscopeAnalyzer.h
     src/analysis/VectorscopeAnalyzer.cpp

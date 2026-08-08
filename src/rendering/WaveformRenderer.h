@@ -1,8 +1,8 @@
 #pragma once
 
 #include "analysis/Analyzer.h"
+#include "video/ReconstructedLumaFrame.h"
 #include <QImage>
-#include "processing/SignalReconstructor.h"
 
 #include <array>
 #include <cstdint>
@@ -18,6 +18,9 @@ public:
     WaveformRenderer();
 
     void analyze(const Yuv444Frame& frame) override;
+    void analyze(
+        const Yuv444Frame& frame,
+        const ReconstructedLumaFrame& reconstructedLuma);
 
     void setSelectedLine(int line);
     void setPersistence(int persistence);
@@ -33,14 +36,17 @@ private:
         std::uint16_t green = 0;
         std::uint16_t blue = 0;
     };
-    LineResampler lineResampler_;
+
     void clearOrFadeTrace();
-    void renderSingleLine(const Yuv444Frame& frame);
+    void renderSingleLine(
+        const Yuv444Frame& frame,
+        const ReconstructedLumaFrame& reconstructedLuma);
     void renderAllLines(const Yuv444Frame& frame);
     void composeTraceImage();
+    void plotLuminanceTrace();
 
     void plotBeam(
-        int x,
+        double x,
         double y,
         int intensity,
         int red,

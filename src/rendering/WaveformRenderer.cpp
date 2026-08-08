@@ -11,15 +11,16 @@
 
 namespace
 {
-constexpr double kMaximumSampleValue = 65535.0;
-constexpr double kNeutralChroma = 32768.0;
-constexpr double kChromaNoiseThreshold = 0.03 * kNeutralChroma;
-constexpr double kChromaEnvelopeScale = 0.18;
+    constexpr double kMaximumSampleValue = 65535.0;
+    constexpr double kNeutralChroma = 32768.0;
+    constexpr double kChromaNoiseThreshold = 0.03 * kNeutralChroma;
+    constexpr double kChromaEnvelopeScale = 0.18;
 
-constexpr int kLuminanceBeamIntensity = 768;
-constexpr int kChromaBeamIntensity = 768;
-constexpr std::uint32_t kConnectorIntensity = 160u;
+    constexpr int kLuminanceBeamIntensity = 768;
+    constexpr int kChromaBeamIntensity = 768;
+    constexpr std::uint32_t kConnectorIntensity = 160u;
 }
+
 void resampleLinear(
     std::span<const float> input,
     std::span<float> output)
@@ -76,6 +77,7 @@ void resampleLinear(
             left + (right - left) * fraction;
     }
 }
+
 WaveformRenderer::WaveformRenderer()
     : image_(720, 576, QImage::Format_RGB32)
     , hits_(720u * 576u, 0u)
@@ -97,16 +99,23 @@ void WaveformRenderer::setOutputSize(int width, int height)
 {
     width = std::max(width, 1);
     height = std::clamp(height, 1, 576);
+
     qDebug()
         << "Waveform size"
         << width
         << height;
-    if (image_.width() == width && image_.height() == height)
+
+    if (image_.width() == width &&
+        image_.height() == height)
     {
         return;
     }
 
-    image_ = QImage(width, height, QImage::Format_RGB32);
+    image_ = QImage(
+        width,
+        height,
+        QImage::Format_RGB32);
+
     image_.fill(Qt::black);
 
     const std::size_t pixelCount =
@@ -116,17 +125,23 @@ void WaveformRenderer::setOutputSize(int width, int height)
     hits_.assign(pixelCount, 0u);
     trace_.assign(pixelCount, TracePixel{});
 
-    displayY_.resize(static_cast<std::size_t>(width));
-    displayU_.resize(static_cast<std::size_t>(width));
-    displayV_.resize(static_cast<std::size_t>(width));
+    displayY_.resize(
+        static_cast<std::size_t>(width));
+
+    displayU_.resize(
+        static_cast<std::size_t>(width));
+
+    displayV_.resize(
+        static_cast<std::size_t>(width));
 }
 
-void WaveformRenderer::analyze(const Yuv444Frame& frame)
+void WaveformRenderer::analyze(
+    const Yuv444Frame& frame)
 {
     const std::size_t requiredSamples =
         frame.width > 0 && frame.height > 0
         ? static_cast<std::size_t>(frame.width) *
-            static_cast<std::size_t>(frame.height)
+        static_cast<std::size_t>(frame.height)
         : 0u;
 
     if (requiredSamples == 0u ||
@@ -138,20 +153,43 @@ void WaveformRenderer::analyze(const Yuv444Frame& frame)
         return;
     }
 
-    if (selectedLine_ >= 0 && selectedLine_ < frame.height)
+    renderAllLines(frame);
+}
+
+void WaveformRenderer::analyze(
+    const Yuv444Frame& frame,
+    const ReconstructedLumaFrame& reconstructedLuma)
+{
+    if (reconstructedLuma.width <= 0 ||
+        reconstructedLuma.height <= 0 ||
+        reconstructedLuma.y.empty())
     {
-        renderSingleLine(frame);
+        image_.fill(Qt::black);
         return;
     }
 
-    renderAllLines(frame);
+    if (selectedLine_ >= 0 &&
+        selectedLine_ < reconstructedLuma.height)
+    {
+        renderSingleLine(
+            frame,
+            reconstructedLuma);
+
+        return;
+    }
+
+    analyze(frame);
 }
 
 void WaveformRenderer::clearOrFadeTrace()
 {
     if (persistence_ == 0)
     {
-        std::fill(trace_.begin(), trace_.end(), TracePixel{});
+        std::fill(
+            trace_.begin(),
+            trace_.end(),
+            TracePixel{});
+
         return;
     }
 
@@ -160,72 +198,136 @@ void WaveformRenderer::clearOrFadeTrace()
 
     for (TracePixel& pixel : trace_)
     {
-        pixel.red = static_cast<std::uint16_t>(
-            (static_cast<std::uint32_t>(pixel.red) * persistence) >> 8);
-        pixel.green = static_cast<std::uint16_t>(
-            (static_cast<std::uint32_t>(pixel.green) * persistence) >> 8);
-        pixel.blue = static_cast<std::uint16_t>(
-            (static_cast<std::uint32_t>(pixel.blue) * persistence) >> 8);
+        pixel.red =
+            static_cast<std::uint16_t>(
+                (static_cast<std::uint32_t>(pixel.red) *
+                    persistence) >>
+                8);
+
+        pixel.green =
+            static_cast<std::uint16_t>(
+                (static_cast<std::uint32_t>(pixel.green) *
+                    persistence) >>
+                8);
+
+        pixel.blue =
+            static_cast<std::uint16_t>(
+                (static_cast<std::uint32_t>(pixel.blue) *
+                    persistence) >>
+                8);
     }
 }
 
 void WaveformRenderer::renderSingleLine(
-    const Yuv444Frame& frame)
+    const Yuv444Frame& frame,
+    const ReconstructedLumaFrame& reconstructedLuma)
 {
     clearOrFadeTrace();
 
     const std::size_t sourceWidth =
         static_cast<std::size_t>(frame.width);
-    const std::size_t lineOffset =
-        static_cast<std::size_t>(selectedLine_) * sourceWidth;
 
-    sourceY_.resize(sourceWidth);
+    const std::size_t reconstructedWidth =
+        static_cast<std::size_t>(
+            reconstructedLuma.width);
+
+    const std::size_t sourceLineOffset =
+        static_cast<std::size_t>(selectedLine_) *
+        sourceWidth;
+
+    const std::size_t reconstructedLineOffset =
+        static_cast<std::size_t>(selectedLine_) *
+        reconstructedWidth;
+
+    sourceY_.resize(reconstructedWidth);
     sourceU_.resize(sourceWidth);
     sourceV_.resize(sourceWidth);
 
-    for (std::size_t x = 0; x < sourceWidth; ++x)
+    for (std::size_t x = 0;
+        x < reconstructedWidth;
+        ++x)
     {
-        const std::size_t sampleIndex = lineOffset + x;
-        sourceY_[x] = static_cast<float>(frame.y[sampleIndex]);
-        sourceU_[x] = static_cast<float>(frame.u[sampleIndex]);
-        sourceV_[x] = static_cast<float>(frame.v[sampleIndex]);
+        sourceY_[x] =
+            static_cast<float>(
+                reconstructedLuma.y[
+                    reconstructedLineOffset + x]);
     }
 
-    //lineResampler_.resample(sourceY_, displayY_);
-    //lineResampler_.resample(sourceU_, displayU_);
-    //lineResampler_.resample(sourceV_, displayV_);
-    lineResampler_.resample(sourceY_, displayY_);
-    resampleLinear(sourceU_, displayU_);
-    resampleLinear(sourceV_, displayV_);
-
-    const int displayWidth = image_.width();
-    const int displayHeight = image_.height();
-
-    double previousPlotY = 0.0;
-    bool havePreviousPlotY = false;
-
-    for (int x = 0; x < displayWidth; ++x)
+    for (std::size_t x = 0;
+        x < sourceWidth;
+        ++x)
     {
-        const std::size_t index = static_cast<std::size_t>(x);
+        const std::size_t sampleIndex =
+            sourceLineOffset + x;
 
-        const double yValue = std::clamp(
-            static_cast<double>(displayY_[index]),
-            0.0,
-            kMaximumSampleValue);
-        const double uValue = std::clamp(
-            static_cast<double>(displayU_[index]),
-            0.0,
-            kMaximumSampleValue);
-        const double vValue = std::clamp(
-            static_cast<double>(displayV_[index]),
-            0.0,
-            kMaximumSampleValue);
+        sourceU_[x] =
+            static_cast<float>(
+                frame.u[sampleIndex]);
 
-        double chromaU = uValue - kNeutralChroma;
-        double chromaV = vValue - kNeutralChroma;
+        sourceV_[x] =
+            static_cast<float>(
+                frame.v[sampleIndex]);
+    }
 
-        const double chromaMagnitude = std::hypot(chromaU, chromaV);
-        if (chromaMagnitude < kChromaNoiseThreshold)
+    resampleLinear(
+        sourceY_,
+        displayY_);
+
+    resampleLinear(
+        sourceU_,
+        displayU_);
+
+    resampleLinear(
+        sourceV_,
+        displayV_);
+
+    const int displayWidth =
+        image_.width();
+
+    const int displayHeight =
+        image_.height();
+
+    for (int x = 0;
+        x < displayWidth;
+        ++x)
+    {
+        const std::size_t index =
+            static_cast<std::size_t>(x);
+
+        const double yValue =
+            std::clamp(
+                static_cast<double>(
+                    displayY_[index]),
+                0.0,
+                kMaximumSampleValue);
+
+        const double uValue =
+            std::clamp(
+                static_cast<double>(
+                    displayU_[index]),
+                0.0,
+                kMaximumSampleValue);
+
+        const double vValue =
+            std::clamp(
+                static_cast<double>(
+                    displayV_[index]),
+                0.0,
+                kMaximumSampleValue);
+
+        double chromaU =
+            uValue - kNeutralChroma;
+
+        double chromaV =
+            vValue - kNeutralChroma;
+
+        const double chromaMagnitude =
+            std::hypot(
+                chromaU,
+                chromaV);
+
+        if (chromaMagnitude <
+            kChromaNoiseThreshold)
         {
             chromaU = 0.0;
             chromaV = 0.0;
@@ -233,57 +335,45 @@ void WaveformRenderer::renderSingleLine(
 
         const double plotY =
             static_cast<double>(displayHeight - 1) -
-            yValue * static_cast<double>(displayHeight - 1) /
-                kMaximumSampleValue;
-
-        if (havePreviousPlotY)
-        {
-            const int firstY = std::max(
-                0,
-                static_cast<int>(std::ceil(
-                    std::min(previousPlotY, plotY))));
-            const int lastY = std::min(
-                displayHeight - 1,
-                static_cast<int>(std::floor(
-                    std::max(previousPlotY, plotY))));
-
-            for (int connectorY = firstY;
-                connectorY <= lastY;
-                ++connectorY)
-            {
-                const std::size_t connectorIndex =
-                    static_cast<std::size_t>(connectorY) *
-                        static_cast<std::size_t>(displayWidth) +
-                    index;
-
-                TracePixel& pixel = trace_[connectorIndex];
-                pixel.green = static_cast<std::uint16_t>(
-                    std::min<std::uint32_t>(
-                        65535u,
-                        static_cast<std::uint32_t>(pixel.green) +
-                            kConnectorIntensity));
-            }
-        }
+            yValue *
+            static_cast<double>(displayHeight - 1) /
+            kMaximumSampleValue;
 
         const double spread =
-            std::hypot(chromaU, chromaV) /
+            std::hypot(
+                chromaU,
+                chromaV) /
             kNeutralChroma *
             static_cast<double>(displayHeight - 1) *
             kChromaEnvelopeScale;
 
-        double redValue = 1.402 * chromaV;
+        double redValue =
+            1.402 * chromaV;
+
         double greenValue =
-            -0.344136 * chromaU - 0.714136 * chromaV;
-        double blueValue = 1.772 * chromaU;
+            -0.344136 * chromaU -
+            0.714136 * chromaV;
+
+        double blueValue =
+            1.772 * chromaU;
 
         const double minimum =
-            std::min({ redValue, greenValue, blueValue });
+            std::min({
+                redValue,
+                greenValue,
+                blueValue
+                });
+
         redValue -= minimum;
         greenValue -= minimum;
         blueValue -= minimum;
 
         const double maximum =
-            std::max({ redValue, greenValue, blueValue });
+            std::max({
+                redValue,
+                greenValue,
+                blueValue
+                });
 
         int red = 0;
         int green = 0;
@@ -291,23 +381,30 @@ void WaveformRenderer::renderSingleLine(
 
         if (maximum > 0.0)
         {
-            red = static_cast<int>(std::clamp(
-                redValue * 255.0 / maximum, 0.0, 255.0));
-            green = static_cast<int>(std::clamp(
-                greenValue * 255.0 / maximum, 0.0, 255.0));
-            blue = static_cast<int>(std::clamp(
-                blueValue * 255.0 / maximum, 0.0, 255.0));
+            red =
+                static_cast<int>(
+                    std::clamp(
+                        redValue * 255.0 / maximum,
+                        0.0,
+                        255.0));
+
+            green =
+                static_cast<int>(
+                    std::clamp(
+                        greenValue * 255.0 / maximum,
+                        0.0,
+                        255.0));
+
+            blue =
+                static_cast<int>(
+                    std::clamp(
+                        blueValue * 255.0 / maximum,
+                        0.0,
+                        255.0));
         }
 
-        plotBeam(
-            x,
-            plotY,
-            kLuminanceBeamIntensity,
-            0,
-            255,
-            0);
-
-        if (maximum > 0.0 && spread > 0.0)
+        if (maximum > 0.0 &&
+            spread > 0.0)
         {
             plotBeam(
                 x,
@@ -316,6 +413,7 @@ void WaveformRenderer::renderSingleLine(
                 red,
                 green,
                 blue);
+
             plotBeam(
                 x,
                 plotY + spread,
@@ -324,48 +422,179 @@ void WaveformRenderer::renderSingleLine(
                 green,
                 blue);
         }
-
-        previousPlotY = plotY;
-        havePreviousPlotY = true;
     }
 
+    plotLuminanceTrace();
     composeTraceImage();
 }
 
-void WaveformRenderer::composeTraceImage()
+void WaveformRenderer::plotLuminanceTrace()
 {
-    const int width = image_.width();
-    const int height = image_.height();
+    const int width =
+        image_.width();
 
-    for (int y = 0; y < height; ++y)
+    const int height =
+        image_.height();
+
+    if (width < 2 ||
+        displayY_.size() <
+        static_cast<std::size_t>(width))
     {
-        auto* destination =
-            reinterpret_cast<QRgb*>(image_.scanLine(y));
+        return;
+    }
 
-        for (int x = 0; x < width; ++x)
+    auto sampleY =
+        [this, height](int x)
         {
-            const std::size_t index =
-                static_cast<std::size_t>(y) *
-                    static_cast<std::size_t>(width) +
-                static_cast<std::size_t>(x);
+            x = std::clamp(
+                x,
+                0,
+                image_.width() - 1);
 
-            const TracePixel& pixel = trace_[index];
-            destination[x] = qRgb(
-                displayLut_[pixel.red],
-                displayLut_[pixel.green],
-                displayLut_[pixel.blue]);
+            const double yValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayY_[
+                            static_cast<std::size_t>(x)]),
+                            0.0,
+                            kMaximumSampleValue);
+
+            return
+                static_cast<double>(height - 1) -
+                yValue *
+                static_cast<double>(height - 1) /
+                kMaximumSampleValue;
+        };
+
+    constexpr double targetStepPixels = 0.5;
+
+    for (int x = 0;
+        x < width - 1;
+        ++x)
+    {
+        const double p0 =
+            sampleY(x - 1);
+
+        const double p1 =
+            sampleY(x);
+
+        const double p2 =
+            sampleY(x + 1);
+
+        const double p3 =
+            sampleY(x + 2);
+
+        const double distance =
+            std::hypot(
+                1.0,
+                p2 - p1);
+
+        const int subdivisions =
+            std::clamp(
+                static_cast<int>(
+                    std::ceil(
+                        distance /
+                        targetStepPixels)),
+                1,
+                256);
+
+        for (int step = 0;
+            step <= subdivisions;
+            ++step)
+        {
+            const double t =
+                static_cast<double>(step) /
+                static_cast<double>(subdivisions);
+
+            const double t2 =
+                t * t;
+
+            const double t3 =
+                t2 * t;
+
+            const double y =
+                0.5 *
+                (
+                    2.0 * p1 +
+                    (-p0 + p2) * t +
+                    (2.0 * p0 -
+                        5.0 * p1 +
+                        4.0 * p2 -
+                        p3) * t2 +
+                    (-p0 +
+                        3.0 * p1 -
+                        3.0 * p2 +
+                        p3) * t3
+                    );
+
+            const double plotX =
+                static_cast<double>(x) + t;
+
+            plotBeam(
+                plotX,
+                y,
+                kLuminanceBeamIntensity,
+                0,
+                255,
+                0);
         }
     }
 }
 
-void WaveformRenderer::renderAllLines(const Yuv444Frame& frame)
+void WaveformRenderer::composeTraceImage()
 {
-    std::fill(hits_.begin(), hits_.end(), 0u);
+    const int width =
+        image_.width();
 
-    const int displayWidth = image_.width();
-    const int displayHeight = image_.height();
+    const int height =
+        image_.height();
 
-    for (int line = 0; line < frame.height; ++line)
+    for (int y = 0;
+        y < height;
+        ++y)
+    {
+        auto* destination =
+            reinterpret_cast<QRgb*>(
+                image_.scanLine(y));
+
+        for (int x = 0;
+            x < width;
+            ++x)
+        {
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+
+            const TracePixel& pixel =
+                trace_[index];
+
+            destination[x] =
+                qRgb(
+                    displayLut_[pixel.red],
+                    displayLut_[pixel.green],
+                    displayLut_[pixel.blue]);
+        }
+    }
+}
+
+void WaveformRenderer::renderAllLines(
+    const Yuv444Frame& frame)
+{
+    std::fill(
+        hits_.begin(),
+        hits_.end(),
+        0u);
+
+    const int displayWidth =
+        image_.width();
+
+    const int displayHeight =
+        image_.height();
+
+    for (int line = 0;
+        line < frame.height;
+        ++line)
     {
         const std::size_t lineOffset =
             static_cast<std::size_t>(line) *
@@ -373,53 +602,81 @@ void WaveformRenderer::renderAllLines(const Yuv444Frame& frame)
 
         int previousPlotY = -1;
 
-        for (int sourceX = 0; sourceX < frame.width; ++sourceX)
+        for (int sourceX = 0;
+            sourceX < frame.width;
+            ++sourceX)
         {
-            const int displayX = std::clamp(
-                sourceX * displayWidth / frame.width,
-                0,
-                displayWidth - 1);
+            const int displayX =
+                std::clamp(
+                    sourceX *
+                    displayWidth /
+                    frame.width,
+                    0,
+                    displayWidth - 1);
 
             const std::uint16_t y16 =
-                frame.y[lineOffset + static_cast<std::size_t>(sourceX)];
+                frame.y[
+                    lineOffset +
+                        static_cast<std::size_t>(
+                            sourceX)];
 
             const std::uint32_t scaledY =
                 static_cast<std::uint32_t>(
                     static_cast<std::uint64_t>(y16) *
-                    static_cast<std::uint64_t>((displayHeight - 1) << 8) /
+                    static_cast<std::uint64_t>(
+                        (displayHeight - 1) << 8) /
                     65535u);
 
             const int plotY =
-                displayHeight - 1 - static_cast<int>(scaledY >> 8);
-            const std::uint32_t fraction = scaledY & 0xffu;
+                displayHeight - 1 -
+                static_cast<int>(
+                    scaledY >> 8);
+
+            const std::uint32_t fraction =
+                scaledY & 0xffu;
 
             const std::size_t currentIndex =
                 static_cast<std::size_t>(plotY) *
-                    static_cast<std::size_t>(displayWidth) +
+                static_cast<std::size_t>(displayWidth) +
                 static_cast<std::size_t>(displayX);
-            hits_[currentIndex] += 256u - fraction;
+
+            hits_[currentIndex] +=
+                256u - fraction;
 
             if (plotY > 0)
             {
                 const std::size_t adjacentIndex =
                     static_cast<std::size_t>(plotY - 1) *
-                        static_cast<std::size_t>(displayWidth) +
+                    static_cast<std::size_t>(displayWidth) +
                     static_cast<std::size_t>(displayX);
-                hits_[adjacentIndex] += fraction;
+
+                hits_[adjacentIndex] +=
+                    fraction;
             }
 
             if (previousPlotY >= 0)
             {
-                const int firstY = std::min(previousPlotY, plotY);
-                const int lastY = std::max(previousPlotY, plotY);
+                const int firstY =
+                    std::min(
+                        previousPlotY,
+                        plotY);
 
-                for (int y = firstY; y <= lastY; ++y)
+                const int lastY =
+                    std::max(
+                        previousPlotY,
+                        plotY);
+
+                for (int y = firstY;
+                    y <= lastY;
+                    ++y)
                 {
                     const std::size_t segmentIndex =
                         static_cast<std::size_t>(y) *
-                            static_cast<std::size_t>(displayWidth) +
+                        static_cast<std::size_t>(displayWidth) +
                         static_cast<std::size_t>(displayX);
-                    hits_[segmentIndex] += 64u;
+
+                    hits_[segmentIndex] +=
+                        64u;
                 }
             }
 
@@ -427,113 +684,187 @@ void WaveformRenderer::renderAllLines(const Yuv444Frame& frame)
         }
     }
 
-    for (int y = 0; y < displayHeight; ++y)
+    for (int y = 0;
+        y < displayHeight;
+        ++y)
     {
         auto* destination =
-            reinterpret_cast<QRgb*>(image_.scanLine(y));
+            reinterpret_cast<QRgb*>(
+                image_.scanLine(y));
 
-        for (int x = 0; x < displayWidth; ++x)
+        for (int x = 0;
+            x < displayWidth;
+            ++x)
         {
             const std::uint32_t hit =
-                hits_[static_cast<std::size_t>(y) *
-                    static_cast<std::size_t>(displayWidth) +
-                    static_cast<std::size_t>(x)];
+                hits_[
+                    static_cast<std::size_t>(y) *
+                        static_cast<std::size_t>(displayWidth) +
+                        static_cast<std::size_t>(x)];
 
-            const int green = std::min(
-                255,
-                static_cast<int>(hit >> 8) * 8);
-            destination[x] = qRgb(0, green, 0);
+            const int green =
+                std::min(
+                    255,
+                    static_cast<int>(hit >> 8) * 8);
+
+            destination[x] =
+                qRgb(
+                    0,
+                    green,
+                    0);
         }
     }
 }
 
 void WaveformRenderer::plotBeam(
-    int x,
+    double x,
     double y,
     int intensity,
     int red,
     int green,
     int blue)
 {
-    if (x < 0 || x >= image_.width())
+    if (x < 0.0 ||
+        x >= static_cast<double>(
+            image_.width()))
     {
         return;
     }
 
-    static constexpr std::array<double, 7> weights = {
-        0.015,
-        0.075,
-        0.235,
-        0.350,
-        0.235,
-        0.075,
-        0.015
-    };
+    constexpr int radius = 2;
+    constexpr double sigma = 0.50;
+    constexpr double sigmaFactor =
+        1.0 / (2.0 * sigma * sigma);
 
-    const int centreY = static_cast<int>(std::floor(y));
-    const double fraction = y - static_cast<double>(centreY);
+    const int centreX =
+        static_cast<int>(
+            std::floor(x));
 
-    for (int offset = -3; offset <= 3; ++offset)
+    const int centreY =
+        static_cast<int>(
+            std::floor(y));
+
+    const int x0 =
+        static_cast<int>(
+            std::floor(x));
+
+    const int y0 =
+        static_cast<int>(
+            std::floor(y));
+
+    const double fx =
+        x - static_cast<double>(x0);
+
+    const double fy =
+        y - static_cast<double>(y0);
+
+    for (int dy = 0;
+        dy <= 1;
+        ++dy)
     {
-        const int destinationY = centreY + offset;
-        if (destinationY < 0 || destinationY >= image_.height())
+        const int destinationY =
+            y0 + dy;
+
+        if (destinationY < 0 ||
+            destinationY >= image_.height())
         {
             continue;
         }
 
-        const double shiftedPosition =
-            static_cast<double>(offset) - fraction;
-        const double shiftedFloor = std::floor(shiftedPosition);
+        const double wy =
+            dy == 0
+            ? 1.0 - fy
+            : fy;
 
-        const int lowerIndex = std::clamp(
-            static_cast<int>(shiftedFloor) + 3,
-            0,
-            6);
-        const int upperIndex = std::min(lowerIndex + 1, 6);
-        const double blend = shiftedPosition - shiftedFloor;
-        const double weight =
-            weights[static_cast<std::size_t>(lowerIndex)] * (1.0 - blend) +
-            weights[static_cast<std::size_t>(upperIndex)] * blend;
+        for (int dx = 0;
+            dx <= 1;
+            ++dx)
+        {
+            const int destinationX =
+                x0 + dx;
 
-        const std::uint32_t contribution =
-            static_cast<std::uint32_t>(
-                std::max(0.0, weight * static_cast<double>(intensity)));
-
-        const std::size_t index =
-            static_cast<std::size_t>(destinationY) *
-                static_cast<std::size_t>(image_.width()) +
-            static_cast<std::size_t>(x);
-
-        TracePixel& pixel = trace_[index];
-
-        const auto addChannel =
-            [contribution](std::uint16_t& destination, int channel)
+            if (destinationX < 0 ||
+                destinationX >= image_.width())
             {
-                const std::uint32_t scaled =
-                    contribution *
-                    static_cast<std::uint32_t>(std::clamp(channel, 0, 255)) /
-                    255u;
+                continue;
+            }
 
-                destination = static_cast<std::uint16_t>(
-                    std::min<std::uint32_t>(
-                        65535u,
-                        static_cast<std::uint32_t>(destination) + scaled));
-            };
+            const double wx =
+                dx == 0
+                ? 1.0 - fx
+                : fx;
 
-        addChannel(pixel.red, red);
-        addChannel(pixel.green, green);
-        addChannel(pixel.blue, blue);
+            const double weight =
+                wx * wy;
+
+            const std::uint32_t contribution =
+                static_cast<std::uint32_t>(
+                    weight *
+                    static_cast<double>(
+                        intensity));
+
+            const std::size_t index =
+                static_cast<std::size_t>(
+                    destinationY) *
+                static_cast<std::size_t>(
+                    image_.width()) +
+                static_cast<std::size_t>(
+                    destinationX);
+
+            TracePixel& pixel =
+                trace_[index];
+
+            const auto addChannel =
+                [contribution](
+                    std::uint16_t& destination,
+                    int channel)
+                {
+                    const std::uint32_t scaled =
+                        contribution *
+                        static_cast<std::uint32_t>(
+                            std::clamp(
+                                channel,
+                                0,
+                                255)) /
+                        255u;
+
+                    destination =
+                        static_cast<std::uint16_t>(
+                            std::max<std::uint32_t>(
+                                static_cast<std::uint32_t>(
+                                    destination),
+                                scaled));
+                };
+
+            addChannel(
+                pixel.red,
+                red);
+
+            addChannel(
+                pixel.green,
+                green);
+
+            addChannel(
+                pixel.blue,
+                blue);
+        }
     }
 }
 
-void WaveformRenderer::setSelectedLine(int line)
+void WaveformRenderer::setSelectedLine(
+    int line)
 {
     selectedLine_ = line;
 }
 
-void WaveformRenderer::setPersistence(int persistence)
+void WaveformRenderer::setPersistence(
+    int persistence)
 {
-    persistence_ = std::clamp(persistence, 0, 255);
+    persistence_ =
+        std::clamp(
+            persistence,
+            0,
+            255);
 }
 
 const QImage& WaveformRenderer::image() const
@@ -548,6 +879,9 @@ double WaveformRenderer::traceBandwidthMHz() const
 
     return
         captureSampleRateMHz *
-        static_cast<double>(image_.width()) /
-        (captureSamplesPerLine * kPixelsPerCycleForTraceBW);
+        static_cast<double>(
+            image_.width()) /
+        (
+            captureSamplesPerLine *
+            kPixelsPerCycleForTraceBW);
 }
