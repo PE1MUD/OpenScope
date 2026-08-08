@@ -113,6 +113,10 @@ void WaveformWidget::resizeEvent(QResizeEvent* event)
 {
     VideoWidget::resizeEvent(event);
 
+    qDebug()
+        << "WaveformWidget size:"
+        << event->size();
+
     emit outputSizeChanged(
         event->size().width(),
         event->size().height());

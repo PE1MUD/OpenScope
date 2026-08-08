@@ -122,15 +122,6 @@ void LineResampler::resample(
         std::fill(output.begin(), output.end(), input.front());
         return;
     }
-    if (input.size() == 1)
-    {
-        std::fill(
-            output.begin(),
-            output.end(),
-            input.front());
-
-        return;
-    }
 
     if (cachedInputSize_ != input.size() ||
         cachedOutputSize_ != output.size())

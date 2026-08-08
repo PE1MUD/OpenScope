@@ -62,7 +62,7 @@ private:
     FrameBufferPool frameBufferPool_{ 720, 576 };
     std::atomic_bool framePending_{ false };
     WaveformRenderer waveformRenderer_;
-    LineResampler lineResampler_;
+//    LineResampler lineResampler_;
     VectorscopeAnalyzer vectorscopeAnalyzer_;
     int videoOutputWidth_ = 720;
     int videoOutputHeight_ = 576;

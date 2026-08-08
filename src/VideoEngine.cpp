@@ -11,7 +11,7 @@ VideoEngine::VideoEngine(QObject* parent)
 {
     setSelectedLine(320);
     reconstructedLuma_.resize(
-        2880,
+        kReconstructedLumaWidth,
         576);
     const unsigned int hardwareThreads =
         std::max(
@@ -28,10 +28,12 @@ VideoEngine::VideoEngine(QObject* parent)
     for (LumaWorker& worker : lumaWorkers_)
     {
         worker.sourceLine.resize(720u);
-        worker.reconstructedLine.resize(2880u);
+        worker.reconstructedLine.resize(
+            kReconstructedLumaWidth);
     }
 
 }
+
 void VideoEngine::reconstructLuma(
     const Yuv444Frame& frame)
 {
@@ -42,7 +44,7 @@ void VideoEngine::reconstructLuma(
     }
 
     reconstructedLuma_.resize(
-        2880,
+        kReconstructedLumaWidth,
         frame.height);
 
     const int workerCount =
@@ -55,6 +57,21 @@ void VideoEngine::reconstructLuma(
     std::vector<std::jthread> threads;
     threads.reserve(
         static_cast<std::size_t>(workerCount));
+
+    std::vector<qint64> copyInputUs(
+        static_cast<std::size_t>(workerCount),
+        0);
+
+    std::vector<qint64> resampleUs(
+        static_cast<std::size_t>(workerCount),
+        0);
+
+    std::vector<qint64> copyOutputUs(
+        static_cast<std::size_t>(workerCount),
+        0);
+
+    QElapsedTimer timer;
+    timer.start();
 
     for (int workerIndex = 0;
         workerIndex < workerCount;
@@ -78,7 +95,14 @@ void VideoEngine::reconstructLuma(
             {
                 LumaWorker& worker =
                     lumaWorkers_[
-                        static_cast<std::size_t>(workerIndex)];
+                        static_cast<std::size_t>(
+                            workerIndex)];
+
+                qint64 localCopyInputUs = 0;
+                qint64 localResampleUs = 0;
+                qint64 localCopyOutputUs = 0;
+
+                QElapsedTimer workerTimer;
 
                 for (int line = firstLine;
                     line < lastLine;
@@ -87,6 +111,8 @@ void VideoEngine::reconstructLuma(
                     const std::size_t sourceOffset =
                         static_cast<std::size_t>(line) *
                         static_cast<std::size_t>(frame.width);
+
+                    workerTimer.restart();
 
                     for (int x = 0;
                         x < frame.width;
@@ -100,16 +126,26 @@ void VideoEngine::reconstructLuma(
                                         static_cast<std::size_t>(x)]);
                     }
 
+                    localCopyInputUs +=
+                        workerTimer.nsecsElapsed() / 1000;
+
+                    workerTimer.restart();
+
                     worker.reconstructor.resample(
                         worker.sourceLine,
                         worker.reconstructedLine);
 
+                    localResampleUs +=
+                        workerTimer.nsecsElapsed() / 1000;
+
                     const std::size_t destinationOffset =
                         static_cast<std::size_t>(line) *
-                        2880u;
+                        kReconstructedLumaWidth;
+
+                    workerTimer.restart();
 
                     for (std::size_t x = 0;
-                        x < 2880u;
+                        x < kReconstructedLumaWidth;
                         ++x)
                     {
                         reconstructedLuma_.y[
@@ -120,9 +156,63 @@ void VideoEngine::reconstructLuma(
                                     0.0f,
                                     65535.0f));
                     }
+
+                    localCopyOutputUs +=
+                        workerTimer.nsecsElapsed() / 1000;
                 }
+
+                copyInputUs[
+                    static_cast<std::size_t>(workerIndex)] =
+                    localCopyInputUs;
+
+                    resampleUs[
+                        static_cast<std::size_t>(workerIndex)] =
+                        localResampleUs;
+
+                        copyOutputUs[
+                            static_cast<std::size_t>(workerIndex)] =
+                            localCopyOutputUs;
             });
     }
+
+    const qint64 threadLaunchUs =
+        timer.nsecsElapsed() / 1000;
+
+    timer.restart();
+
+    threads.clear();
+
+    const qint64 threadJoinUs =
+        timer.nsecsElapsed() / 1000;
+
+    qint64 totalCopyInputUs = 0;
+    qint64 totalResampleUs = 0;
+    qint64 totalCopyOutputUs = 0;
+
+    for (int workerIndex = 0;
+        workerIndex < workerCount;
+        ++workerIndex)
+    {
+        const std::size_t index =
+            static_cast<std::size_t>(workerIndex);
+
+        totalCopyInputUs +=
+            copyInputUs[index];
+
+        totalResampleUs +=
+            resampleUs[index];
+
+        totalCopyOutputUs +=
+            copyOutputUs[index];
+    }
+
+    qDebug()
+        << "Luma threads:"
+        << "launch =" << threadLaunchUs / 1000.0 << "ms"
+        << "join =" << threadJoinUs / 1000.0 << "ms"
+        << "copy input =" << totalCopyInputUs / 1000.0 << "ms"
+        << "resample =" << totalResampleUs / 1000.0 << "ms"
+        << "copy output =" << totalCopyOutputUs / 1000.0 << "ms";
 }
 Yuv444Frame* VideoEngine::tryAcquireWriteFrame()
 {

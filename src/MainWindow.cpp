@@ -80,11 +80,6 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::setWaveformPersistence);
     connect(
-        waveformWidget_,
-        &WaveformWidget::outputSizeChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformOutputSize);
-    connect(
         videoWidget_,
         &VideoWidget::outputSizeChanged,
         videoEngine_,
