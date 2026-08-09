@@ -2,7 +2,7 @@
 #include "VideoEngine.h"
 
 #include <QDebug>
-
+#include <QElapsedTimer>
 
 DeckLinkInputCallback::DeckLinkInputCallback(
     VideoEngine* videoEngine,
@@ -59,6 +59,25 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
     IDeckLinkVideoInputFrame* videoFrame,
     IDeckLinkAudioInputPacket*)
 {
+    static QElapsedTimer captureFpsTimer;
+    static int captureFrameCount = 0;
+
+    if (!captureFpsTimer.isValid())
+    {
+        captureFpsTimer.start();
+    }
+
+    ++captureFrameCount;
+
+    if (captureFpsTimer.elapsed() >= 1000)
+    {
+        qDebug()
+            << "DeckLink callback FPS ="
+            << captureFrameCount;
+
+        captureFrameCount = 0;
+        captureFpsTimer.restart();
+    }
     if (videoFrame == nullptr || videoEngine_ == nullptr)
         return S_OK;
 

@@ -2,9 +2,12 @@
 
 #include <cstdint>
 #include <vector>
+#include <cstdint>
 
 struct ReconstructedLumaFrame
 {
+    std::uint64_t generation = 0;
+
     int width = 0;
     int height = 0;
 

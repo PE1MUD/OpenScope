@@ -8,9 +8,19 @@
 
 
 VectorscopeAnalyzer::VectorscopeAnalyzer()
-    : image_(1, 1, QImage::Format_RGB32)
+    : QObject(nullptr),
+    image_(1, 1, QImage::Format_RGB32),
+    allLinesImage_(
+        kAllLinesWidth,
+        kAllLinesHeight,
+        QImage::Format_RGB32)
 {
     image_.fill(Qt::black);
+    allLinesImage_.fill(Qt::black);
+    allLinesDensity_.resize(
+        static_cast<std::size_t>(
+            kAllLinesWidth *
+            kAllLinesHeight));
 }
 void VectorscopeAnalyzer::setOutputSize(
     int width,
@@ -42,6 +52,16 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
     timer.start();
 
     image_.fill(Qt::black);
+
+    if (selectedLine_ < 0)
+    {
+        renderAllLines(frame);
+        //qDebug()
+        //    << "Vectorscope analyze total ="
+        //    << timer.nsecsElapsed() / 1000000.0
+        //    << "ms";
+        return;
+    }
 
     const double centerX =
         (image_.width() - 1) * 0.5;
@@ -349,6 +369,7 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
             << "size =" << image_.width()
             << "x" << image_.height();
     }
+
 }
 const QImage& VectorscopeAnalyzer::image() const
 {
@@ -358,4 +379,325 @@ const QImage& VectorscopeAnalyzer::image() const
 void VectorscopeAnalyzer::setSelectedLine(int line)
 {
     selectedLine_ = line;
+}
+
+void VectorscopeAnalyzer::renderSingleLine(
+    const Yuv444Frame& frame)
+{
+    // Hier komt straks de bestaande Catmull/Gaussian rendercode.
+}
+
+void VectorscopeAnalyzer::renderAllLines(
+    const Yuv444Frame& frame)
+{
+    std::fill(
+        allLinesDensity_.begin(),
+        allLinesDensity_.end(),
+        0u);
+
+    allLinesImage_.fill(Qt::black);
+
+    const double centerX =
+        (kAllLinesWidth - 1) * 0.5;
+
+    const double centerY =
+        (kAllLinesHeight - 1) * 0.5;
+
+    //
+    // Separate X/Y scale is intentional.
+    // The internal buffer is 360 x 384 and is stretched
+    // to the square vectorscope viewport afterwards.
+    //
+    const double scaleX =
+        static_cast<double>(kAllLinesWidth) *
+        0.5 /
+        32768.0;
+
+    const double scaleY =
+        static_cast<double>(kAllLinesHeight) *
+        0.5 /
+        32768.0;
+
+    constexpr double chromaCenter =
+        32768.0;
+
+    constexpr std::uint32_t segmentEnergy =
+        256u;
+
+    for (int line = 0;
+        line < frame.height;
+        ++line)
+    {
+        const std::size_t lineStart =
+            static_cast<std::size_t>(line) *
+            static_cast<std::size_t>(frame.width);
+
+        for (int x = 0;
+            x + 1 < frame.width;
+            ++x)
+        {
+            const std::size_t i0 =
+                lineStart +
+                static_cast<std::size_t>(x);
+
+            const std::size_t i1 =
+                i0 + 1;
+
+            const double u0 =
+                static_cast<double>(frame.u[i0]) -
+                chromaCenter;
+
+            const double v0 =
+                static_cast<double>(frame.v[i0]) -
+                chromaCenter;
+
+            const double u1 =
+                static_cast<double>(frame.u[i1]) -
+                chromaCenter;
+
+            const double v1 =
+                static_cast<double>(frame.v[i1]) -
+                chromaCenter;
+
+            const int ix0 =
+                static_cast<int>(
+                    std::lround(
+                        centerX +
+                        u0 * scaleX));
+
+            const int iy0 =
+                static_cast<int>(
+                    std::lround(
+                        centerY -
+                        v0 * scaleY));
+
+            const int ix1 =
+                static_cast<int>(
+                    std::lround(
+                        centerX +
+                        u1 * scaleX));
+
+            const int iy1 =
+                static_cast<int>(
+                    std::lround(
+                        centerY -
+                        v1 * scaleY));
+
+            accumulateLineSegmentInteger(
+                ix0,
+                iy0,
+                ix1,
+                iy1,
+                segmentEnergy,
+                kAllLinesWidth,
+                kAllLinesHeight,
+                allLinesDensity_);
+        }
+    }
+
+    constexpr double whitePoint =
+        125000.0;
+
+    constexpr double gamma =
+        0.15;
+
+    constexpr double minimumVisible =
+        0.08;
+
+    for (int y = 0;
+        y < kAllLinesHeight;
+        ++y)
+    {
+        auto* outputLine =
+            reinterpret_cast<QRgb*>(
+                allLinesImage_.scanLine(y));
+
+        for (int x = 0;
+            x < kAllLinesWidth;
+            ++x)
+        {
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(
+                    kAllLinesWidth) +
+                static_cast<std::size_t>(x);
+
+            const std::uint32_t density =
+                allLinesDensity_[index];
+
+            if (density == 0)
+            {
+                outputLine[x] =
+                    qRgb(0, 0, 0);
+
+                continue;
+            }
+
+            const double normalized =
+                std::min(
+                    1.0,
+                    static_cast<double>(density) /
+                    whitePoint);
+
+            const double corrected =
+                minimumVisible +
+                (1.0 - minimumVisible) *
+                std::pow(
+                    normalized,
+                    gamma);
+
+            const int green =
+                static_cast<int>(
+                    255.0 * corrected);
+
+            outputLine[x] =
+                qRgb(
+                    0,
+                    green,
+                    0);
+        }
+    }
+
+    const QSize outputSize =
+        image_.size();
+
+    image_ =
+        allLinesImage_.scaled(
+            outputSize,
+            Qt::IgnoreAspectRatio,
+            Qt::FastTransformation);
+}
+
+void VectorscopeAnalyzer::accumulateLineSegmentInteger(
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    std::uint32_t energy,
+    int width,
+    int height,
+    std::vector<std::uint32_t>& density)
+{
+    const int dx =
+        std::abs(x1 - x0);
+
+    const int dy =
+        std::abs(y1 - y0);
+
+    const int steps =
+        std::max(dx, dy) + 1;
+
+    const std::uint32_t pointEnergy =
+        std::max(
+            1u,
+            energy /
+            static_cast<std::uint32_t>(steps));
+
+    const int sx =
+        (x0 < x1) ? 1 : -1;
+
+    const int sy =
+        (y0 < y1) ? 1 : -1;
+
+    int error =
+        dx - dy;
+
+    for (;;)
+    {
+        if (x0 >= 0 &&
+            x0 < width &&
+            y0 >= 0 &&
+            y0 < height)
+        {
+            const std::size_t index =
+                static_cast<std::size_t>(y0) *
+                static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x0);
+
+            density[index] +=
+                pointEnergy;
+        }
+
+        if (x0 == x1 &&
+            y0 == y1)
+        {
+            break;
+        }
+
+        const int error2 =
+            error * 2;
+
+        if (error2 > -dy)
+        {
+            error -= dy;
+            x0 += sx;
+        }
+
+        if (error2 < dx)
+        {
+            error += dx;
+            y0 += sy;
+        }
+    }
+}
+std::uint32_t VectorscopeAnalyzer::accumulateLineSegment(
+    double x0,
+    double y0,
+    double x1,
+    double y1,
+    std::uint32_t energy)
+{
+    const double dx = x1 - x0;
+    const double dy = y1 - y0;
+
+    const double length =
+        std::max(
+            std::abs(dx),
+            std::abs(dy));
+
+    const int steps =
+        std::max(
+            1,
+            static_cast<int>(
+                std::ceil(length)));
+    const std::uint32_t pointEnergy =
+        std::max(
+            1u,
+            energy /
+            static_cast<std::uint32_t>(
+                steps + 1));
+    for (int step = 0;
+        step <= steps;
+        ++step)
+    {
+        const double t =
+            static_cast<double>(step) /
+            static_cast<double>(steps);
+
+        const int x =
+            static_cast<int>(
+                std::lround(
+                    x0 + dx * t));
+
+        const int y =
+            static_cast<int>(
+                std::lround(
+                    y0 + dy * t));
+
+        if (x < 0 ||
+            x >= image_.width() ||
+            y < 0 ||
+            y >= image_.height())
+        {
+            continue;
+        }
+
+        const std::size_t index =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(image_.width()) +
+            static_cast<std::size_t>(x);
+
+        density_[index] += pointEnergy;
+    }
+    return static_cast<std::uint32_t>(steps + 1);
 }

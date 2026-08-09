@@ -146,11 +146,6 @@ void WaveformRenderer::setOutputSize(
             1,
             576);
 
-    qDebug()
-        << "Waveform size"
-        << width
-        << height;
-
     if (image_.width() == width &&
         image_.height() == height)
     {

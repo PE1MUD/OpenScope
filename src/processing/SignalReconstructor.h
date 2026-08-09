@@ -3,7 +3,7 @@
 #include <vector>
 #include <span>
 
-inline constexpr std::size_t kReconstructedLumaWidth = 2160;
+inline constexpr std::size_t kReconstructedLumaWidth = 2880;
 
 class LineResampler
 {
