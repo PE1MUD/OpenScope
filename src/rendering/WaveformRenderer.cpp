@@ -18,7 +18,7 @@ namespace
         0.03 * kNeutralChroma;
     constexpr double kChromaEnvelopeScale = 0.18;
 
-    constexpr int kLuminanceBeamIntensity = 768;
+    constexpr int kLuminanceBeamIntensity = 256;
     constexpr int kChromaBeamIntensity = 768;
     constexpr std::uint32_t kConnectorIntensity = 160u;
 }
@@ -249,6 +249,10 @@ void WaveformRenderer::setOutputSize(
 void WaveformRenderer::setZoomed(
     bool zoomed)
 {
+    qDebug()
+        << "WaveformRenderer zoomed:"
+        << zoomed;
+
     zoomed_ = zoomed;
 }
 
@@ -755,7 +759,11 @@ void WaveformRenderer::plotLuminanceTrace()
                                 targetStepPixels)),
                         1,
                         256);
+                double previousX =
+                    static_cast<double>(x);
 
+                double previousY =
+                    p1;
                 for (int step = 0;
                     step <= subdivisions;
                     ++step)
@@ -786,13 +794,25 @@ void WaveformRenderer::plotLuminanceTrace()
                                 p3) * t3
                             );
 
-                    plotBeam(
-                        static_cast<double>(x) + t,
-                        y,
-                        intensity,
-                        255,
-                        255,
-                        255);
+                    const double plotX =
+                        static_cast<double>(x) +
+                        t;
+
+                    if (step > 0)
+                    {
+                        plotSegment(
+                            previousX,
+                            previousY,
+                            plotX,
+                            y,
+                            intensity,
+                            255,
+                            255,
+                            255);
+                    }
+
+                    previousX = plotX;
+                    previousY = y;
                 }
             }
         };
@@ -1086,6 +1106,167 @@ void WaveformRenderer::renderAllLines(
                     green,
                     green,
                     green);
+        }
+    }
+}
+
+void WaveformRenderer::plotSegment(
+    double x0,
+    double y0,
+    double x1,
+    double y1,
+    int intensity,
+    int red,
+    int green,
+    int blue)
+{
+    const double dx =
+        x1 - x0;
+
+    const double dy =
+        y1 - y0;
+
+    const double lengthSquared =
+        dx * dx +
+        dy * dy;
+
+    if (lengthSquared <= 0.0)
+    {
+        plotBeam(
+            x0,
+            y0,
+            intensity,
+            red,
+            green,
+            blue);
+
+        return;
+    }
+
+    const int firstX =
+        std::max(
+            0,
+            static_cast<int>(
+                std::floor(
+                    std::min(x0, x1))) - 1);
+
+    const int lastX =
+        std::min(
+            image_.width() - 1,
+            static_cast<int>(
+                std::ceil(
+                    std::max(x0, x1))) + 1);
+
+    const int firstY =
+        std::max(
+            0,
+            static_cast<int>(
+                std::floor(
+                    std::min(y0, y1))) - 1);
+
+    const int lastY =
+        std::min(
+            image_.height() - 1,
+            static_cast<int>(
+                std::ceil(
+                    std::max(y0, y1))) + 1);
+
+    for (int y = firstY;
+        y <= lastY;
+        ++y)
+    {
+        for (int x = firstX;
+            x <= lastX;
+            ++x)
+        {
+            const double px =
+                static_cast<double>(x);
+
+            const double py =
+                static_cast<double>(y);
+
+            const double projection =
+                ((px - x0) * dx +
+                    (py - y0) * dy) /
+                lengthSquared;
+
+            const double t =
+                std::clamp(
+                    projection,
+                    0.0,
+                    1.0);
+
+            const double nearestX =
+                x0 + t * dx;
+
+            const double nearestY =
+                y0 + t * dy;
+
+            const double distance =
+                std::hypot(
+                    px - nearestX,
+                    py - nearestY);
+
+            const double coverage =
+                std::clamp(
+                    1.25 - distance,
+                    0.0,
+                    1.0);
+
+            if (coverage <= 0.0)
+            {
+                continue;
+            }
+
+            const std::uint32_t contribution =
+                static_cast<std::uint32_t>(
+                    coverage *
+                    static_cast<double>(
+                        intensity));
+
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(
+                    image_.width()) +
+                static_cast<std::size_t>(x);
+
+            TracePixel& pixel =
+                trace_[index];
+
+            const auto addChannel =
+                [contribution](
+                    std::uint16_t& destination,
+                    int channel)
+                {
+                    const std::uint32_t scaled =
+                        contribution *
+                        static_cast<std::uint32_t>(
+                            std::clamp(
+                                channel,
+                                0,
+                                255)) /
+                        255u;
+
+                    destination =
+                        static_cast<std::uint16_t>(
+                            std::min<std::uint32_t>(
+                                65535u,
+                                static_cast<std::uint32_t>(
+                                    destination) +
+                                scaled));
+                };
+
+            addChannel(
+                pixel.red,
+                red);
+
+            addChannel(
+                pixel.green,
+                green);
+
+            addChannel(
+                pixel.blue,
+                blue);
         }
     }
 }

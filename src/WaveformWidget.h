@@ -32,6 +32,8 @@ signals:
     void zoomChanged(
         bool zoomed);
 
+    void scrollPositionChanged(
+        double position);
 private:
     double displayBandwidthMHz_ = 6.75;
 

@@ -71,12 +71,19 @@ MainWindow::MainWindow(QWidget* parent)
         {
             waveformWidget_->setZoomed(
                 zoomed);
-
+            videoEngine_->setWaveformZoomed(
+                zoomed);
             waveformZoomButton->setText(
                 zoomed
                 ? "X10"
                 : "X1");
         });
+
+    connect(
+        waveformWidget_,
+        &WaveformWidget::scrollPositionChanged,
+        videoEngine_,
+        &VideoEngine::setWaveformScrollPosition);
 
     auto* lineSelector =
         new QSpinBox(toolbar);

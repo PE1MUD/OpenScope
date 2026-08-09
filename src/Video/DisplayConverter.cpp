@@ -298,19 +298,6 @@ QImage DisplayConverter::convert(
         setupUs +
         composeUs;
 
-    static int debugCounter = 0;
 
-    if (++debugCounter >= 25)
-    {
-        debugCounter = 0;
-
-        qDebug()
-            << "DisplayConverter:"
-            << "size =" << outputWidth
-            << "x" << outputHeight
-            << "setup =" << setupUs / 1000.0 << "ms"
-            << "compose =" << composeUs / 1000.0 << "ms"
-            << "total =" << totalUs / 1000.0 << "ms";
-    }
     return image;
 }

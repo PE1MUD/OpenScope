@@ -69,15 +69,15 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
 
     ++captureFrameCount;
 
-    if (captureFpsTimer.elapsed() >= 1000)
-    {
-        qDebug()
-            << "DeckLink callback FPS ="
-            << captureFrameCount;
+    //if (captureFpsTimer.elapsed() >= 1000)
+    //{
+    //    qDebug()
+    //        << "DeckLink callback FPS ="
+    //        << captureFrameCount;
 
         captureFrameCount = 0;
-        captureFpsTimer.restart();
-    }
+    //    captureFpsTimer.restart();
+    //}
     if (videoFrame == nullptr || videoEngine_ == nullptr)
         return S_OK;
 

@@ -32,7 +32,9 @@ public:
     void cancelWriteFrame();
 
     void setSelectedLine(int line);
-    
+    void setWaveformZoomed(bool zoomed);
+    void setWaveformScrollPosition(
+        double position);
     void setWaveformOutputSize(
         int width,
         int height);

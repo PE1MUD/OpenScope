@@ -47,6 +47,8 @@ void WaveformWidget::setScrollPosition(
             position,
             0.0,
             1.0);
+    emit scrollPositionChanged(
+        scrollPosition_);
 
     update();
 }
@@ -73,9 +75,7 @@ void WaveformWidget::setZoomed(bool zoomed)
         zoomed_);
 
     emit outputSizeChanged(
-        zoomed_
-        ? width() * 10
-        : width(),
+        width(),
         height());
 
     update();
@@ -107,45 +107,13 @@ void WaveformWidget::paintEvent(
     const int waveformHeight =
         height() - sliderHeight;
 
-    if (zoomed_)
-    {
-        const int visibleWidth =
-            width();
-
-        const int maximumOffset =
-            std::max(
-                0,
-                image().width() - visibleWidth);
-
-        const int sourceX =
-            static_cast<int>(
-                scrollPosition_ *
-                static_cast<double>(
-                    maximumOffset));
-
-        painter.drawImage(
-            QRect(
-                0,
-                0,
-                width(),
-                waveformHeight),
-            image(),
-            QRect(
-                sourceX,
-                0,
-                visibleWidth,
-                image().height()));
-    }
-    else
-    {
-        painter.drawImage(
-            QRect(
-                0,
-                0,
-                width(),
-                waveformHeight),
-            image());
-    }
+    painter.drawImage(
+        QRect(
+            0,
+            0,
+            width(),
+            waveformHeight),
+        image());
 
     QString text =
         QString("Trace BW %1 MHz")

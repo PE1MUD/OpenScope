@@ -62,6 +62,16 @@ private:
         int green,
         int blue);
 
+    void plotSegment(
+        double x0,
+        double y0,
+        double x1,
+        double y1,
+        int intensity,
+        int red,
+        int green,
+        int blue);
+
     QImage image_;
 
     std::vector<std::uint32_t> hits_;

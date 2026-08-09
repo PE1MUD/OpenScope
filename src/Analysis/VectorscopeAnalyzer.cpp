@@ -56,10 +56,6 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
     if (selectedLine_ < 0)
     {
         renderAllLines(frame);
-        //qDebug()
-        //    << "Vectorscope analyze total ="
-        //    << timer.nsecsElapsed() / 1000000.0
-        //    << "ms";
         return;
     }
 
@@ -351,26 +347,6 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 
     const qint64 renderUs =
         timer.nsecsElapsed() / 1000;
-
-    static int debugCounter = 0;
-
-    if (++debugCounter >= 25)
-    {
-        debugCounter = 0;
-
-        qDebug()
-            << "Vectorscope:"
-            << "mode =" << (selectedLine_ < 0 ? "ALL" : "LINE")
-            << "samples =" << (lastSample - firstSample)
-            << "subdivisions =" << totalSubdivisions
-            << "points =" << plottedPoints
-            << "setup =" << setupUs / 1000.0 << "ms"
-            << "stats =" << statisticsUs / 1000.0 << "ms"
-            << "render =" << renderUs / 1000.0 << "ms"
-            << "size =" << image_.width()
-            << "x" << image_.height();
-    }
-
 }
 const QImage& VectorscopeAnalyzer::image() const
 {

@@ -114,6 +114,7 @@ VideoEngine::VideoEngine(QObject* parent)
         },
         Qt::DirectConnection);
 
+
     displayThread_.start();
     
 }
@@ -1092,4 +1093,18 @@ void VideoEngine::lumaCoordinatorLoop()
         }
 
     }
+}
+
+void VideoEngine::setWaveformZoomed(
+    bool zoomed)
+{
+    waveformRenderer_.setZoomed(
+        zoomed);
+}
+
+void VideoEngine::setWaveformScrollPosition(
+    double position)
+{
+    waveformRenderer_.setScrollPosition(
+        position);
 }
