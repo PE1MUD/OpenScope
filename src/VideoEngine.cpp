@@ -18,10 +18,12 @@ VideoEngine::VideoEngine(QObject* parent)
             1u,
             std::thread::hardware_concurrency());
 
-    const unsigned int workerCount =
-        std::max(
-            1u,
-            hardwareThreads / 4u);
+    //const unsigned int workerCount =
+    //    std::max(
+    //        1u,
+    //        hardwareThreads / 4u);
+
+    const unsigned int workerCount = 16;
 
     lumaWorkers_.resize(workerCount);
 

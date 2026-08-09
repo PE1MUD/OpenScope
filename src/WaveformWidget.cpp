@@ -1,33 +1,163 @@
 #include "WaveformWidget.h"
-#include <QResizeEvent>
+
 #include <QPainter>
+#include <QResizeEvent>
+#include <QSlider>
+#include <algorithm>
 
 WaveformWidget::WaveformWidget(QWidget* parent)
     : VideoWidget(parent)
-
 {
-        fpsTimer_.start();
+    fpsTimer_.start();
+
+    scrollSlider_ =
+        new QSlider(
+            Qt::Horizontal,
+            this);
+
+    scrollSlider_->setRange(
+        0,
+        1000);
+
+    scrollSlider_->setValue(0);
+    scrollSlider_->hide();
+
+    connect(
+        scrollSlider_,
+        &QSlider::valueChanged,
+        this,
+        [this](int value)
+        {
+            setScrollPosition(
+                static_cast<double>(value) /
+                1000.0);
+        });
 }
 
-void WaveformWidget::paintEvent(QPaintEvent* event)
+bool WaveformWidget::isZoomed() const
+{
+    return zoomed_;
+}
+
+void WaveformWidget::setScrollPosition(
+    double position)
+{
+    scrollPosition_ =
+        std::clamp(
+            position,
+            0.0,
+            1.0);
+
+    update();
+}
+
+void WaveformWidget::setZoomed(bool zoomed)
+{
+    qDebug()
+        << "WaveformWidget zoomed:"
+        << zoomed
+        << "output:"
+        << (zoomed ? width() * 10 : width());
+
+    if (zoomed_ == zoomed)
+    {
+        return;
+    }
+
+    zoomed_ = zoomed;
+
+    scrollSlider_->setVisible(
+        zoomed_);
+
+    emit zoomChanged(
+        zoomed_);
+
+    emit outputSizeChanged(
+        zoomed_
+        ? width() * 10
+        : width(),
+        height());
+
+    update();
+}
+
+void WaveformWidget::paintEvent(
+    QPaintEvent* event)
 {
     Q_UNUSED(event);
 
     QPainter painter(this);
-    painter.fillRect(rect(), Qt::black);
 
-    if (image().isNull()) {
+    painter.fillRect(
+        rect(),
+        Qt::black);
+
+    if (image().isNull())
+    {
         return;
     }
 
-    painter.drawImage(
-        QRect(0, 0, width(), height()),
-        image());
+
+
+    const int sliderHeight =
+        scrollSlider_->isVisible()
+        ? scrollSlider_->height()
+        : 0;
+
+    const int waveformHeight =
+        height() - sliderHeight;
+
+    if (zoomed_)
+    {
+        const int visibleWidth =
+            width();
+
+        const int maximumOffset =
+            std::max(
+                0,
+                image().width() - visibleWidth);
+
+        const int sourceX =
+            static_cast<int>(
+                scrollPosition_ *
+                static_cast<double>(
+                    maximumOffset));
+
+        painter.drawImage(
+            QRect(
+                0,
+                0,
+                width(),
+                waveformHeight),
+            image(),
+            QRect(
+                sourceX,
+                0,
+                visibleWidth,
+                image().height()));
+    }
+    else
+    {
+        painter.drawImage(
+            QRect(
+                0,
+                0,
+                width(),
+                waveformHeight),
+            image());
+    }
+
     QString text =
         QString("Trace BW %1 MHz")
-        .arg(displayBandwidthMHz_, 0, 'f', 2);
- 
-    QFont font = painter.font();
+        .arg(
+            displayBandwidthMHz_,
+            0,
+            'f',
+            2);
+
+    QFont font =
+        painter.font();
+
     font.setBold(true);
     font.setPointSize(10);
 
@@ -37,42 +167,67 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
     if (displayBandwidthMHz_ >= 6.75)
     {
-        // Full bandwidth
-        color = QColor(255,255,255);
+        color =
+            QColor(
+                255,
+                255,
+                255);
     }
     else if (displayBandwidthMHz_ >= 5.5)
     {
-        // Light yellow
-        color = QColor(255,255,128);
+        color =
+            QColor(
+                255,
+                255,
+                128);
     }
     else if (displayBandwidthMHz_ >= 4.0)
     {
-        // Yellow
-        color = QColor(255,255,0);
+        color =
+            QColor(
+                255,
+                255,
+                0);
     }
     else if (displayBandwidthMHz_ >= 2.5)
     {
-        // Orange
-        color = QColor(255,180,0);
+        color =
+            QColor(
+                255,
+                180,
+                0);
     }
     else
     {
-        // Red
-        color = QColor(255,64,64);
+        color =
+            QColor(
+                255,
+                64,
+                64);
     }
 
     QRect r =
         painter.fontMetrics()
         .boundingRect(text);
 
-    r.adjust(-6, -4, 6, 4);
+    r.adjust(
+        -6,
+        -4,
+        6,
+        4);
 
     r.moveTopRight(
-        QPoint(width() - 10, 10));
+        QPoint(
+            width() - 10,
+            10));
 
     painter.fillRect(
         r,
-        QColor(0, 0, 0, 180));
+        QColor(
+            0,
+            0,
+            0,
+            180));
 
     painter.setPen(color);
 
@@ -83,49 +238,76 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
     const QString fpsText =
         QString("FPS %1")
-        .arg(fps_, 0, 'f', 1);
+        .arg(
+            fps_,
+            0,
+            'f',
+            1);
 
     QRect fpsRect =
-        painter.fontMetrics().boundingRect(fpsText);
+        painter.fontMetrics()
+        .boundingRect(fpsText);
 
-    fpsRect.adjust(-6, -4, 6, 4);
+    fpsRect.adjust(
+        -6,
+        -4,
+        6,
+        4);
 
     fpsRect.moveTopRight(
-        QPoint(width() - 140, 10));
+        QPoint(
+            width() - 140,
+            10));
 
     painter.fillRect(
         fpsRect,
-        QColor(0, 0, 0, 180));
+        QColor(
+            0,
+            0,
+            0,
+            180));
 
     painter.setPen(
         fps_ >= 24.0
-        ? QColor(220, 220, 220)
-        : QColor(255, 180, 0));
+        ? QColor(
+            220,
+            220,
+            220)
+        : QColor(
+            255,
+            180,
+            0));
 
     painter.drawText(
         fpsRect,
         Qt::AlignCenter,
         fpsText);
-
 }
 
-void WaveformWidget::resizeEvent(QResizeEvent* event)
+void WaveformWidget::resizeEvent(
+    QResizeEvent* event)
 {
     VideoWidget::resizeEvent(event);
 
-    qDebug()
-        << "WaveformWidget size:"
-        << event->size();
+    constexpr int sliderHeight = 24;
+
+    scrollSlider_->setGeometry(
+        0,
+        height() - sliderHeight,
+        width(),
+        sliderHeight);
 
     emit outputSizeChanged(
-        event->size().width(),
-        event->size().height());
+        width(),
+        height());
 }
 
 void WaveformWidget::setDisplayBandwidthMHz(
     double bandwidthMHz)
 {
-    displayBandwidthMHz_ = bandwidthMHz;
+    displayBandwidthMHz_ =
+        bandwidthMHz;
+
     update();
 }
 
@@ -139,11 +321,14 @@ void WaveformWidget::notifyFrameRendered()
     if (elapsedMs >= 500)
     {
         fps_ =
-            static_cast<double>(frameCounter_) *
+            static_cast<double>(
+                frameCounter_) *
             1000.0 /
-            static_cast<double>(elapsedMs);
+            static_cast<double>(
+                elapsedMs);
 
         frameCounter_ = 0;
+
         fpsTimer_.restart();
 
         update();

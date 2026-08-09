@@ -3,7 +3,6 @@
 #include "analysis/Analyzer.h"
 #include "video/ReconstructedLumaFrame.h"
 #include <QImage>
-
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -11,20 +10,26 @@
 // Minimum horizontal pixels per cycle for a visually pleasing waveform.
 inline constexpr double kPixelsPerCycleForTraceBW = 6.0;
 
-
 class WaveformRenderer final : public Analyzer
 {
 public:
     WaveformRenderer();
 
-    void analyze(const Yuv444Frame& frame) override;
+    void analyze(
+        const Yuv444Frame& frame) override;
+
     void analyze(
         const Yuv444Frame& frame,
         const ReconstructedLumaFrame& reconstructedLuma);
 
     void setSelectedLine(int line);
     void setPersistence(int persistence);
-    void setOutputSize(int width, int height);
+    void setOutputSize(
+        int width,
+        int height);
+
+    void setZoomed(bool zoomed);
+    void setScrollPosition(double position);
 
     [[nodiscard]] double traceBandwidthMHz() const;
     [[nodiscard]] const QImage& image() const;
@@ -38,10 +43,14 @@ private:
     };
 
     void clearOrFadeTrace();
+
     void renderSingleLine(
         const Yuv444Frame& frame,
         const ReconstructedLumaFrame& reconstructedLuma);
-    void renderAllLines(const Yuv444Frame& frame);
+
+    void renderAllLines(
+        const Yuv444Frame& frame);
+
     void composeTraceImage();
     void plotLuminanceTrace();
 
@@ -70,4 +79,7 @@ private:
 
     int selectedLine_ = -1;
     int persistence_ = 0;
+
+    bool zoomed_ = false;
+    double scrollPosition_ = 0.0;
 };

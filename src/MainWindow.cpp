@@ -6,11 +6,23 @@
 #include "WaveformWidget.h"
 #include "DeckLinkProbe.h"
 #include "VectorscopeWidget.h"
-#include <algorithm>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <windows.h>
+
+#include <QLabel>
+#include <QPushButton>
+#include <QSlider>
 #include <QSpinBox>
 #include <QToolBar>
-#include <QSlider>
-#include <QLabel>
+
+#include <algorithm>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -19,53 +31,117 @@ MainWindow::MainWindow(QWidget* parent)
 {
     setWindowTitle("OpenScope");
     resize(900, 720);
+    SetThreadPriority(
+        GetCurrentThread(),
+        THREAD_PRIORITY_HIGHEST);
 
-    waveformWidget_ = new WaveformWidget;
+    waveformWidget_ =
+        new WaveformWidget;
 
     vectorscopeWidget_ =
         new VectorscopeWidget;
 
-    workspace_ = new ScopeWorkspace(
-        videoWidget_,
-        waveformWidget_,
-        vectorscopeWidget_,
-        this);
+    workspace_ =
+        new ScopeWorkspace(
+            videoWidget_,
+            waveformWidget_,
+            vectorscopeWidget_,
+            this);
 
     setCentralWidget(workspace_);
 
-    auto* toolbar = addToolBar("Line selector");
+    auto* toolbar =
+        addToolBar("Line selector");
 
-    auto* lineSelector = new QSpinBox(toolbar);
-    lineSelector->setRange(-1, 575);
+    auto* waveformZoomButton =
+        new QPushButton(
+            "X1",
+            toolbar);
+
+    waveformZoomButton->setCheckable(true);
+
+    toolbar->addWidget(
+        waveformZoomButton);
+
+    connect(
+        waveformZoomButton,
+        &QPushButton::toggled,
+        this,
+        [this, waveformZoomButton](bool zoomed)
+        {
+            waveformWidget_->setZoomed(
+                zoomed);
+
+            waveformZoomButton->setText(
+                zoomed
+                ? "X10"
+                : "X1");
+        });
+
+    auto* lineSelector =
+        new QSpinBox(toolbar);
+
+    lineSelector->setRange(
+        -1,
+        575);
+
     lineSelector->setValue(320);
-    lineSelector->setSpecialValueText("All");
 
-    toolbar->addWidget(lineSelector);
+    lineSelector->setSpecialValueText(
+        "All");
+
+    toolbar->addWidget(
+        lineSelector);
 
     connect(
         lineSelector,
         &QSpinBox::valueChanged,
         videoEngine_,
         &VideoEngine::setSelectedLine);
-    auto* persistenceLabel = new QLabel("Pers", toolbar);
-    toolbar->addWidget(persistenceLabel);
 
-    auto* persistenceSlider = new QSlider(Qt::Horizontal, toolbar);
-    persistenceSlider->setRange(0, 255);
+    auto* persistenceLabel =
+        new QLabel(
+            "Pers",
+            toolbar);
+
+    toolbar->addWidget(
+        persistenceLabel);
+
+    auto* persistenceSlider =
+        new QSlider(
+            Qt::Horizontal,
+            toolbar);
+
+    persistenceSlider->setRange(
+        0,
+        255);
+
     persistenceSlider->setValue(0);
-    persistenceSlider->setFixedWidth(140);
 
-    toolbar->addWidget(persistenceSlider);
+    persistenceSlider->setFixedWidth(
+        140);
+
+    toolbar->addWidget(
+        persistenceSlider);
+
+    connect(
+        persistenceSlider,
+        &QSlider::valueChanged,
+        videoEngine_,
+        &VideoEngine::setWaveformPersistence);
+
     connect(
         videoEngine_,
         &VideoEngine::vectorscopeChanged,
         vectorscopeWidget_,
         &VectorscopeWidget::setImage);
+
     connect(
         vectorscopeWidget_,
         &VectorscopeWidget::renderSizeChanged,
         videoEngine_,
         &VideoEngine::setVectorscopeOutputSize);
+
     const int vectorscopeSize =
         std::min(
             vectorscopeWidget_->width(),
@@ -74,55 +150,45 @@ MainWindow::MainWindow(QWidget* parent)
     videoEngine_->setVectorscopeOutputSize(
         vectorscopeSize,
         vectorscopeSize);
-    connect(
-        persistenceSlider,
-        &QSlider::valueChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformPersistence);
+
     connect(
         videoWidget_,
         &VideoWidget::outputSizeChanged,
         videoEngine_,
         &VideoEngine::setVideoOutputSize);
+
     connect(
         videoEngine_,
         &VideoEngine::frameChanged,
         videoWidget_,
         &VideoWidget::setImage);
+
     connect(
         videoEngine_,
         &VideoEngine::waveformChanged,
         waveformWidget_,
         [this](const QImage& image)
         {
-            waveformWidget_->setImage(image);
+            waveformWidget_->setImage(
+                image);
+
             waveformWidget_->notifyFrameRendered();
         });
+
     connect(
         waveformWidget_,
         &WaveformWidget::outputSizeChanged,
         this,
-        [this](int w, int h)
+        [this](int width, int height)
         {
-            Q_UNUSED(h);
-
             videoEngine_->setWaveformOutputSize(
-                w,
-                waveformWidget_->height());
-
-            constexpr double captureSampleRateMHz = 13.5;
-            constexpr double captureSamplesPerLine = 720.0;
-            constexpr double pixelsPerCycleForAccurateTrace = 8.0;
-
-            const double waveformBandwidthMHz =
-                captureSampleRateMHz *
-                static_cast<double>(w) /
-                (captureSamplesPerLine *
-                    pixelsPerCycleForAccurateTrace);
+                width,
+                height);
 
             waveformWidget_->setDisplayBandwidthMHz(
                 videoEngine_->traceBandwidthMHz());
         });
+
     videoEngine_->setVideoOutputSize(
         videoWidget_->width(),
         videoWidget_->height());
