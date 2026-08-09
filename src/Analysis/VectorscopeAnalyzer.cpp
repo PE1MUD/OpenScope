@@ -72,7 +72,8 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
     const double scale =
         static_cast<double>(
             std::min(image_.width(), image_.height())) *
-        0.5 /
+        0.5 *
+        scale_ /
         32768.0;
 
     std::size_t firstSample = 0;
@@ -199,9 +200,9 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 
                     line[ix] =
                         qRgb(
-                            0,
                             newGreen,
-                            0);
+                            newGreen,
+                            newGreen);
                 }
             }
         };
@@ -403,19 +404,16 @@ void VectorscopeAnalyzer::renderAllLines(
     const double centerY =
         (kAllLinesHeight - 1) * 0.5;
 
-    //
-    // Separate X/Y scale is intentional.
-    // The internal buffer is 360 x 384 and is stretched
-    // to the square vectorscope viewport afterwards.
-    //
     const double scaleX =
         static_cast<double>(kAllLinesWidth) *
-        0.5 /
+        0.5 *
+        scale_ /
         32768.0;
 
     const double scaleY =
         static_cast<double>(kAllLinesHeight) *
-        0.5 /
+        0.5 *
+        scale_ /
         32768.0;
 
     constexpr double chromaCenter =
@@ -496,10 +494,10 @@ void VectorscopeAnalyzer::renderAllLines(
     }
 
     constexpr double whitePoint =
-        125000.0;
+        200000.0;
 
     constexpr double gamma =
-        0.15;
+        0.25;
 
     constexpr double minimumVisible =
         0.08;
@@ -552,9 +550,9 @@ void VectorscopeAnalyzer::renderAllLines(
 
             outputLine[x] =
                 qRgb(
-                    0,
                     green,
-                    0);
+                    green,
+                    green);
         }
     }
 
@@ -700,4 +698,9 @@ std::uint32_t VectorscopeAnalyzer::accumulateLineSegment(
         density_[index] += pointEnergy;
     }
     return static_cast<std::uint32_t>(steps + 1);
+}
+
+void VectorscopeAnalyzer::setScale(double scale)
+{
+    scale_ = scale;
 }

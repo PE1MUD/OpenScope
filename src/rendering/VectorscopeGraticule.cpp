@@ -1,4 +1,5 @@
 #include "VectorscopeGraticule.h"
+#include "VectorscopeSettings.h"
 #include "standards/ColorBars.h"
 #include "standards/ColorMatrices.h"
 #include <QColor>
@@ -31,15 +32,16 @@ namespace
 
     constexpr TargetTolerance kSmallTolerance
     {
-        3.0,
-        5.0
+        VectorscopeSettings::smallToleranceHueDegrees,
+        VectorscopeSettings::smallToleranceAmplitudePercent
     };
 
     constexpr TargetTolerance kLargeTolerance
     {
-        10.0,
-        20.0
+        VectorscopeSettings::largeToleranceHueDegrees,
+        VectorscopeSettings::largeToleranceAmplitudePercent
     };
+
     inline PolarTarget toPolar(
         const Target& target)
     {
@@ -200,28 +202,26 @@ namespace
                 };
 
 
-            // Pick the outer corner of the tolerance box.
 
-            const double direction =
-                polar.radius >= 0.0
-                ? 1.0
-                : -1.0;
+            drawCorner(
+                p1,
+                p2,
+                p4);
 
+            drawCorner(
+                p2,
+                p1,
+                p3);
 
-            if (polar.angleDegrees >= 0.0)
-            {
-                drawCorner(
-                    p3,
-                    p2,
-                    p4);
-            }
-            else
-            {
-                drawCorner(
-                    p1,
-                    p2,
-                    p4);
-            }
+            drawCorner(
+                p3,
+                p2,
+                p4);
+
+            drawCorner(
+                p4,
+                p1,
+                p3);
         }
     }
     constexpr Target makeTarget(
@@ -309,19 +309,41 @@ namespace
             VideoColorStandard::Rec601_625)
     };
 
+    QColor targetColor(
+        ColorBar color,
+        ColorBarLevel level)
+    {
+        const Rgb rgb =
+            colorBar(
+                color,
+                level);
+
+        return QColor(
+            static_cast<int>(rgb.r * 255.0),
+            static_cast<int>(rgb.g * 255.0),
+            static_cast<int>(rgb.b * 255.0));
+    }
+
+
     void drawTargets(
         QPainter& painter,
         const QPointF& center,
         double radius,
         const Target* targets,
-        std::size_t targetCount)
+        std::size_t targetCount,
+        ColorBarLevel level,
+        double lineWidth)
     {
-        QPen targetPen(
-            QColor(120, 115, 80),
-            1.0);
-
-        painter.setPen(targetPen);
         painter.setBrush(Qt::NoBrush);
+        QFont labelFont =
+            painter.font();
+
+        labelFont.setPixelSize(
+            static_cast<int>(
+                radius *
+                VectorscopeSettings::targetLabelSizeFraction));
+
+        painter.setFont(labelFont);
 
         for (std::size_t i = 0;
             i < targetCount;
@@ -330,6 +352,12 @@ namespace
             const Target& target =
                 targets[i];
 
+            painter.setPen(
+                QPen(
+                    targetColor(
+                        target.color,
+                        level),
+                    lineWidth));
             constexpr double kCbCrFullScale = 0.5;
 
             const QPointF position(
@@ -351,13 +379,66 @@ namespace
                 target,
                 kSmallTolerance);
             
-            painter.drawText(
-                QPointF(
-                    position.x() + 12.0,
-                    position.y() + 5.0),
-                colorBarShortName(target.color));
+            painter.setPen(
+                QPen(
+                    QColor(135, 135, 125),
+                    lineWidth));
+
+            if (level == ColorBarLevel::Percent100)
+            {
+                const QPointF radialDirection =
+                    (position - center) /
+                    std::hypot(
+                        position.x() - center.x(),
+                        position.y() - center.y());
+
+                QPointF tangentialDirection(
+                    -radialDirection.y(),
+                    radialDirection.x());
+
+                if (position.x() < center.x())
+                {
+                    tangentialDirection = -tangentialDirection;
+                }
+
+                const QPointF labelPosition =
+                    position +
+                    tangentialDirection *
+                    (radius *
+                        VectorscopeSettings::targetLabelOffsetFraction) +
+                    radialDirection *
+                    (radius *
+                        VectorscopeSettings::targetLabelRadialOffsetFraction);
+
+                const QString label =
+                    colorBarShortName(target.color);
+
+                const QFontMetricsF metrics(
+                    painter.font());
+
+                const QRectF textBounds =
+                    metrics.boundingRect(label);
+
+                painter.drawText(
+                    QPointF(
+                        labelPosition.x() -
+                        textBounds.width() * 0.5,
+                        labelPosition.y() +
+                        textBounds.height() * 0.5),
+                    label);
+            }
         }
     }
+}
+
+void VectorscopeGraticule::setScale(double scale)
+{
+    scale_ = scale;
+}
+
+void VectorscopeGraticule::setLineWidth(double width)
+{
+    lineWidth_ = width;
 }
 
 void VectorscopeGraticule::drawAxes(
@@ -365,9 +446,13 @@ void VectorscopeGraticule::drawAxes(
     const QPointF& center,
     double radius) const
 {
+    const double labelOffset =
+        radius *
+        VectorscopeSettings::axisLabelOffsetFraction;
+
     QPen graticulePen(
-        QColor(90, 90, 70),
-        1.0);
+        QColor(135, 135, 125),
+        lineWidth_);
 
     painter.setPen(graticulePen);
     painter.setBrush(Qt::NoBrush);
@@ -377,6 +462,38 @@ void VectorscopeGraticule::drawAxes(
         center,
         radius,
         radius);
+
+    for (int angle = 0;
+        angle < 360;
+        angle += 10)
+    {
+        const double angleRadians =
+            static_cast<double>(angle) *
+            std::numbers::pi /
+            180.0;
+
+        const QPointF direction(
+            std::cos(angleRadians),
+            -std::sin(angleRadians));
+
+        const QPointF outer =
+            center +
+            direction * radius;
+
+        const double tickLength =
+            radius *
+            VectorscopeSettings::degreeTickLengthFraction *
+            ((angle % 30 == 0) ? 2.0 : 1.0);
+
+        const QPointF inner =
+            center +
+            direction *
+            (radius - tickLength);
+
+        painter.drawLine(
+            inner,
+            outer);
+    }
 
     // Horizontal axis.
     painter.drawLine(
@@ -395,6 +512,55 @@ void VectorscopeGraticule::drawAxes(
         QPointF(
             center.x(),
             center.y() + radius));
+
+    QFont axisFont =
+        painter.font();
+    axisFont.setBold(true);
+
+    axisFont.setPixelSize(
+        static_cast<int>(
+            radius *
+            VectorscopeSettings::axisLabelSizeFraction));
+
+    painter.setFont(axisFont);
+
+    const QFontMetricsF metrics(
+        painter.font());
+
+    const QRectF uBounds =
+        metrics.boundingRect("U");
+
+    const QRectF vBounds =
+        metrics.boundingRect("V");
+
+    const QRectF uRect(
+        center.x() +
+        radius +
+        labelOffset * 2,
+        center.y() -
+        uBounds.height() * 0.5,
+        uBounds.width(),
+        uBounds.height());
+
+    painter.drawText(
+        uRect,
+        Qt::AlignCenter,
+        "U");
+
+    const QRectF vRect(
+        center.x() -
+        vBounds.width() * 0.5,
+        center.y() -
+        radius -
+        labelOffset -
+        vBounds.height(),
+        vBounds.width(),
+        vBounds.height());
+
+    painter.drawText(
+        vRect,
+        Qt::AlignCenter,
+        "V");
 }
 
 void VectorscopeGraticule::draw(
@@ -405,7 +571,7 @@ void VectorscopeGraticule::draw(
         scopeRect.center();
 
     const double radius =
-        scopeRect.width() * 0.45;
+        scopeRect.width() * 0.45 * scale_;
 
     drawAxes(
         painter,
@@ -417,12 +583,16 @@ void VectorscopeGraticule::draw(
         center,
         radius,
         kTargets75,
-        std::size(kTargets75));
+        std::size(kTargets75),
+        ColorBarLevel::Percent75,
+        lineWidth_);
 
     drawTargets(
         painter,
         center,
         radius,
         kTargets100,
-        std::size(kTargets100));
+        std::size(kTargets100),
+        ColorBarLevel::Percent100,
+        lineWidth_);
 }

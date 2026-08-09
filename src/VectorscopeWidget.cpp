@@ -1,5 +1,5 @@
 #include "VectorscopeWidget.h"
-
+#include "VectorscopeSettings.h"
 #include <QPainter>
 
 #include <algorithm>
@@ -8,6 +8,10 @@ VectorscopeWidget::VectorscopeWidget(QWidget* parent)
     : QWidget(parent)
 {
     setMinimumSize(1, 1);
+    graticule_.setScale(
+        VectorscopeSettings::scale);
+    setGraticuleLineWidth(
+        VectorscopeSettings::graticuleLineWidth);
 }
 
 void VectorscopeWidget::setImage(const QImage& image)
@@ -62,4 +66,10 @@ void VectorscopeWidget::paintEvent(QPaintEvent*)
     graticule_.draw(
         painter,
         scopeRect);
+}
+
+void VectorscopeWidget::setGraticuleLineWidth(double width)
+{
+    graticule_.setLineWidth(width);
+    update();
 }

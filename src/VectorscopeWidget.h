@@ -12,6 +12,7 @@ class VectorscopeWidget final : public QWidget
 
 public:
     explicit VectorscopeWidget(QWidget* parent = nullptr);
+    void setGraticuleLineWidth(double width);
 
 public slots:
     void setImage(const QImage& image);

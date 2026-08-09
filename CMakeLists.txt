@@ -100,6 +100,7 @@ qt_add_executable(OpenScope
     src/ScopeWorkspace.h
     src/VectorscopeWidget.h
     src/VectorscopeWidget.cpp
+    src/VectorscopeSettings.h
     src/video/Yuv444Frame.h
     src/video/Uyvy422ToYuv444Converter.h
     src/video/Uyvy422ToYuv444Converter.cpp

@@ -16,7 +16,7 @@ public:
     void setOutputSize(
         int width,
         int height);
-
+    void setScale(double scale);
     void analyze(const Yuv444Frame& frame);
 
     const QImage& image() const;
@@ -46,4 +46,5 @@ private:
     QImage allLinesImage_;
     std::vector<std::uint32_t> allLinesDensity_;
     int selectedLine_ = -1;
+    double scale_ = 1.0;
 };

@@ -1,5 +1,6 @@
 #include <QMetaObject>
 #include "VideoEngine.h"
+#include "VectorscopeSettings.h"
 #include <QElapsedTimer>
 #include <QDebug>
 #include <algorithm>
@@ -11,6 +12,8 @@ VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
 {
     setSelectedLine(320);
+    vectorscopeAnalyzer_.setScale(
+        VectorscopeSettings::scale);
     for (CapturedFrame& slot : captureSlots_)
     {
         slot.frame.resize(
