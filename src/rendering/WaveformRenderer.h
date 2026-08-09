@@ -70,8 +70,9 @@ private:
     std::vector<float> sourceY_;
     std::vector<float> sourceU_;
     std::vector<float> sourceV_;
-
     std::vector<float> displayY_;
+    std::vector<float> displayYMin_;
+    std::vector<float> displayYMax_;
     std::vector<float> displayU_;
     std::vector<float> displayV_;
 

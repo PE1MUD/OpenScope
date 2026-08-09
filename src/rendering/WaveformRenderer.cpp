@@ -102,7 +102,60 @@ void resampleLinear(
             fraction;
     }
 }
+void resampleMinMax(
+    std::span<const float> input,
+    std::span<float> outputMin,
+    std::span<float> outputMax)
+{
+    if (input.empty() ||
+        outputMin.empty() ||
+        outputMax.empty())
+    {
+        return;
+    }
 
+    const std::size_t outputSize =
+        std::min(
+            outputMin.size(),
+            outputMax.size());
+
+    for (std::size_t x = 0;
+        x < outputSize;
+        ++x)
+    {
+        const std::size_t first =
+            x * input.size() /
+            outputSize;
+
+        const std::size_t last =
+            std::max(
+                first + 1u,
+                (x + 1u) * input.size() /
+                outputSize);
+
+        float minimum = input[first];
+        float maximum = input[first];
+
+        for (std::size_t sourceIndex = first + 1u;
+            sourceIndex < last &&
+            sourceIndex < input.size();
+            ++sourceIndex)
+        {
+            minimum =
+                std::min(
+                    minimum,
+                    input[sourceIndex]);
+
+            maximum =
+                std::max(
+                    maximum,
+                    input[sourceIndex]);
+        }
+
+        outputMin[x] = minimum;
+        outputMax[x] = maximum;
+    }
+}
 WaveformRenderer::WaveformRenderer()
     : image_(
         720,
@@ -173,6 +226,14 @@ void WaveformRenderer::setOutputSize(
         TracePixel{});
 
     displayY_.resize(
+        static_cast<std::size_t>(
+            width));
+
+    displayYMin_.resize(
+        static_cast<std::size_t>(
+            width));
+
+    displayYMax_.resize(
         static_cast<std::size_t>(
             width));
 
@@ -438,9 +499,24 @@ void WaveformRenderer::renderSingleLine(
      * Resample only the visible interval to the
      * actual display width.
      */
-    resampleLinear(
-        sourceY_,
-        displayY_);
+    if (sourceY_.size() >
+        displayY_.size())
+    {
+        resampleMinMax(
+            sourceY_,
+            displayYMin_,
+            displayYMax_);
+
+        resampleLinear(
+            sourceY_,
+            displayY_);
+    }
+    else
+    {
+        resampleLinear(
+            sourceY_,
+            displayY_);
+    }
 
     resampleLinear(
         sourceU_,
@@ -625,21 +701,12 @@ void WaveformRenderer::plotLuminanceTrace()
         return;
     }
 
-    auto sampleY =
-        [this, height](int x)
+    auto sampleToPlotY =
+        [height](double sample)
         {
-            x =
-                std::clamp(
-                    x,
-                    0,
-                    image_.width() - 1);
-
             const double yValue =
                 std::clamp(
-                    static_cast<double>(
-                        displayY_[
-                            static_cast<std::size_t>(
-                                x)]),
+                    sample,
                     0.0,
                     kMaximumSampleValue);
 
@@ -652,81 +719,185 @@ void WaveformRenderer::plotLuminanceTrace()
                 kMaximumSampleValue;
         };
 
-    constexpr double targetStepPixels = 0.5;
+    auto plotSmoothCurve =
+        [this, width](
+            const auto& sampleY,
+            int intensity)
+        {
+            constexpr double targetStepPixels = 0.5;
+
+            for (int x = 0;
+                x < width - 1;
+                ++x)
+            {
+                const double p0 =
+                    sampleY(x - 1);
+
+                const double p1 =
+                    sampleY(x);
+
+                const double p2 =
+                    sampleY(x + 1);
+
+                const double p3 =
+                    sampleY(x + 2);
+
+                const double distance =
+                    std::hypot(
+                        1.0,
+                        p2 - p1);
+
+                const int subdivisions =
+                    std::clamp(
+                        static_cast<int>(
+                            std::ceil(
+                                distance /
+                                targetStepPixels)),
+                        1,
+                        256);
+
+                for (int step = 0;
+                    step <= subdivisions;
+                    ++step)
+                {
+                    const double t =
+                        static_cast<double>(step) /
+                        static_cast<double>(
+                            subdivisions);
+
+                    const double t2 =
+                        t * t;
+
+                    const double t3 =
+                        t2 * t;
+
+                    const double y =
+                        0.5 *
+                        (
+                            2.0 * p1 +
+                            (-p0 + p2) * t +
+                            (2.0 * p0 -
+                                5.0 * p1 +
+                                4.0 * p2 -
+                                p3) * t2 +
+                            (-p0 +
+                                3.0 * p1 -
+                                3.0 * p2 +
+                                p3) * t3
+                            );
+
+                    plotBeam(
+                        static_cast<double>(x) + t,
+                        y,
+                        intensity,
+                        255,
+                        255,
+                        255);
+                }
+            }
+        };
+
+    auto sampleCenter =
+        [this, &sampleToPlotY](int x)
+        {
+            x =
+                std::clamp(
+                    x,
+                    0,
+                    image_.width() - 1);
+
+            return
+                sampleToPlotY(
+                    static_cast<double>(
+                        displayY_[
+                            static_cast<std::size_t>(
+                                x)]));
+        };
+
+    // Keep the original smooth waveform as the primary trace.
+    plotSmoothCurve(
+        sampleCenter,
+        kLuminanceBeamIntensity);
+
+    if (sourceY_.size() <=
+        displayY_.size())
+    {
+        return;
+    }
+
+    /*
+     * When several reconstructed source samples collapse into one
+     * display column, preserve their full vertical energy.
+     *
+     * The smooth centre trace stays visible where the waveform still
+     * fits the horizontal display resolution. If the samples within
+     * one display column span a meaningful vertical range, draw that
+     * complete min/max range solid white instead of inventing a
+     * misleading interpolated waveform.
+     */
+    constexpr double kMinMaxFillThresholdPixels = 3.0;
 
     for (int x = 0;
-        x < width - 1;
+        x < width;
         ++x)
     {
-        const double p0 =
-            sampleY(x - 1);
+        const std::size_t index =
+            static_cast<std::size_t>(x);
 
-        const double p1 =
-            sampleY(x);
+        const double upperY =
+            sampleToPlotY(
+                static_cast<double>(
+                    displayYMax_[index]));
 
-        const double p2 =
-            sampleY(x + 1);
+        const double lowerY =
+            sampleToPlotY(
+                static_cast<double>(
+                    displayYMin_[index]));
 
-        const double p3 =
-            sampleY(x + 2);
+        const double spanPixels =
+            std::abs(
+                lowerY - upperY);
 
-        const double distance =
-            std::hypot(
-                1.0,
-                p2 - p1);
+        if (spanPixels <
+            kMinMaxFillThresholdPixels)
+        {
+            continue;
+        }
 
-        const int subdivisions =
+        const int firstY =
             std::clamp(
                 static_cast<int>(
                     std::ceil(
-                        distance /
-                        targetStepPixels)),
-                1,
-                256);
-
-        for (int step = 0;
-            step <= subdivisions;
-            ++step)
-        {
-            const double t =
-                static_cast<double>(step) /
-                static_cast<double>(
-                    subdivisions);
-
-            const double t2 =
-                t * t;
-
-            const double t3 =
-                t2 * t;
-
-            const double y =
-                0.5 *
-                (
-                    2.0 * p1 +
-                    (-p0 + p2) * t +
-                    (2.0 * p0 -
-                        5.0 * p1 +
-                        4.0 * p2 -
-                        p3) * t2 +
-                    (-p0 +
-                        3.0 * p1 -
-                        3.0 * p2 +
-                        p3) * t3
-                    );
-
-            const double plotX =
-                static_cast<double>(x) +
-                t;
-
-            plotBeam(
-                plotX,
-                y,
-                kLuminanceBeamIntensity,
+                        std::min(
+                            upperY,
+                            lowerY))),
                 0,
+                height - 1);
+
+        const int lastY =
+            std::clamp(
+                static_cast<int>(
+                    std::floor(
+                        std::max(
+                            upperY,
+                            lowerY))),
+                0,
+                height - 1);
+
+        for (int y = firstY;
+            y <= lastY;
+            ++y)
+        {
+            plotBeam(
+                static_cast<double>(x),
+                static_cast<double>(y),
+                kLuminanceBeamIntensity,
                 255,
-                0);
+                255,
+                255);
         }
     }
+
 }
 
 void WaveformRenderer::composeTraceImage()
@@ -912,9 +1083,9 @@ void WaveformRenderer::renderAllLines(
 
             destination[x] =
                 qRgb(
-                    0,
                     green,
-                    0);
+                    green,
+                    green);
         }
     }
 }

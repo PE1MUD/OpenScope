@@ -495,6 +495,11 @@ void VectorscopeGraticule::drawAxes(
             outer);
     }
 
+    painter.setPen(
+        QPen(
+            QColor(90, 90, 85),
+            lineWidth_));
+
     // Horizontal axis.
     painter.drawLine(
         QPointF(
@@ -535,12 +540,14 @@ void VectorscopeGraticule::drawAxes(
 
     const QRectF uRect(
         center.x() +
-        radius +
-        labelOffset * 2,
-        center.y() -
-        uBounds.height() * 0.5,
+        radius -
+        labelOffset -
         uBounds.width(),
-        uBounds.height());
+        center.y() -
+        labelOffset -
+        uBounds.height(),
+        uBounds.width(),
+        uBounds.height());;
 
     painter.drawText(
         uRect,
@@ -548,12 +555,11 @@ void VectorscopeGraticule::drawAxes(
         "U");
 
     const QRectF vRect(
-        center.x() -
-        vBounds.width() * 0.5,
+        center.x() +
+        labelOffset,
         center.y() -
-        radius -
-        labelOffset -
-        vBounds.height(),
+        radius +
+        labelOffset,
         vBounds.width(),
         vBounds.height());
 
@@ -572,11 +578,14 @@ void VectorscopeGraticule::draw(
 
     const double radius =
         scopeRect.width() * 0.45 * scale_;
+    
+    const double axesRadius =
+        radius * 1.2;
 
     drawAxes(
         painter,
         center,
-        radius);
+        axesRadius);
 
     drawTargets(
         painter,
