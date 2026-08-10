@@ -119,6 +119,8 @@ qt_add_executable(OpenScope
     src/rendering/WaveformRenderer.cpp
     src/rendering/VectorscopeGraticule.cpp
     src/rendering/VectorscopeGraticule.h
+    src/rendering/WaveformGraticule.h
+    src/rendering/WaveformGraticule.cpp
     src/processing/SignalReconstructor.cpp
     src/processing/SignalReconstructor.h
     src/standards/VideoStandard.h
@@ -155,3 +157,42 @@ if(WIN32)
             "$<TARGET_FILE_DIR:OpenScope>/platforms/"
     )
 endif()
+install(
+    TARGETS OpenScope
+    RUNTIME DESTINATION bin
+)
+
+set(OPENSCOPE_RUNTIME_DIR
+    "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows/bin"
+)
+
+install(
+    FILES
+        "${OPENSCOPE_RUNTIME_DIR}/Qt6Core.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/Qt6Gui.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/Qt6Widgets.dll"
+
+        "${OPENSCOPE_RUNTIME_DIR}/brotlicommon.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/brotlidec.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/bz2.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/double-conversion.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/freetype.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/harfbuzz.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/icudt78.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/icuin78.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/icuuc78.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/libpng16.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/md4c.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/pcre2-16.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/z.dll"
+        "${OPENSCOPE_RUNTIME_DIR}/zstd.dll"
+
+    DESTINATION
+        bin
+)
+install(
+    FILES
+        "$<TARGET_FILE:Qt6::QWindowsIntegrationPlugin>"
+    DESTINATION
+        bin/platforms
+)

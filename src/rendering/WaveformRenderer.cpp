@@ -1,8 +1,10 @@
 #include "rendering/WaveformRenderer.h"
 #include "processing/SignalReconstructor.h"
+#include "standards/VideoStandard.h"
 
 #include <QDebug>
 #include <QtGlobal>
+#include <QApplication>
 
 #include <algorithm>
 #include <cmath>
@@ -13,11 +15,8 @@
 namespace
 {
     constexpr double kMaximumSampleValue = 65535.0;
-    constexpr double kNeutralChroma = 32768.0;
-    constexpr double kChromaNoiseThreshold =
-        0.03 * kNeutralChroma;
-    constexpr double kChromaEnvelopeScale = 0.18;
-
+    constexpr double kChromaNoiseThresholdFraction =
+        0.03;
     constexpr int kLuminanceBeamIntensity = 256;
     constexpr int kChromaBeamIntensity = 768;
     constexpr std::uint32_t kConnectorIntensity = 160u;
@@ -194,10 +193,9 @@ void WaveformRenderer::setOutputSize(
             1);
 
     height =
-        std::clamp(
+        std::max(
             height,
-            1,
-            576);
+            1);
 
     if (image_.width() == width &&
         image_.height() == height)
@@ -356,6 +354,94 @@ void WaveformRenderer::clearOrFadeTrace()
     }
 }
 
+QRectF WaveformRenderer::viewportRect() const
+{
+    const double widgetWidth =
+        static_cast<double>(
+            image_.width() - 1);
+
+    const double widgetHeight =
+        static_cast<double>(
+            image_.height() - 1);
+
+    constexpr double aspectRatio =
+        4.0 / 3.0;
+
+    double width =
+        widgetWidth;
+
+    double height =
+        width /
+        aspectRatio;
+
+    if (height > widgetHeight)
+    {
+        height =
+            widgetHeight;
+
+        width =
+            height *
+            aspectRatio;
+    }
+
+    const double left =
+        (widgetWidth - width) *
+        0.5;
+
+    const double top =
+        (widgetHeight - height) *
+        0.5;
+
+    return QRectF(
+        left,
+        top,
+        width,
+        height);
+}
+
+QRectF WaveformRenderer::scopeRect() const
+{
+    const QRectF viewport =
+        viewportRect();
+
+    const double left =
+        viewport.left() +
+        graticule_.leftInset(
+            QApplication::font(),
+            &image_,
+            viewport.height());
+
+    return QRectF(
+        left,
+        viewport.top(),
+        viewport.right() - left,
+        viewport.height());
+}
+
+QRectF WaveformRenderer::scaledScopeRect() const
+{
+    const QRectF scope =
+        scopeRect();
+
+    const QFont font =
+        graticule_.labelFont(
+            QApplication::font(),
+            scope.height());
+
+    const QFontMetricsF metrics(
+        font,
+        &image_);
+
+    const double labelHeight =
+        metrics.height();
+
+    return QRectF(
+        scope.left(),
+        scope.top() + labelHeight * 0.5,
+        scope.width(),
+        scope.height() - labelHeight);
+}
+
 void WaveformRenderer::renderSingleLine(
     const Yuv444Frame& frame,
     const ReconstructedLumaFrame& reconstructedLuma)
@@ -417,22 +503,47 @@ void WaveformRenderer::renderSingleLine(
     /*
      * Luma comes from the permanently reconstructed
      * high-resolution line.
+     *
+     * Convert 10-bit BT.601 legal-range Y
+     * to equivalent PAL video voltage:
+     *
+     *   Y = 64  -> 0.3 V
+     *   Y = 940 -> 1.0 V
      */
     sourceY_.resize(
         reconstructedViewWidth);
+
+    const auto digitalLevels =
+        levels(VideoStandard::pal625());
+
+    const auto analog =
+        analogLevels(
+            VideoColorStandard::Rec601_625);
+
+    const double voltsPerCode =
+        (analog.whiteVolts - analog.blackVolts) /
+        static_cast<double>(
+            digitalLevels.yWhite -
+            digitalLevels.yBlack);
 
     for (std::size_t x = 0;
         x < reconstructedViewWidth;
         ++x)
     {
-        sourceY_[x] =
-            static_cast<float>(
+        const double y10 =
+            static_cast<double>(
                 reconstructedLuma.y[
                     reconstructedLineOffset +
                         reconstructedViewOffset +
-                        x]);
-    }
+                        x]) /
+            64.0;
 
+        sourceY_[x] =
+            static_cast<float>(
+                analog.blackVolts +
+                (y10 - digitalLevels.yBlack) *
+                voltsPerCode);
+    }
     /*
      * U/V are still native 720-sample data.
      * Map the same visible interval from the
@@ -529,12 +640,21 @@ void WaveformRenderer::renderSingleLine(
     resampleLinear(
         sourceV_,
         displayV_);
-
+    
     const int displayWidth =
         image_.width();
 
-    const int displayHeight =
-        image_.height();
+    const QRectF scope =
+        scaledScopeRect();
+
+    const double voltsToPixels =
+        scope.height() /
+        analog.graticuleMaxVolts;
+
+    const double chromaXScale =
+        scope.width() /
+        static_cast<double>(
+            displayWidth - 1);
 
     for (int x = 0;
         x < displayWidth;
@@ -543,6 +663,11 @@ void WaveformRenderer::renderSingleLine(
         const std::size_t index =
             static_cast<std::size_t>(
                 x);
+        
+        const double plotX =
+            scope.left() +
+            static_cast<double>(x) *
+            chromaXScale;
 
         const double yValue =
             std::clamp(
@@ -565,52 +690,81 @@ void WaveformRenderer::renderSingleLine(
                 0.0,
                 kMaximumSampleValue);
 
+        const double neutralChroma =
+            static_cast<double>(
+                digitalLevels.chromaNeutral) *
+            64.0;
+
+        const double chromaNoiseThreshold =
+            neutralChroma *
+            kChromaNoiseThresholdFraction;
+
         double chromaU =
             uValue -
-            kNeutralChroma;
+            neutralChroma;
 
         double chromaV =
             vValue -
-            kNeutralChroma;
+            neutralChroma;
+
+        const auto palChroma =
+            palChromaCoefficients(
+                VideoColorStandard::Rec601_625);
+
+        const double palU =
+            chromaU *
+            palChroma.cbToU;
+
+        const double palV =
+            chromaV *
+            palChroma.crToV;
 
         const double chromaMagnitude =
             std::hypot(
-                chromaU,
-                chromaV);
+                palU,
+                palV);
 
         if (chromaMagnitude <
-            kChromaNoiseThreshold)
+            chromaNoiseThreshold)
         {
             chromaU = 0.0;
             chromaV = 0.0;
         }
 
         const double plotY =
-            static_cast<double>(
-                displayHeight - 1) -
+            scope.bottom() -
             yValue *
+            voltsToPixels;
+
+        const double nominalChromaExcursion =
             static_cast<double>(
-                displayHeight - 1) /
-            kMaximumSampleValue;
+                digitalLevels.chromaPositiveExcursion) *
+            64.0;
+
+        const double chromaVolts =
+            std::hypot(
+                palU,
+                palV) *
+            analog.chromaPeakVolts /
+            nominalChromaExcursion;
 
         const double spread =
-            std::hypot(
-                chromaU,
-                chromaV) /
-            kNeutralChroma *
-            static_cast<double>(
-                displayHeight - 1) *
-            kChromaEnvelopeScale;
+            chromaVolts *
+            voltsToPixels;
+
+        const auto rgb =
+            yuvToRgbCoefficients(
+                VideoColorStandard::Rec601_625);
 
         double redValue =
-            1.402 * chromaV;
+            rgb.rCr * chromaV;
 
         double greenValue =
-            -0.344136 * chromaU -
-            0.714136 * chromaV;
+            rgb.gCb * chromaU +
+            rgb.gCr * chromaV;
 
         double blueValue =
-            1.772 * chromaU;
+            rgb.bCb * chromaU;
 
         const double minimum =
             std::min({
@@ -668,7 +822,7 @@ void WaveformRenderer::renderSingleLine(
             spread > 0.0)
         {
             plotBeam(
-                x,
+                plotX,
                 plotY - spread,
                 kChromaBeamIntensity,
                 red,
@@ -676,7 +830,7 @@ void WaveformRenderer::renderSingleLine(
                 blue);
 
             plotBeam(
-                x,
+                plotX,
                 plotY + spread,
                 kChromaBeamIntensity,
                 red,
@@ -687,7 +841,14 @@ void WaveformRenderer::renderSingleLine(
 
     plotLuminanceTrace();
     composeTraceImage();
+    QPainter painter(&image_);
+
+    graticule_.draw(
+        painter,
+        scaledScopeRect(),
+        VideoStandard::pal625());
 }
+
 
 void WaveformRenderer::plotLuminanceTrace()
 {
@@ -697,6 +858,14 @@ void WaveformRenderer::plotLuminanceTrace()
     const int height =
         image_.height();
 
+    const QRectF scope =
+        scaledScopeRect();
+
+    const double xScale =
+        scope.width() /
+        static_cast<double>(
+            width - 1);
+
     if (width < 2 ||
         displayY_.size() <
         static_cast<std::size_t>(
@@ -705,26 +874,30 @@ void WaveformRenderer::plotLuminanceTrace()
         return;
     }
 
-    auto sampleToPlotY =
-        [height](double sample)
-        {
-            const double yValue =
-                std::clamp(
-                    sample,
-                    0.0,
-                    kMaximumSampleValue);
+    const auto analog =
+        analogLevels(
+            VideoColorStandard::Rec601_625);
 
+
+    const double voltsToPixels =
+        scope.height() /
+        analog.graticuleMaxVolts;
+
+    auto sampleToPlotY =
+        [scope,
+        voltsToPixels](double volts)
+        {
             return
-                static_cast<double>(
-                    height - 1) -
-                yValue *
-                static_cast<double>(
-                    height - 1) /
-                kMaximumSampleValue;
+                scope.bottom() -
+                volts *
+                voltsToPixels;
         };
 
     auto plotSmoothCurve =
-        [this, width](
+        [this,
+        width,
+        scope,
+        xScale](
             const auto& sampleY,
             int intensity)
         {
@@ -760,7 +933,9 @@ void WaveformRenderer::plotLuminanceTrace()
                         1,
                         256);
                 double previousX =
-                    static_cast<double>(x);
+                    scope.left() +
+                    static_cast<double>(x) *
+                    xScale;
 
                 double previousY =
                     p1;
@@ -795,8 +970,12 @@ void WaveformRenderer::plotLuminanceTrace()
                             );
 
                     const double plotX =
-                        static_cast<double>(x) +
-                        t;
+                        scope.left() +
+                        (
+                            static_cast<double>(x) +
+                            t
+                            ) *
+                        xScale;
 
                     if (step > 0)
                     {
@@ -909,7 +1088,9 @@ void WaveformRenderer::plotLuminanceTrace()
             ++y)
         {
             plotBeam(
-                static_cast<double>(x),
+                scope.left() +
+                static_cast<double>(x) *
+                xScale,
                 static_cast<double>(y),
                 kLuminanceBeamIntensity,
                 255,

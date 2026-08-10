@@ -15,6 +15,7 @@ public:
         QWidget* waveformWidget,
         QWidget* vectorscopeWidget,
         QWidget* parent = nullptr);
+    QSize sizeHint() const override;
 private:
     QGridLayout* layout_ = nullptr;
 

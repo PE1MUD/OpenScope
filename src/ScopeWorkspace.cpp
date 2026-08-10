@@ -139,3 +139,14 @@ void ScopeWorkspace::showGrid()
 
     maximizedViewport_ = nullptr;
 }
+
+QSize ScopeWorkspace::sizeHint() const
+{
+    constexpr int viewportWidth = 720;
+    constexpr int viewportHeight = 576;
+    constexpr int gridSpacing = 4;
+
+    return QSize(
+        viewportWidth * 2 + gridSpacing,
+        viewportHeight * 2 + gridSpacing);
+}

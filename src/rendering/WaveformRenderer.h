@@ -2,10 +2,13 @@
 
 #include "analysis/Analyzer.h"
 #include "video/ReconstructedLumaFrame.h"
+#include "rendering/WaveformGraticule.h"
 #include <QImage>
+#include <QRectF>
 #include <array>
 #include <cstdint>
 #include <vector>
+
 
 // Minimum horizontal pixels per cycle for a visually pleasing waveform.
 inline constexpr double kPixelsPerCycleForTraceBW = 6.0;
@@ -71,8 +74,13 @@ private:
         int red,
         int green,
         int blue);
-
+    
+    QRectF scaledScopeRect() const;
     QImage image_;
+
+    WaveformGraticule graticule_;
+    QRectF scopeRect() const;
+    QRectF viewportRect() const;
 
     std::vector<std::uint32_t> hits_;
     std::vector<TracePixel> trace_;

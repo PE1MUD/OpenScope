@@ -29,7 +29,7 @@ MainWindow::MainWindow(QWidget* parent)
     , videoEngine_(new VideoEngine(this))
     , videoWidget_(new VideoWidget)
 {
-    setWindowTitle("OpenScope");
+    setWindowTitle("OpenScope V0.1");
     resize(900, 720);
     SetThreadPriority(
         GetCurrentThread(),

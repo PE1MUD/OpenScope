@@ -97,8 +97,6 @@ void WaveformWidget::paintEvent(
         return;
     }
 
-
-
     const int sliderHeight =
         scrollSlider_->isVisible()
         ? scrollSlider_->height()
@@ -114,142 +112,6 @@ void WaveformWidget::paintEvent(
             width(),
             waveformHeight),
         image());
-
-    QString text =
-        QString("Trace BW %1 MHz")
-        .arg(
-            displayBandwidthMHz_,
-            0,
-            'f',
-            2);
-
-    QFont font =
-        painter.font();
-
-    font.setBold(true);
-    font.setPointSize(10);
-
-    painter.setFont(font);
-
-    QColor color;
-
-    if (displayBandwidthMHz_ >= 6.75)
-    {
-        color =
-            QColor(
-                255,
-                255,
-                255);
-    }
-    else if (displayBandwidthMHz_ >= 5.5)
-    {
-        color =
-            QColor(
-                255,
-                255,
-                128);
-    }
-    else if (displayBandwidthMHz_ >= 4.0)
-    {
-        color =
-            QColor(
-                255,
-                255,
-                0);
-    }
-    else if (displayBandwidthMHz_ >= 2.5)
-    {
-        color =
-            QColor(
-                255,
-                180,
-                0);
-    }
-    else
-    {
-        color =
-            QColor(
-                255,
-                64,
-                64);
-    }
-
-    QRect r =
-        painter.fontMetrics()
-        .boundingRect(text);
-
-    r.adjust(
-        -6,
-        -4,
-        6,
-        4);
-
-    r.moveTopRight(
-        QPoint(
-            width() - 10,
-            10));
-
-    painter.fillRect(
-        r,
-        QColor(
-            0,
-            0,
-            0,
-            180));
-
-    painter.setPen(color);
-
-    painter.drawText(
-        r,
-        Qt::AlignCenter,
-        text);
-
-    const QString fpsText =
-        QString("FPS %1")
-        .arg(
-            fps_,
-            0,
-            'f',
-            1);
-
-    QRect fpsRect =
-        painter.fontMetrics()
-        .boundingRect(fpsText);
-
-    fpsRect.adjust(
-        -6,
-        -4,
-        6,
-        4);
-
-    fpsRect.moveTopRight(
-        QPoint(
-            width() - 140,
-            10));
-
-    painter.fillRect(
-        fpsRect,
-        QColor(
-            0,
-            0,
-            0,
-            180));
-
-    painter.setPen(
-        fps_ >= 24.0
-        ? QColor(
-            220,
-            220,
-            220)
-        : QColor(
-            255,
-            180,
-            0));
-
-    painter.drawText(
-        fpsRect,
-        Qt::AlignCenter,
-        fpsText);
 }
 
 void WaveformWidget::resizeEvent(
@@ -267,7 +129,7 @@ void WaveformWidget::resizeEvent(
 
     emit outputSizeChanged(
         width(),
-        height());
+        height() - sliderHeight);
 }
 
 void WaveformWidget::setDisplayBandwidthMHz(
