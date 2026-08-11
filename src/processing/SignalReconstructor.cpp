@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <QElapsedTimer>
 
 LineResampler::LineResampler(
     int kernelRadius,
@@ -9,6 +10,14 @@ LineResampler::LineResampler(
     : kernelRadius_(std::max(kernelRadius, 1))
     , cutoff_(std::clamp(cutoff, 0.01f, 1.0f))
 {}
+
+void LineResampler::setImplementation(
+    ResamplerImplementation implementation) noexcept
+{
+    implementation_ =
+        implementation;
+}
+
 void LineResampler::rebuildCache(
     std::size_t inputSize,
     std::size_t outputSize) const
@@ -102,10 +111,28 @@ void LineResampler::rebuildCache(
     }
 }
 
-
-
-
 void LineResampler::resample(
+    std::span<const float> input,
+    std::span<float> output) const
+{
+    switch (implementation_)
+    {
+    case ResamplerImplementation::Avx2:
+        resampleAvx2(
+            input,
+            output);
+        break;
+
+    case ResamplerImplementation::Scalar:
+    default:
+        resampleScalar(
+            input,
+            output);
+        break;
+    }
+}
+
+void LineResampler::resampleScalar(
     std::span<const float> input,
     std::span<float> output) const
 {

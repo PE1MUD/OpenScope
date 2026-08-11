@@ -5,6 +5,12 @@
 
 inline constexpr std::size_t kReconstructedLumaWidth = 2880;
 
+enum class ResamplerImplementation
+{
+    Scalar,
+    Avx2
+};
+
 class LineResampler
 {
 public:
@@ -15,6 +21,9 @@ public:
     void resample(
         std::span<const float> input,
         std::span<float> output) const;
+
+    void setImplementation(
+        ResamplerImplementation implementation) noexcept;
 
 private:
     static float sinc(float x);
@@ -38,4 +47,15 @@ private:
 
     mutable std::vector<CachedOutputSample> cache_;
     mutable std::vector<float> cachedWeights_;
+
+    ResamplerImplementation implementation_ =
+        ResamplerImplementation::Scalar;
+
+    void resampleScalar(
+        std::span<const float> input,
+        std::span<float> output) const;
+
+    void resampleAvx2(
+        std::span<const float> input,
+        std::span<float> output) const;
 };

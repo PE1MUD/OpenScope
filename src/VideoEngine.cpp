@@ -2,6 +2,7 @@
 #include "VideoEngine.h"
 #include "VectorscopeSettings.h"
 #include <QDebug>
+#include <QElapsedTimer>
 #include <algorithm>
 #include <thread>
 
@@ -33,10 +34,18 @@ VideoEngine::VideoEngine(QObject* parent)
             hardwareThreads /
             kLumaWorkerDivisor);
 
-    lumaWorkers_.resize(workerCount);
 
+    lumaWorkers_.resize(workerCount);
+    qDebug()
+        << "hardware threads:"
+        << hardwareThreads
+        << "luma workers:"
+        << workerCount;
     for (LumaWorker& worker : lumaWorkers_)
     {
+        worker.reconstructor.setImplementation(
+            ResamplerImplementation::Avx2);
+
         worker.sourceLine.resize(
             static_cast<std::size_t>(
                 kCaptureWidth));
@@ -1030,7 +1039,8 @@ void VideoEngine::reconstructLuma(
     const Yuv444Frame& frame,
     std::uint64_t generation)
 {
-    if (frame.width <= 0 ||
+    QElapsedTimer timer;
+    timer.start();    if (frame.width <= 0 ||
         frame.height <= 0)
     {
         return;
@@ -1107,7 +1117,10 @@ void VideoEngine::reconstructLuma(
         static_cast<int>(
             outputSlotIndex),
         std::memory_order_release);
-
+    qDebug()
+        << "Luma reconstruct:"
+        << timer.nsecsElapsed() / 1.0e6
+        << "ms";
     waveformCondition_.notify_one();
 
     displayCondition_.notify_one();

@@ -122,13 +122,22 @@ qt_add_executable(OpenScope
     src/rendering/WaveformGraticule.h
     src/rendering/WaveformGraticule.cpp
     src/processing/SignalReconstructor.cpp
+    src/processing/SignalReconstructorAvx2.cpp
     src/processing/SignalReconstructor.h
     src/standards/VideoStandard.h
     src/standards/ColorBars.h
     src/standards/ColorMatrices.h
     src/resources/Colorimetry.h
+    src/util/CpuFeatures.cpp
+    src/util/CpuFeatures.h
 
     "${DECKLINK_GENERATED_IID}"
+)
+
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/SignalReconstructorAvx2.cpp"
+    PROPERTIES
+    COMPILE_OPTIONS "/arch:AVX2"
 )
 
 add_dependencies(OpenScope DeckLinkApiGenerated)

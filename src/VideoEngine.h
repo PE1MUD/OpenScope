@@ -55,7 +55,7 @@ signals:
     void vectorscopeChanged(const QImage& image);
 
 private:
-    static constexpr unsigned int kLumaWorkerDivisor = 4;
+    static constexpr unsigned int kLumaWorkerDivisor = 8;
     static constexpr unsigned int kMinimumWorkerCount = 2;
 
     static constexpr int kCaptureWidth = 720;
