@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace
 {
@@ -20,6 +21,65 @@ namespace
     constexpr int kLuminanceBeamIntensity = 256;
     constexpr int kChromaBeamIntensity = 768;
     constexpr std::uint32_t kConnectorIntensity = 160u;
+}
+
+void WaveformRenderer::setChromaFillIntensity(
+    int intensity)
+{
+    chromaFillIntensity_ =
+        std::clamp(
+            intensity,
+            0,
+            200);
+}
+
+void addFillPixel(
+    QImage& image,
+    int x,
+    int y,
+    int red,
+    int green,
+    int blue,
+    int intensity)
+{
+    if (x < 0 ||
+        x >= image.width() ||
+        y < 0 ||
+        y >= image.height())
+    {
+        return;
+    }
+
+    QRgb* scanLine =
+        reinterpret_cast<QRgb*>(
+            image.scanLine(y));
+
+    const QRgb current =
+        scanLine[x];
+
+    const int newRed =
+        std::min(
+            255,
+            qRed(current) +
+            red * intensity / 255);
+
+    const int newGreen =
+        std::min(
+            255,
+            qGreen(current) +
+            green * intensity / 255);
+
+    const int newBlue =
+        std::min(
+            255,
+            qBlue(current) +
+            blue * intensity / 255);
+
+    scanLine[x] =
+        qRgb(
+            newRed,
+            newGreen,
+            newBlue);
 }
 
 void resampleLinear(
@@ -644,6 +704,21 @@ void WaveformRenderer::renderSingleLine(
     const int displayWidth =
         image_.width();
 
+    std::vector<double> chromaUpperY(
+        static_cast<std::size_t>(displayWidth));
+
+    std::vector<double> chromaLowerY(
+        static_cast<std::size_t>(displayWidth));
+
+    std::vector<int> chromaRed(
+        static_cast<std::size_t>(displayWidth));
+
+    std::vector<int> chromaGreen(
+        static_cast<std::size_t>(displayWidth));
+
+    std::vector<int> chromaBlue(
+        static_cast<std::size_t>(displayWidth));
+
     const QRectF scope =
         scaledScopeRect();
 
@@ -752,6 +827,12 @@ void WaveformRenderer::renderSingleLine(
             chromaVolts *
             voltsToPixels;
 
+        chromaUpperY[index] =
+            plotY - spread;
+
+        chromaLowerY[index] =
+            plotY + spread;
+
         const auto rgb =
             yuvToRgbCoefficients(
                 VideoColorStandard::Rec601_625);
@@ -816,31 +897,93 @@ void WaveformRenderer::renderSingleLine(
                         maximum,
                         0.0,
                         255.0));
+            chromaRed[index] = red;
+            chromaGreen[index] = green;
+            chromaBlue[index] = blue;
         }
 
-        if (maximum > 0.0 &&
-            spread > 0.0)
-        {
-            plotBeam(
-                plotX,
-                plotY - spread,
-                kChromaBeamIntensity,
-                red,
-                green,
-                blue);
+        //if (maximum > 0.0 &&
+        //    spread > 0.0)
+        //{
+        //    plotBeam(
+        //        plotX,
+        //        plotY - spread,
+        //        kChromaBeamIntensity,
+        //        red,
+        //        green,
+        //        blue);
 
-            plotBeam(
-                plotX,
-                plotY + spread,
-                kChromaBeamIntensity,
-                red,
-                green,
-                blue);
-        }
+        //    plotBeam(
+        //        plotX,
+        //        plotY + spread,
+        //        kChromaBeamIntensity,
+        //        red,
+        //        green,
+        //        blue);
+        //}
     }
+
 
     plotLuminanceTrace();
     composeTraceImage();
+
+    const int firstScreenX =
+        static_cast<int>(
+            std::ceil(scope.left()));
+
+    const int lastScreenX =
+        static_cast<int>(
+            std::floor(scope.right()));
+
+    for (int screenX = firstScreenX;
+        screenX <= lastScreenX;
+        ++screenX)
+    {
+        const double normalisedX =
+            (static_cast<double>(screenX) -
+                scope.left()) /
+            scope.width();
+
+        const std::size_t index =
+            std::min(
+                static_cast<std::size_t>(
+                    normalisedX *
+                    static_cast<double>(
+                        displayWidth - 1)),
+                static_cast<std::size_t>(
+                    displayWidth - 1));
+
+        const int firstY =
+            std::clamp(
+                static_cast<int>(
+                    std::ceil(
+                        chromaUpperY[index])),
+                0,
+                image_.height() - 1);
+
+        const int lastY =
+            std::clamp(
+                static_cast<int>(
+                    std::floor(
+                        chromaLowerY[index])),
+                0,
+                image_.height() - 1);
+
+        for (int y = firstY;
+            y <= lastY;
+            ++y)
+        {
+            addFillPixel(
+                image_,
+                screenX,
+                y,
+                chromaRed[index],
+                chromaGreen[index],
+                chromaBlue[index],
+                chromaFillIntensity_);
+        }
+    }
+
     QPainter painter(&image_);
 
     graticule_.draw(
@@ -895,16 +1038,20 @@ void WaveformRenderer::plotLuminanceTrace()
 
     auto plotSmoothCurve =
         [this,
-        width,
-        scope,
-        xScale](
+        scope](
             const auto& sampleY,
+            int sampleCount,
             int intensity)
         {
             constexpr double targetStepPixels = 0.5;
-
+            
+            const double curveXScale =
+                scope.width() /
+                static_cast<double>(
+                    sampleCount - 1);
+            
             for (int x = 0;
-                x < width - 1;
+                x < sampleCount - 1;
                 ++x)
             {
                 const double p0 =
@@ -935,7 +1082,7 @@ void WaveformRenderer::plotLuminanceTrace()
                 double previousX =
                     scope.left() +
                     static_cast<double>(x) *
-                    xScale;
+                    curveXScale;
 
                 double previousY =
                     p1;
@@ -975,7 +1122,7 @@ void WaveformRenderer::plotLuminanceTrace()
                             static_cast<double>(x) +
                             t
                             ) *
-                        xScale;
+                        curveXScale;
 
                     if (step > 0)
                     {
@@ -1013,10 +1160,40 @@ void WaveformRenderer::plotLuminanceTrace()
                                 x)]));
         };
 
+    auto sampleZoomed =
+        [this, &sampleToPlotY](int x)
+        {
+            x =
+                std::clamp(
+                    x,
+                    0,
+                    static_cast<int>(
+                        sourceY_.size()) - 1);
+
+            return
+                sampleToPlotY(
+                    static_cast<double>(
+                        sourceY_[
+                            static_cast<std::size_t>(
+                                x)]));
+        };
+
     // Keep the original smooth waveform as the primary trace.
-    plotSmoothCurve(
-        sampleCenter,
-        kLuminanceBeamIntensity);
+    if (zoomed_)
+    {
+        plotSmoothCurve(
+            sampleZoomed,
+            static_cast<int>(
+                sourceY_.size()),
+            kLuminanceBeamIntensity);
+    }
+    else
+    {
+        plotSmoothCurve(
+            sampleCenter,
+            width,
+            kLuminanceBeamIntensity);
+    }
 
     if (sourceY_.size() <=
         displayY_.size())

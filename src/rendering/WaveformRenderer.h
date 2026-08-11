@@ -37,6 +37,9 @@ public:
     [[nodiscard]] double traceBandwidthMHz() const;
     [[nodiscard]] const QImage& image() const;
 
+    void setChromaFillIntensity(
+        int intensity);
+
 private:
     struct TracePixel
     {
@@ -101,4 +104,5 @@ private:
 
     bool zoomed_ = false;
     double scrollPosition_ = 0.0;
+    int chromaFillIntensity_ = 64;
 };

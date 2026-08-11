@@ -6,7 +6,8 @@
 #include <QGridLayout>
 #include <QLabel>
 #include <QVBoxLayout>
-
+#include <QCheckBox>
+#include <QSlider>
 namespace
 {
 
@@ -56,9 +57,62 @@ ScopeWorkspace::ScopeWorkspace(
             vectorscopeWidget,
             this);
 
+    auto* controls =
+        new QWidget(this);
+
+    auto* controlsLayout =
+        new QVBoxLayout(controls);
+
+    auto* title =
+        new QLabel(
+            "Waveform",
+            controls);
+
+    auto* chromaFillCheckBox =
+        new QCheckBox(
+            "Chroma fill",
+            controls);
+
+    chromaFillCheckBox->setChecked(true);
+
+    auto* intensityLabel =
+        new QLabel(
+            "Chroma intensity",
+            controls);
+
+    auto* intensitySlider =
+        new QSlider(
+            Qt::Horizontal,
+            controls);
+
+    intensitySlider->setRange(
+        0,
+        200);
+
+    intensitySlider->setValue(
+        64);
+
+    connect(
+        intensitySlider,
+        &QSlider::valueChanged,
+        this,
+        &ScopeWorkspace::waveformChromaFillIntensityChanged);
+
+    auto* greyCheckBox =
+        new QCheckBox(
+            "Grey",
+            controls);
+
+    controlsLayout->addWidget(title);
+    controlsLayout->addWidget(chromaFillCheckBox);
+    controlsLayout->addWidget(intensityLabel);
+    controlsLayout->addWidget(intensitySlider);
+    controlsLayout->addWidget(greyCheckBox);
+    controlsLayout->addStretch();
+
     yuvViewport_ =
         new ScopeViewport(
-            createPlaceholder("Y / U / V"),
+            controls,
             this);
 
     layout_->addWidget(videoViewport_, 0, 0);

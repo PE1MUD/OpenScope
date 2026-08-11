@@ -1126,3 +1126,10 @@ void VideoEngine::reconstructLuma(
     displayCondition_.notify_one();
 
 }
+
+void VideoEngine::setWaveformChromaFillIntensity(
+    int intensity)
+{
+    waveformRenderer_.setChromaFillIntensity(
+        intensity);
+}

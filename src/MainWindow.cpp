@@ -51,6 +51,12 @@ MainWindow::MainWindow(QWidget* parent)
             waveformWidget_,
             vectorscopeWidget_,
             this);
+    
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformChromaFillIntensityChanged,
+        videoEngine_,
+        &VideoEngine::setWaveformChromaFillIntensity);
 
     setCentralWidget(workspace_);
 

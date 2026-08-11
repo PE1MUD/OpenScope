@@ -16,6 +16,10 @@ public:
         QWidget* vectorscopeWidget,
         QWidget* parent = nullptr);
 
+signals:
+    void waveformChromaFillIntensityChanged(
+        int intensity);
+
 private:
     void showGrid();
     void showMaximized(
