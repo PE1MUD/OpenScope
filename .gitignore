@@ -438,5 +438,6 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 compile_commands.json
+OpenScope-deploy/
 
 commit.txt
