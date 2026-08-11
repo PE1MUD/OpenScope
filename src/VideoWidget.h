@@ -12,13 +12,18 @@ public:
     void setImage(const QImage& image);
 
 signals:
-    void outputSizeChanged(int width, int height);
+    void outputSizeChanged(
+        int width,
+        int height);
 
 protected:
-    void paintEvent(QPaintEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
-
     const QImage& image() const;
+
+    void paintEvent(
+        QPaintEvent* event) override;
+
+    void resizeEvent(
+        QResizeEvent* event) override;
 
 private:
     QImage image_;

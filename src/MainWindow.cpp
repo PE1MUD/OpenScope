@@ -1,6 +1,5 @@
 #include "MainWindow.h"
 #include "ScopeWorkspace.h"
-#include "TestPatternGenerator.h"
 #include "VideoEngine.h"
 #include "VideoWidget.h"
 #include "WaveformWidget.h"
@@ -21,14 +20,18 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QToolBar>
-#include <QResizeEvent>
-#include <algorithm>
 #include <cmath>
+
+namespace
+{
+    constexpr double kWindowAspectRatio =
+        5.0 / 4.0;
+}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
-    , videoEngine_(new VideoEngine(this))
     , videoWidget_(new VideoWidget)
+    , videoEngine_(new VideoEngine(this))
 {
     setWindowTitle("OpenScope V0.1");
     resize(900, 720);
@@ -150,15 +153,6 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::setVectorscopeOutputSize);
 
-    const int vectorscopeSize =
-        std::min(
-            vectorscopeWidget_->width(),
-            vectorscopeWidget_->height());
-
-    videoEngine_->setVectorscopeOutputSize(
-        vectorscopeSize,
-        vectorscopeSize);
-
     connect(
         videoWidget_,
         &VideoWidget::outputSizeChanged,
@@ -175,31 +169,13 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::waveformChanged,
         waveformWidget_,
-        [this](const QImage& image)
-        {
-            waveformWidget_->setImage(
-                image);
-
-            waveformWidget_->notifyFrameRendered();
-        });
+        &WaveformWidget::setImage);
 
     connect(
         waveformWidget_,
         &WaveformWidget::outputSizeChanged,
-        this,
-        [this](int width, int height)
-        {
-            videoEngine_->setWaveformOutputSize(
-                width,
-                height);
-
-            waveformWidget_->setDisplayBandwidthMHz(
-                videoEngine_->traceBandwidthMHz());
-        });
-
-    videoEngine_->setVideoOutputSize(
-        videoWidget_->width(),
-        videoWidget_->height());
+        videoEngine_,
+        &VideoEngine::setWaveformOutputSize);
 }
 
 VideoWidget* MainWindow::videoWidget() const
@@ -222,8 +198,8 @@ bool MainWindow::nativeEvent(
     void* message,
     qintptr* result)
 {
-    MSG* msg =
-        static_cast<MSG*>(
+    const MSG* msg =
+        static_cast<const MSG*>(
             message);
 
     if (msg->message == WM_SYSCOMMAND &&
@@ -257,9 +233,6 @@ bool MainWindow::nativeEvent(
                 workArea.bottom -
                 workArea.top;
 
-            constexpr double aspectRatio =
-                5.0 / 4.0;
-
             int windowWidth =
                 availableWidth;
 
@@ -267,7 +240,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         windowWidth /
-                        aspectRatio));
+                        kWindowAspectRatio));
 
             if (windowHeight > availableHeight)
             {
@@ -278,7 +251,7 @@ bool MainWindow::nativeEvent(
                     static_cast<int>(
                         std::lround(
                             windowHeight *
-                            aspectRatio));
+                            kWindowAspectRatio));
             }
 
             const int x =
@@ -308,26 +281,30 @@ bool MainWindow::nativeEvent(
 
     if (msg->message == WM_SIZING)
     {
-        RECT* rect =
+        RECT* const rect =
             reinterpret_cast<RECT*>(
                 msg->lParam);
-        HMONITOR monitor =
-            MonitorFromWindow(
-                reinterpret_cast<HWND>(winId()),
+        const HMONITOR monitor =
+            MonitorFromRect(
+                rect,
                 MONITOR_DEFAULTTONEAREST);
 
         MONITORINFO monitorInfo{};
         monitorInfo.cbSize =
             sizeof(MONITORINFO);
 
-        GetMonitorInfo(
+        if (!GetMonitorInfo(
             monitor,
-            &monitorInfo);
+            &monitorInfo))
+        {
+            return QMainWindow::nativeEvent(
+                eventType,
+                message,
+                result);
+        }
 
         const RECT& workArea =
             monitorInfo.rcWork;
-        constexpr double aspectRatio =
-            5.0 / 4.0;
 
         const int width =
             rect->right -
@@ -346,7 +323,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         width /
-                        aspectRatio));
+                        kWindowAspectRatio));
 
             rect->bottom =
                 rect->top +
@@ -362,7 +339,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         height *
-                        aspectRatio));
+                        kWindowAspectRatio));
 
             rect->right =
                 rect->left +
@@ -380,7 +357,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         width /
-                        aspectRatio));
+                        kWindowAspectRatio));
 
             if (msg->wParam == WMSZ_TOPLEFT ||
                 msg->wParam == WMSZ_TOPRIGHT)
@@ -427,7 +404,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         currentWidth /
-                        aspectRatio));
+                        kWindowAspectRatio));
         }
 
         if (currentHeight > maxHeight)
@@ -439,7 +416,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         currentHeight *
-                        aspectRatio));
+                        kWindowAspectRatio));
         }
 
         switch (msg->wParam)
@@ -474,7 +451,8 @@ bool MainWindow::nativeEvent(
                 rect->top +
                 currentHeight;
             break;
-        }        *result = TRUE;
+        }        
+        *result = TRUE;
         return true;
     }
 

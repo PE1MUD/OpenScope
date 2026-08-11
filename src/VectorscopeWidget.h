@@ -1,10 +1,12 @@
 #pragma once
+
 #include "rendering/VectorscopeGraticule.h"
+
 #include <QImage>
 #include <QWidget>
-#include <QResizeEvent>
-#include <QSize>
 
+class QPaintEvent;
+class QResizeEvent;
 
 class VectorscopeWidget final : public QWidget
 {

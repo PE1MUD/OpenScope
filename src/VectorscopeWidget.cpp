@@ -7,7 +7,6 @@
 VectorscopeWidget::VectorscopeWidget(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumSize(1, 1);
     graticule_.setScale(
         VectorscopeSettings::scale);
     setGraticuleLineWidth(

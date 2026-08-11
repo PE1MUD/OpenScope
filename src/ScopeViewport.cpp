@@ -3,8 +3,7 @@
 #include <QMouseEvent>
 #include <QVBoxLayout>
 #include <QSizePolicy>
-#include <QPaintEvent>
-#include <QPainter>
+
 
 ScopeViewport::ScopeViewport(
     QWidget* contentWidget,
@@ -23,19 +22,11 @@ ScopeViewport::ScopeViewport(
     auto* layout =
         new QVBoxLayout(this);
 
-    setAutoFillBackground(true);
-
-    QPalette palette =
-        this->palette();
-
-    palette.setColor(
-        QPalette::Window,
-        Qt::red);
-
-    setPalette(
-        palette);
-
-    layout->setContentsMargins(2, 2, 2, 2);
+    layout->setContentsMargins(
+        0,
+        0,
+        0,
+        0);
 
     layout->setSpacing(0);
 
@@ -56,38 +47,14 @@ ScopeViewport::ScopeViewport(
     }
 }
 
-QWidget* ScopeViewport::contentWidget() const
-{
-    return contentWidget_;
-}
-
 void ScopeViewport::mouseDoubleClickEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::LeftButton) {
+    if (event->button() == Qt::LeftButton)
+    {
         emit doubleClicked(this);
         event->accept();
         return;
     }
 
     QWidget::mouseDoubleClickEvent(event);
-}
-
-void ScopeViewport::paintEvent(
-    QPaintEvent* event)
-{
-    QWidget::paintEvent(event);
-
-    QPainter painter(this);
-
-    painter.setPen(
-        QPen(
-            Qt::red,
-            2));
-
-    painter.drawRect(
-        rect().adjusted(
-            1,
-            1,
-            -2,
-            -2));
 }

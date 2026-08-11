@@ -8,8 +8,6 @@
 WaveformWidget::WaveformWidget(QWidget* parent)
     : VideoWidget(parent)
 {
-    fpsTimer_.start();
-
     scrollSlider_ =
         new QSlider(
             Qt::Horizontal,
@@ -55,12 +53,6 @@ void WaveformWidget::setScrollPosition(
 
 void WaveformWidget::setZoomed(bool zoomed)
 {
-    qDebug()
-        << "WaveformWidget zoomed:"
-        << zoomed
-        << "output:"
-        << (zoomed ? width() * 10 : width());
-
     if (zoomed_ == zoomed)
     {
         return;
@@ -74,9 +66,14 @@ void WaveformWidget::setZoomed(bool zoomed)
     emit zoomChanged(
         zoomed_);
 
+    const int sliderHeight =
+        scrollSlider_->isVisible()
+        ? scrollSlider_->height()
+        : 0;
+
     emit outputSizeChanged(
         width(),
-        height());
+        height() - sliderHeight);
 
     update();
 }
@@ -117,7 +114,7 @@ void WaveformWidget::paintEvent(
 void WaveformWidget::resizeEvent(
     QResizeEvent* event)
 {
-    VideoWidget::resizeEvent(event);
+    QWidget::resizeEvent(event);
 
     constexpr int sliderHeight = 24;
 
@@ -127,40 +124,13 @@ void WaveformWidget::resizeEvent(
         width(),
         sliderHeight);
 
+    const int waveformHeight =
+        height() -
+        (scrollSlider_->isVisible()
+            ? sliderHeight
+            : 0);
+
     emit outputSizeChanged(
         width(),
-        height() - sliderHeight);
-}
-
-void WaveformWidget::setDisplayBandwidthMHz(
-    double bandwidthMHz)
-{
-    displayBandwidthMHz_ =
-        bandwidthMHz;
-
-    update();
-}
-
-void WaveformWidget::notifyFrameRendered()
-{
-    ++frameCounter_;
-
-    const qint64 elapsedMs =
-        fpsTimer_.elapsed();
-
-    if (elapsedMs >= 500)
-    {
-        fps_ =
-            static_cast<double>(
-                frameCounter_) *
-            1000.0 /
-            static_cast<double>(
-                elapsedMs);
-
-        frameCounter_ = 0;
-
-        fpsTimer_.restart();
-
-        update();
-    }
+        waveformHeight);
 }

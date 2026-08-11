@@ -1,9 +1,8 @@
 #pragma once
 
 #include <QMainWindow>
-class VectorscopeWidget;
-class QResizeEvent;
 
+class VectorscopeWidget;
 class VideoEngine;
 class VideoWidget;
 class WaveformWidget;
@@ -21,7 +20,6 @@ public:
     VideoEngine* videoEngine() const;
 
 protected:
-
     bool nativeEvent(
         const QByteArray& eventType,
         void* message,
@@ -33,7 +31,4 @@ private:
     WaveformWidget* waveformWidget_ = nullptr;
     ScopeWorkspace* workspace_ = nullptr;
     VectorscopeWidget* vectorscopeWidget_ = nullptr;
-
-
-
 };

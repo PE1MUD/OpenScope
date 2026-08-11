@@ -15,20 +15,22 @@ public:
         QWidget* waveformWidget,
         QWidget* vectorscopeWidget,
         QWidget* parent = nullptr);
-    QSize sizeHint() const override;
+
 private:
+    void showGrid();
+    void showMaximized(
+        ScopeViewport* viewport);
+
     QGridLayout* layout_ = nullptr;
 
     ScopeViewport* videoViewport_ = nullptr;
     ScopeViewport* waveformViewport_ = nullptr;
     ScopeViewport* vectorscopeViewport_ = nullptr;
     ScopeViewport* yuvViewport_ = nullptr;
-    void showGrid();
-    void showMaximized(ScopeViewport* viewport);
 
     ScopeViewport* maximizedViewport_ = nullptr;
 
 private slots:
-    void toggleMaximized(ScopeViewport* viewport);
-
+    void toggleMaximized(
+        ScopeViewport* viewport);
 };

@@ -37,6 +37,10 @@ ScopeWorkspace::ScopeWorkspace(
     : QWidget(parent)
 {
     layout_ = new QGridLayout(this);
+    
+    setMinimumSize(
+        768,
+        576);
 
     layout_->setContentsMargins(0, 0, 0, 0);
     layout_->setSpacing(4);
@@ -96,10 +100,12 @@ ScopeWorkspace::ScopeWorkspace(
 void ScopeWorkspace::toggleMaximized(
     ScopeViewport* viewport)
 {
-    if (maximizedViewport_ == viewport) {
+    if (maximizedViewport_ == viewport)
+    {
         showGrid();
     }
-    else {
+    else
+    {
         showMaximized(viewport);
     }
 }
@@ -138,15 +144,4 @@ void ScopeWorkspace::showGrid()
     yuvViewport_->show();
 
     maximizedViewport_ = nullptr;
-}
-
-QSize ScopeWorkspace::sizeHint() const
-{
-    constexpr int viewportWidth = 720;
-    constexpr int viewportHeight = 576;
-    constexpr int gridSpacing = 4;
-
-    return QSize(
-        viewportWidth * 2 + gridSpacing,
-        viewportHeight * 2 + gridSpacing);
 }
