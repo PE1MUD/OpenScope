@@ -205,6 +205,16 @@ bool MainWindow::nativeEvent(
     if (msg->message == WM_SYSCOMMAND &&
         (msg->wParam & 0xFFF0) == SC_MAXIMIZE)
     {
+        if (customMaximized_)
+        {
+            setGeometry(
+                restoreWindowGeometry_);
+
+            customMaximized_ = false;
+
+            *result = 0;
+            return true;
+        }
         const HWND hwnd =
             reinterpret_cast<HWND>(
                 winId());
@@ -263,6 +273,11 @@ bool MainWindow::nativeEvent(
                 workArea.top +
                 (availableHeight -
                     windowHeight) / 2;
+            
+            restoreWindowGeometry_ =
+                geometry();
+
+            customMaximized_ = true;
 
             SetWindowPos(
                 hwnd,

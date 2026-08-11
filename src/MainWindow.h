@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QMainWindow>
+#include <QRect>
 
 class VectorscopeWidget;
 class VideoEngine;
@@ -31,4 +33,6 @@ private:
     WaveformWidget* waveformWidget_ = nullptr;
     ScopeWorkspace* workspace_ = nullptr;
     VectorscopeWidget* vectorscopeWidget_ = nullptr;
+    QRect restoreWindowGeometry_;
+    bool customMaximized_ = false;
 };
