@@ -4,6 +4,7 @@
 #include <QResizeEvent>
 #include <QSlider>
 #include <algorithm>
+#include <cmath>
 
 WaveformWidget::WaveformWidget(QWidget* parent)
     : VideoWidget(parent)
@@ -45,6 +46,21 @@ void WaveformWidget::setScrollPosition(
             position,
             0.0,
             1.0);
+
+    const int sliderValue =
+        static_cast<int>(
+            std::lround(
+                scrollPosition_ *
+                1000.0));
+
+    if (scrollSlider_->value() != sliderValue)
+    {
+        scrollSlider_->setValue(
+            sliderValue);
+
+        return;
+    }
+
     emit scrollPositionChanged(
         scrollPosition_);
 

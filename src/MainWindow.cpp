@@ -197,6 +197,19 @@ MainWindow::MainWindow(QWidget* parent)
     toolbar->addWidget(
         waveformZoomButton);
 
+    const double waveformScrollPosition =
+        settingsService_->settings()
+        .control
+        .instrument
+        .waveform
+        .scrollPosition;
+
+    waveformWidget_->setScrollPosition(
+        waveformScrollPosition);
+
+    videoEngine_->setWaveformScrollPosition(
+        waveformScrollPosition);
+
     waveformWidget_->setZoomed(
         waveformZoomed);
 
@@ -236,8 +249,22 @@ MainWindow::MainWindow(QWidget* parent)
     connect(
         waveformWidget_,
         &WaveformWidget::scrollPositionChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformScrollPosition);
+        this,
+        [this](double position)
+        {
+            settingsService_->update(
+                [position](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .scrollPosition =
+                        position;
+                });
+
+            videoEngine_->setWaveformScrollPosition(
+                position);
+        });
 
     auto* lineSelector =
         new QSpinBox(toolbar);

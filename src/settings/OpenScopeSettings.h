@@ -26,7 +26,7 @@ struct OpenScopeSettings
             struct Waveform
             {
                 int zoom = 1;
-                int zoomStartSample = 0;
+                double scrollPosition = 0.0;
 
                 bool vintageLook = true;
                 int chromaRenderIntensity = 150;

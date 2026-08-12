@@ -161,17 +161,11 @@ OpenScopeSettings SettingsStorage::load() const
             .zoom)
         .toInt();
 
-    result.control
-        .instrument
-        .waveform
-        .zoomStartSample =
+    result.control.instrument.waveform.scrollPosition =
         settings.value(
-            "Control/Instrument/Waveform/ZoomStartSample",
-            result.control
-            .instrument
-            .waveform
-            .zoomStartSample)
-        .toInt();
+            "Control/Instrument/Waveform/ScrollPosition",
+            result.control.instrument.waveform.scrollPosition)
+        .toDouble();
 
     result.control
         .instrument
@@ -416,11 +410,8 @@ void SettingsStorage::save(
         .zoom);
 
     storage.setValue(
-        "Control/Instrument/Waveform/ZoomStartSample",
-        settings.control
-        .instrument
-        .waveform
-        .zoomStartSample);
+        "Control/Instrument/Waveform/ScrollPosition",
+        settings.control.instrument.waveform.scrollPosition);
 
     storage.setValue(
         "Control/Instrument/Waveform/VintageLook",
