@@ -322,11 +322,19 @@ void WaveformRenderer::setZoomed(
 void WaveformRenderer::setScrollPosition(
     double position)
 {
-    scrollPosition_ =
+    const double newPosition =
         std::clamp(
             position,
             0.0,
             1.0);
+
+    if (newPosition == scrollPosition_)
+    {
+        return;
+    }
+
+    scrollPosition_ = newPosition;
+    clearTrace();
 }
 
 void WaveformRenderer::analyze(
@@ -930,7 +938,7 @@ void WaveformRenderer::renderSingleLine(
 
 
     plotLuminanceTrace();
-    composeTraceImage();
+    //composeTraceImage();
 
     const int firstScreenX =
         static_cast<int>(
@@ -978,38 +986,16 @@ void WaveformRenderer::renderSingleLine(
             y <= lastY;
             ++y)
         {
-            if (settings_.color)
-            {
-                addFillPixel(
-                    image_,
-                    screenX,
-                    y,
-                    chromaRed[index],
-                    chromaGreen[index],
-                    chromaBlue[index],
-                    chromaFillIntensity_);
-            }
-            else
-            {
-                const int grey =
-                    std::max({
-                        chromaRed[index],
-                        chromaGreen[index],
-                        chromaBlue[index]
-                        });
-
-                addFillPixel(
-                    image_,
-                    screenX,
-                    y,
-                    grey,
-                    grey,
-                    grey,
-                    chromaFillIntensity_);
-            }
+            addChromaFillPixel(
+                screenX,
+                y,
+                chromaRed[index],
+                chromaGreen[index],
+                chromaBlue[index],
+                chromaFillIntensity_);
         }
     }
-
+    composeTraceImage();
     QPainter painter(&image_);
 
     graticule_.draw(
@@ -1311,7 +1297,7 @@ void WaveformRenderer::composeTraceImage()
 
     const int height =
         image_.height();
-    
+
     for (int y = 0;
         y < height;
         ++y)
@@ -1513,6 +1499,60 @@ void WaveformRenderer::renderAllLines(
                     green);
         }
     }
+}
+
+void WaveformRenderer::addChromaFillPixel(
+    int x,
+    int y,
+    int red,
+    int green,
+    int blue,
+    int intensity)
+{
+    if (x < 0 ||
+        x >= image_.width() ||
+        y < 0 ||
+        y >= image_.height())
+    {
+        return;
+    }
+
+    const std::size_t index =
+        static_cast<std::size_t>(y) *
+        static_cast<std::size_t>(
+            image_.width()) +
+        static_cast<std::size_t>(x);
+
+    TracePixel& pixel =
+        trace_[index];
+
+    const auto addChannel =
+        [intensity](
+            std::uint16_t& destination,
+            int channel)
+        {
+            const std::uint32_t contribution =
+                static_cast<std::uint32_t>(
+                    std::clamp(
+                        channel,
+                        0,
+                        255)) *
+                static_cast<std::uint32_t>(
+                    intensity) /
+                255u;
+
+            destination =
+                static_cast<std::uint16_t>(
+                    std::min<std::uint32_t>(
+                        65535u,
+                        static_cast<std::uint32_t>(
+                            destination) +
+                        contribution));
+        };
+
+    addChannel(pixel.red, red);
+    addChannel(pixel.green, green);
+    addChannel(pixel.blue, blue);
 }
 
 void WaveformRenderer::plotSegment(
@@ -1835,3 +1875,10 @@ double WaveformRenderer::traceBandwidthMHz() const
             kPixelsPerCycleForTraceBW);
 }
 
+void WaveformRenderer::clearTrace()
+{
+    std::fill(
+        trace_.begin(),
+        trace_.end(),
+        TracePixel{});
+}

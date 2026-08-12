@@ -1,5 +1,5 @@
 #pragma once
-
+#include "settings/OpenScopeSettings.h"
 #include <QWidget>
 
 class QGridLayout;
@@ -14,12 +14,19 @@ public:
         QWidget* videoWidget,
         QWidget* waveformWidget,
         QWidget* vectorscopeWidget,
+        bool vintageLook,
+        int chromaRenderIntensity,
         QWidget* parent = nullptr);
+    void setWorkspaceView(
+        OpenScopeSettings::WorkspaceView view);
 
 signals:
     void waveformChromaFillIntensityChanged(
         int intensity);
     void waveformColorChanged(bool enabled);
+signals:
+    void workspaceViewChanged(
+        OpenScopeSettings::WorkspaceView view);
 
 private:
     void showGrid();

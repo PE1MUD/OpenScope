@@ -127,9 +127,13 @@ qt_add_executable(OpenScope
     src/standards/VideoStandard.h
     src/standards/ColorBars.h
     src/standards/ColorMatrices.h
-    src/resources/Colorimetry.h
     src/util/CpuFeatures.cpp
     src/util/CpuFeatures.h
+    src/settings/SettingsStorage.cpp
+    src/settings/SettingsStorage.h
+    src/settings/OpenScopeSettings.h
+    src/settings/SettingsService.h
+    src/settings/SettingsService.cpp
 
     "${DECKLINK_GENERATED_IID}"
 )

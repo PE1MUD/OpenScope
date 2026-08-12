@@ -54,6 +54,8 @@ public:
 
     void setWaveformColor(bool enabled);
 
+    void setDisplayGamma(double gamma);
+
 signals:
     void frameChanged(const QImage& image);
     void waveformChanged(const QImage& image);

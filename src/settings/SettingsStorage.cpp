@@ -1,0 +1,544 @@
+#include "SettingsStorage.h"
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QSettings>
+
+namespace
+{
+
+    QString aspectRatioToString(
+        OpenScopeSettings::AspectRatio aspectRatio)
+    {
+        switch (aspectRatio)
+        {
+        case OpenScopeSettings::AspectRatio::Ratio4x3:
+            return "4:3";
+
+        case OpenScopeSettings::AspectRatio::Ratio16x9:
+            return "16:9";
+        }
+
+        return "4:3";
+    }
+
+    OpenScopeSettings::AspectRatio aspectRatioFromString(
+        const QString& value,
+        OpenScopeSettings::AspectRatio defaultValue)
+    {
+        if (value == "4:3")
+        {
+            return
+                OpenScopeSettings::AspectRatio::Ratio4x3;
+        }
+
+        if (value == "16:9")
+        {
+            return
+                OpenScopeSettings::AspectRatio::Ratio16x9;
+        }
+
+        return defaultValue;
+    }
+    QString workspaceViewToString(
+        OpenScopeSettings::WorkspaceView view)
+    {
+        switch (view)
+        {
+        case OpenScopeSettings::WorkspaceView::Headless:
+            return "Headless";
+
+        case OpenScopeSettings::WorkspaceView::Matrix:
+            return "Matrix";
+
+        case OpenScopeSettings::WorkspaceView::Video:
+            return "Video";
+
+        case OpenScopeSettings::WorkspaceView::Waveform:
+            return "Waveform";
+
+        case OpenScopeSettings::WorkspaceView::Vectorscope:
+            return "Vectorscope";
+        }
+
+        return "Matrix";
+    }
+
+    OpenScopeSettings::WorkspaceView workspaceViewFromString(
+        const QString& value,
+        OpenScopeSettings::WorkspaceView defaultValue)
+    {
+        if (value == "Headless")
+            return OpenScopeSettings::WorkspaceView::Headless;
+
+        if (value == "Matrix")
+            return OpenScopeSettings::WorkspaceView::Matrix;
+
+        if (value == "Video")
+            return OpenScopeSettings::WorkspaceView::Video;
+
+        if (value == "Waveform")
+            return OpenScopeSettings::WorkspaceView::Waveform;
+
+        if (value == "Vectorscope")
+            return OpenScopeSettings::WorkspaceView::Vectorscope;
+
+        return defaultValue;
+    }
+}
+
+SettingsStorage::SettingsStorage()
+{
+    fileName_ =
+        QDir(
+            QCoreApplication::applicationDirPath())
+        .filePath(
+            "OpenScope.ini");
+}
+
+OpenScopeSettings SettingsStorage::load() const
+{
+    OpenScopeSettings result;
+
+    QSettings settings(
+        fileName_,
+        QSettings::IniFormat);
+
+    result.local
+        .display
+        .gamma =
+        settings.value(
+            "Local/Display/Gamma",
+            result.local
+            .display
+            .gamma)
+        .toDouble();
+
+    result.local
+        .display
+        .aspectRatio =
+        aspectRatioFromString(
+            settings.value(
+                "Local/Display/AspectRatio",
+                aspectRatioToString(
+                    result.local
+                    .display
+                    .aspectRatio))
+            .toString(),
+            result.local
+            .display
+            .aspectRatio);
+
+    result.local
+        .display
+        .deinterlace =
+        settings.value(
+            "Local/Display/Deinterlace",
+            result.local
+            .display
+            .deinterlace)
+        .toBool();
+
+    result.control
+        .instrument
+        .lineNumber =
+        settings.value(
+            "Control/Instrument/LineNumber",
+            result.control
+            .instrument
+            .lineNumber)
+        .toInt();
+
+    result.control
+        .instrument
+        .waveform
+        .zoom =
+        settings.value(
+            "Control/Instrument/Waveform/Zoom",
+            result.control
+            .instrument
+            .waveform
+            .zoom)
+        .toInt();
+
+    result.control
+        .instrument
+        .waveform
+        .zoomStartSample =
+        settings.value(
+            "Control/Instrument/Waveform/ZoomStartSample",
+            result.control
+            .instrument
+            .waveform
+            .zoomStartSample)
+        .toInt();
+
+    result.control
+        .instrument
+        .waveform
+        .vintageLook =
+        settings.value(
+            "Control/Instrument/Waveform/VintageLook",
+            result.control
+            .instrument
+            .waveform
+            .vintageLook)
+        .toBool();
+
+    result.control
+        .instrument
+        .waveform
+        .chromaRenderIntensity =
+        settings.value(
+            "Control/Instrument/Waveform/ChromaRenderIntensity",
+            result.control
+            .instrument
+            .waveform
+            .chromaRenderIntensity)
+        .toInt();
+
+    result.control
+        .instrument
+        .waveform
+        .persistenceFrames =
+        settings.value(
+            "Control/Instrument/Waveform/PersistenceFrames",
+            result.control
+            .instrument
+            .waveform
+            .persistenceFrames)
+        .toInt();
+
+    result.control
+        .instrument
+        .vectorscope
+        .showHundredPercentTargets =
+        settings.value(
+            "Control/Instrument/Vectorscope/ShowHundredPercentTargets",
+            result.control
+            .instrument
+            .vectorscope
+            .showHundredPercentTargets)
+        .toBool();
+
+    result.control
+        .instrument
+        .vectorscope
+        .persistenceFrames =
+        settings.value(
+            "Control/Instrument/Vectorscope/PersistenceFrames",
+            result.control
+            .instrument
+            .vectorscope
+            .persistenceFrames)
+        .toInt();
+
+    result.control
+        .processing
+        .noiseFilter
+        .enabled =
+        settings.value(
+            "Control/Processing/NoiseFilter/Enabled",
+            result.control
+            .processing
+            .noiseFilter
+            .enabled)
+        .toBool();
+
+    result.control
+        .processing
+        .noiseFilter
+        .strength =
+        settings.value(
+            "Control/Processing/NoiseFilter/Strength",
+            result.control
+            .processing
+            .noiseFilter
+            .strength)
+        .toInt();
+
+    result.control
+        .processing
+        .noiseFilter
+        .temporalStrength =
+        settings.value(
+            "Control/Processing/NoiseFilter/TemporalStrength",
+            result.control
+            .processing
+            .noiseFilter
+            .temporalStrength)
+        .toInt();
+
+    result.control
+        .videoOut
+        .enabled =
+        settings.value(
+            "Control/VideoOut/Enabled",
+            result.control
+            .videoOut
+            .enabled)
+        .toBool();
+
+    result.control
+        .videoOut
+        .width =
+        settings.value(
+            "Control/VideoOut/Width",
+            result.control
+            .videoOut
+            .width)
+        .toInt();
+
+    result.control
+        .videoOut
+        .height =
+        settings.value(
+            "Control/VideoOut/Height",
+            result.control
+            .videoOut
+            .height)
+        .toInt();
+
+    result.control
+        .videoOut
+        .aspectRatio =
+        aspectRatioFromString(
+            settings.value(
+                "Control/VideoOut/AspectRatio",
+                aspectRatioToString(
+                    result.control
+                    .videoOut
+                    .aspectRatio))
+            .toString(),
+            result.control
+            .videoOut
+            .aspectRatio);
+
+    result.control
+        .videoOut
+        .underscan =
+        settings.value(
+            "Control/VideoOut/Underscan",
+            result.control
+            .videoOut
+            .underscan)
+        .toDouble();
+
+    result.control
+        .videoOut
+        .deinterlace =
+        settings.value(
+            "Control/VideoOut/Deinterlace",
+            result.control
+            .videoOut
+            .deinterlace)
+        .toBool();
+
+    result.local.window.x =
+        settings.value(
+            "Local/Window/X",
+            result.local.window.x)
+        .toInt();
+
+    result.local.window.y =
+        settings.value(
+            "Local/Window/Y",
+            result.local.window.y)
+        .toInt();
+
+    result.local.window.width =
+        settings.value(
+            "Local/Window/Width",
+            result.local.window.width)
+        .toInt();
+
+    result.local.window.height =
+        settings.value(
+            "Local/Window/Height",
+            result.local.window.height)
+        .toInt();
+
+    result.local.window.maximized =
+        settings.value(
+            "Local/Window/Maximized",
+            result.local.window.maximized)
+        .toBool();
+
+    result.local.workspace.view =
+        workspaceViewFromString(
+            settings.value(
+                "Local/Workspace/View",
+                workspaceViewToString(
+                    result.local.workspace.view))
+            .toString(),
+            result.local.workspace.view);
+
+    return result;
+}
+
+void SettingsStorage::save(
+    const OpenScopeSettings& settings) const
+{
+    QSettings storage(
+        fileName_,
+        QSettings::IniFormat);
+
+    storage.setValue(
+        "Local/Display/Gamma",
+        settings.local
+        .display
+        .gamma);
+
+    storage.setValue(
+        "Local/Display/AspectRatio",
+        aspectRatioToString(
+            settings.local
+            .display
+            .aspectRatio));
+
+    storage.setValue(
+        "Local/Display/Deinterlace",
+        settings.local
+        .display
+        .deinterlace);
+
+    storage.setValue(
+        "Control/Instrument/LineNumber",
+        settings.control
+        .instrument
+        .lineNumber);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/Zoom",
+        settings.control
+        .instrument
+        .waveform
+        .zoom);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/ZoomStartSample",
+        settings.control
+        .instrument
+        .waveform
+        .zoomStartSample);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/VintageLook",
+        settings.control
+        .instrument
+        .waveform
+        .vintageLook);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/ChromaRenderIntensity",
+        settings.control
+        .instrument
+        .waveform
+        .chromaRenderIntensity);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/PersistenceFrames",
+        settings.control
+        .instrument
+        .waveform
+        .persistenceFrames);
+
+    storage.setValue(
+        "Control/Instrument/Vectorscope/ShowHundredPercentTargets",
+        settings.control
+        .instrument
+        .vectorscope
+        .showHundredPercentTargets);
+
+    storage.setValue(
+        "Control/Instrument/Vectorscope/PersistenceFrames",
+        settings.control
+        .instrument
+        .vectorscope
+        .persistenceFrames);
+
+    storage.setValue(
+        "Control/Processing/NoiseFilter/Enabled",
+        settings.control
+        .processing
+        .noiseFilter
+        .enabled);
+
+    storage.setValue(
+        "Control/Processing/NoiseFilter/Strength",
+        settings.control
+        .processing
+        .noiseFilter
+        .strength);
+
+    storage.setValue(
+        "Control/Processing/NoiseFilter/TemporalStrength",
+        settings.control
+        .processing
+        .noiseFilter
+        .temporalStrength);
+
+    storage.setValue(
+        "Control/VideoOut/Enabled",
+        settings.control
+        .videoOut
+        .enabled);
+
+    storage.setValue(
+        "Control/VideoOut/Width",
+        settings.control
+        .videoOut
+        .width);
+
+    storage.setValue(
+        "Control/VideoOut/Height",
+        settings.control
+        .videoOut
+        .height);
+
+    storage.setValue(
+        "Control/VideoOut/AspectRatio",
+        aspectRatioToString(
+            settings.control
+            .videoOut
+            .aspectRatio));
+
+    storage.setValue(
+        "Control/VideoOut/Underscan",
+        settings.control
+        .videoOut
+        .underscan);
+
+    storage.setValue(
+        "Control/VideoOut/Deinterlace",
+        settings.control
+        .videoOut
+        .deinterlace);
+
+    storage.setValue(
+        "Local/Window/X",
+        settings.local.window.x);
+
+    storage.setValue(
+        "Local/Window/Y",
+        settings.local.window.y);
+
+    storage.setValue(
+        "Local/Window/Width",
+        settings.local.window.width);
+
+    storage.setValue(
+        "Local/Window/Height",
+        settings.local.window.height);
+
+    storage.setValue(
+        "Local/Window/Maximized",
+        settings.local.window.maximized);
+
+    storage.setValue(
+        "Local/Workspace/View",
+        workspaceViewToString(
+            settings.local.workspace.view));
+
+    storage.sync();
+}

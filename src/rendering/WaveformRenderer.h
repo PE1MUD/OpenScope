@@ -57,7 +57,7 @@ private:
     };
 
     void clearOrFadeTrace();
-
+    void clearTrace();
     void renderSingleLine(
         const Yuv444Frame& frame,
         const ReconstructedLumaFrame& reconstructedLuma);
@@ -85,6 +85,15 @@ private:
         int red,
         int green,
         int blue);
+
+    void addChromaFillPixel(
+        int x,
+        int y,
+        int red,
+        int green,
+        int blue,
+        int intensity);
+
     
     QRectF scaledScopeRect() const;
     QImage image_;

@@ -5,6 +5,8 @@
 #include "WaveformWidget.h"
 #include "DeckLinkProbe.h"
 #include "VectorscopeWidget.h"
+#include "settings/SettingsService.h"
+
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -33,7 +35,7 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V0.2");
+    setWindowTitle("OpenScope V0.3");
     resize(900, 720);
     SetThreadPriority(
         GetCurrentThread(),
@@ -45,39 +47,161 @@ MainWindow::MainWindow(QWidget* parent)
     vectorscopeWidget_ =
         new VectorscopeWidget;
 
+    settingsService_ =
+        new SettingsService(this);
+
+    const auto& windowSettings =
+        settingsService_->settings().local.window;
+
+    resize(
+        windowSettings.width,
+        windowSettings.height);
+
+    move(
+        windowSettings.x,
+        windowSettings.y);
+
+    if (windowSettings.maximized)
+    {
+        showMaximized();
+    }
+
     workspace_ =
         new ScopeWorkspace(
             videoWidget_,
             waveformWidget_,
             vectorscopeWidget_,
+            settingsService_
+            ->settings()
+            .control
+            .instrument
+            .waveform
+            .vintageLook,
+            settingsService_
+            ->settings()
+            .control
+            .instrument
+            .waveform
+            .chromaRenderIntensity,
             this);
-    
+
+    workspace_->setWorkspaceView(
+        settingsService_->settings()
+        .local
+        .workspace
+        .view);
+
+    // Set the values.
+    videoEngine_->setDisplayGamma(
+        settingsService_
+        ->settings()
+        .local
+        .display
+        .gamma);
+
+    videoEngine_->setWaveformColor(
+        !settingsService_
+        ->settings()
+        .control
+        .instrument
+        .waveform
+        .vintageLook);
+
+    videoEngine_->setWaveformChromaFillIntensity(
+        settingsService_
+        ->settings()
+        .control
+        .instrument
+        .waveform
+        .chromaRenderIntensity);
+
     connect(
         workspace_,
         &ScopeWorkspace::waveformChromaFillIntensityChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformChromaFillIntensity);
-    
+        this,
+        [this](int intensity)
+        {
+            settingsService_->update(
+                [intensity](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .chromaRenderIntensity =
+                        intensity;
+                });
+
+            videoEngine_->
+                setWaveformChromaFillIntensity(
+                    intensity);
+        });
+
     connect(
         workspace_,
         &ScopeWorkspace::waveformColorChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformColor);
-    
+        this,
+        [this](bool colorEnabled)
+        {
+            settingsService_->update(
+                [colorEnabled](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .vintageLook =
+                        !colorEnabled;
+                });
+
+            videoEngine_->setWaveformColor(
+                colorEnabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::workspaceViewChanged,
+        this,
+        [this](OpenScopeSettings::WorkspaceView view)
+        {
+            settingsService_->update(
+                [view](OpenScopeSettings& settings)
+                {
+                    settings.local.workspace.view =
+                        view;
+                });
+        });
+
     setCentralWidget(workspace_);
 
     auto* toolbar =
         addToolBar("Line selector");
 
+    const bool waveformZoomed =
+        settingsService_->settings()
+        .control
+        .instrument
+        .waveform
+        .zoom == 10;
+
     auto* waveformZoomButton =
         new QPushButton(
-            "X1",
+            waveformZoomed
+            ? "X10"
+            : "X1",
             toolbar);
 
     waveformZoomButton->setCheckable(true);
 
+    waveformZoomButton->setChecked(
+        waveformZoomed);
+
     toolbar->addWidget(
         waveformZoomButton);
+
+    waveformWidget_->setZoomed(
+        waveformZoomed);
+
+    videoEngine_->setWaveformZoomed(
+        waveformZoomed);
 
     connect(
         waveformZoomButton,
@@ -85,10 +209,24 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this, waveformZoomButton](bool zoomed)
         {
+            settingsService_->update(
+                [zoomed](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .zoom =
+                        zoomed
+                        ? 10
+                        : 1;
+                });
+
             waveformWidget_->setZoomed(
                 zoomed);
+
             videoEngine_->setWaveformZoomed(
                 zoomed);
+
             waveformZoomButton->setText(
                 zoomed
                 ? "X10"
@@ -108,7 +246,14 @@ MainWindow::MainWindow(QWidget* parent)
         -1,
         575);
 
-    lineSelector->setValue(320);
+    const int lineNumber =
+        settingsService_->settings()
+        .control
+        .instrument
+        .lineNumber;
+
+    lineSelector->setValue(
+        lineNumber);
 
     lineSelector->setSpecialValueText(
         "All");
@@ -116,11 +261,27 @@ MainWindow::MainWindow(QWidget* parent)
     toolbar->addWidget(
         lineSelector);
 
+    videoEngine_->setSelectedLine(
+        lineNumber);
+
     connect(
         lineSelector,
         &QSpinBox::valueChanged,
-        videoEngine_,
-        &VideoEngine::setSelectedLine);
+        this,
+        [this](int lineNumber)
+        {
+            settingsService_->update(
+                [lineNumber](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .lineNumber =
+                        lineNumber;
+                });
+
+            videoEngine_->setSelectedLine(
+                lineNumber);
+        });
 
     auto* persistenceLabel =
         new QLabel(
@@ -139,7 +300,15 @@ MainWindow::MainWindow(QWidget* parent)
         0,
         255);
 
-    persistenceSlider->setValue(0);
+    const int persistenceFrames =
+        settingsService_->settings()
+        .control
+        .instrument
+        .waveform
+        .persistenceFrames;
+
+    persistenceSlider->setValue(
+        persistenceFrames);
 
     persistenceSlider->setFixedWidth(
         140);
@@ -147,11 +316,28 @@ MainWindow::MainWindow(QWidget* parent)
     toolbar->addWidget(
         persistenceSlider);
 
+    videoEngine_->setWaveformPersistence(
+        persistenceFrames);
+
     connect(
         persistenceSlider,
         &QSlider::valueChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformPersistence);
+        this,
+        [this](int persistenceFrames)
+        {
+            settingsService_->update(
+                [persistenceFrames](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .persistenceFrames =
+                        persistenceFrames;
+                });
+
+            videoEngine_->setWaveformPersistence(
+                persistenceFrames);
+        });
 
     connect(
         videoEngine_,
@@ -285,7 +471,7 @@ bool MainWindow::nativeEvent(
                 workArea.top +
                 (availableHeight -
                     windowHeight) / 2;
-            
+
             restoreWindowGeometry_ =
                 geometry();
 
@@ -478,7 +664,7 @@ bool MainWindow::nativeEvent(
                 rect->top +
                 currentHeight;
             break;
-        }        
+        }
         *result = TRUE;
         return true;
     }
@@ -487,4 +673,32 @@ bool MainWindow::nativeEvent(
         eventType,
         message,
         result);
+}
+
+void MainWindow::closeEvent(
+    QCloseEvent* event)
+{
+    const QRect geometry =
+        normalGeometry();
+
+    settingsService_->update(
+        [&geometry, this](OpenScopeSettings& settings)
+        {
+            settings.local.window.x =
+                geometry.x();
+
+            settings.local.window.y =
+                geometry.y();
+
+            settings.local.window.width =
+                geometry.width();
+
+            settings.local.window.height =
+                geometry.height();
+
+            settings.local.window.maximized =
+                isMaximized();
+        });
+
+    QMainWindow::closeEvent(event);
 }

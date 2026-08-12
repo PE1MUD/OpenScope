@@ -333,9 +333,17 @@ QImage DisplayConverter::convert(
     return image;
 }
 
+void DisplayConverter::setGamma(double gamma)
+{
+    displayGamma_ = gamma;
+
+    rebuildDisplayLut();
+}
+
 void DisplayConverter::rebuildDisplayLut()
 {
-    constexpr double gamma = 0.8;
+    const double gamma =
+        displayGamma_;
 
     for (std::size_t i = 0;
         i < displayLut_.size();

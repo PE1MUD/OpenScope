@@ -5,10 +5,10 @@
 #include <QCheckBox>
 #include <QFrame>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QSlider>
 #include <QVBoxLayout>
-#include <QHBoxLayout>
 
 namespace
 {
@@ -49,6 +49,8 @@ ScopeWorkspace::ScopeWorkspace(
     QWidget* videoWidget,
     QWidget* waveformWidget,
     QWidget* vectorscopeWidget,
+    bool vintageLook,
+    int chromaRenderIntensity,
     QWidget* parent)
     : QWidget(parent)
 {
@@ -106,7 +108,8 @@ ScopeWorkspace::ScopeWorkspace(
             "Vintage look",
             controls);
 
-    vintageCheckBox->setChecked(true);
+    vintageCheckBox->setChecked(
+        vintageLook);
 
     connect(
         vintageCheckBox,
@@ -114,7 +117,8 @@ ScopeWorkspace::ScopeWorkspace(
         this,
         [this](bool enabled)
         {
-            emit waveformColorChanged(!enabled);
+            emit waveformColorChanged(
+                !enabled);
         });
 
     auto* intensityRow =
@@ -147,7 +151,7 @@ ScopeWorkspace::ScopeWorkspace(
         200);
 
     intensitySlider->setValue(
-        96);
+        chromaRenderIntensity);
 
     intensityLayout->addWidget(
         intensityLabel);
@@ -238,11 +242,6 @@ ScopeWorkspace::ScopeWorkspace(
         this,
         &ScopeWorkspace::toggleMaximized);
 
-    connect(
-        yuvViewport_,
-        &ScopeViewport::doubleClicked,
-        this,
-        &ScopeWorkspace::toggleMaximized);
 }
 
 void ScopeWorkspace::toggleMaximized(
@@ -251,11 +250,29 @@ void ScopeWorkspace::toggleMaximized(
     if (maximizedViewport_ == viewport)
     {
         showGrid();
+
+        emit workspaceViewChanged(
+            OpenScopeSettings::WorkspaceView::Matrix);
+
+        return;
     }
-    else
+
+    showMaximized(viewport);
+
+    if (viewport == videoViewport_)
     {
-        showMaximized(
-            viewport);
+        emit workspaceViewChanged(
+            OpenScopeSettings::WorkspaceView::Video);
+    }
+    else if (viewport == waveformViewport_)
+    {
+        emit workspaceViewChanged(
+            OpenScopeSettings::WorkspaceView::Waveform);
+    }
+    else if (viewport == vectorscopeViewport_)
+    {
+        emit workspaceViewChanged(
+            OpenScopeSettings::WorkspaceView::Vectorscope);
     }
 }
 
@@ -324,4 +341,31 @@ void ScopeWorkspace::showGrid()
 
     maximizedViewport_ =
         nullptr;
+}
+
+void ScopeWorkspace::setWorkspaceView(
+    OpenScopeSettings::WorkspaceView view)
+{
+    switch (view)
+    {
+    case OpenScopeSettings::WorkspaceView::Video:
+        showMaximized(videoViewport_);
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Waveform:
+        showMaximized(waveformViewport_);
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Vectorscope:
+        showMaximized(vectorscopeViewport_);
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Matrix:
+        showGrid();
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Headless:
+        showGrid();
+        break;
+    }
 }

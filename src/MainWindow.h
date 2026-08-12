@@ -1,14 +1,15 @@
 #pragma once
 
 #include <QMainWindow>
-#include <QMainWindow>
 #include <QRect>
+#include <QCloseEvent>
 
 class VectorscopeWidget;
 class VideoEngine;
 class VideoWidget;
 class WaveformWidget;
 class ScopeWorkspace;
+class SettingsService;
 
 class MainWindow : public QMainWindow
 {
@@ -22,6 +23,7 @@ public:
     VideoEngine* videoEngine() const;
 
 protected:
+    void closeEvent(QCloseEvent* event) override;
     bool nativeEvent(
         const QByteArray& eventType,
         void* message,
@@ -35,4 +37,5 @@ private:
     VectorscopeWidget* vectorscopeWidget_ = nullptr;
     QRect restoreWindowGeometry_;
     bool customMaximized_ = false;
+    SettingsService* settingsService_ = nullptr;
 };

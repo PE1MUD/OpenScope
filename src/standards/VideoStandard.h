@@ -45,11 +45,7 @@ struct YuvToRgbCoefficients
     double gCr;
     double bCb;
 };
-struct YuvCoefficients
-{
-    double kr;
-    double kb;
-};
+
 
 struct YuvLevels
 {
@@ -140,40 +136,6 @@ constexpr YuvToRgbCoefficients yuvToRgbCoefficients(
         -0.344136,
         -0.714136,
         1.772
-    };
-}
-constexpr YuvCoefficients coefficients(
-    VideoColorStandard standard)
-{
-    switch (standard)
-    {
-    case VideoColorStandard::Rec601_625:
-    case VideoColorStandard::Rec601_525:
-        return
-        {
-            0.299,
-            0.114
-        };
-
-    case VideoColorStandard::Rec709:
-        return
-        {
-            0.2126,
-            0.0722
-        };
-
-    case VideoColorStandard::Rec2020:
-        return
-        {
-            0.2627,
-            0.0593
-        };
-    }
-
-    return
-    {
-        0.299,
-        0.114
     };
 }
 

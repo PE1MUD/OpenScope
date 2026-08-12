@@ -1140,3 +1140,8 @@ void VideoEngine::setWaveformColor(bool enabled)
 {
     waveformRenderer_.setColor(enabled);
 }
+
+void VideoEngine::setDisplayGamma(double gamma)
+{
+    displayConverter_.setGamma(gamma);
+}

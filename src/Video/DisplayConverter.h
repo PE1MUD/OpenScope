@@ -20,7 +20,8 @@ public:
 
     void setHighlightedLine(int line);
     DisplayConverter();
-
+    void setGamma(double gamma);
+    
 private:
     struct HorizontalSample
     {
@@ -38,7 +39,7 @@ private:
     mutable int cachedOutputWidth_ = 0;
     mutable int cachedReconstructedWidth_ = 0;
     mutable int cachedReconstructedOutputWidth_ = 0;
- 
+    double displayGamma_ = 1.0;
 
     int highlightedLine_ = -1;
 };
