@@ -33,7 +33,7 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V0.1");
+    setWindowTitle("OpenScope V0.2");
     resize(900, 720);
     SetThreadPriority(
         GetCurrentThread(),
@@ -57,7 +57,13 @@ MainWindow::MainWindow(QWidget* parent)
         &ScopeWorkspace::waveformChromaFillIntensityChanged,
         videoEngine_,
         &VideoEngine::setWaveformChromaFillIntensity);
-
+    
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformColorChanged,
+        videoEngine_,
+        &VideoEngine::setWaveformColor);
+    
     setCentralWidget(workspace_);
 
     auto* toolbar =

@@ -6,6 +6,8 @@
 #include <QImage>
 
 #include <vector>
+#include <array>
+#include <cstdint>
 
 class DisplayConverter
 {
@@ -17,6 +19,7 @@ public:
         int outputHeight) const;
 
     void setHighlightedLine(int line);
+    DisplayConverter();
 
 private:
     struct HorizontalSample
@@ -25,6 +28,8 @@ private:
         int rightIndex;
         float fraction;
     };
+    void rebuildDisplayLut();
+    std::array<std::uint8_t, 256> displayLut_;
 
     mutable std::vector<HorizontalSample> horizontalCache_;
     mutable std::vector<HorizontalSample> reconstructedHorizontalCache_;
@@ -33,6 +38,7 @@ private:
     mutable int cachedOutputWidth_ = 0;
     mutable int cachedReconstructedWidth_ = 0;
     mutable int cachedReconstructedOutputWidth_ = 0;
+ 
 
     int highlightedLine_ = -1;
 };

@@ -134,6 +134,12 @@ qt_add_executable(OpenScope
     "${DECKLINK_GENERATED_IID}"
 )
 
+if(WIN32)
+    set_target_properties(OpenScope PROPERTIES
+        WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>
+    )
+endif()
+
 set_source_files_properties(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/SignalReconstructorAvx2.cpp"
     PROPERTIES

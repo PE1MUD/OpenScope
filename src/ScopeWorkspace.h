@@ -19,6 +19,7 @@ public:
 signals:
     void waveformChromaFillIntensityChanged(
         int intensity);
+    void waveformColorChanged(bool enabled);
 
 private:
     void showGrid();

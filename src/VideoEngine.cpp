@@ -1039,8 +1039,10 @@ void VideoEngine::reconstructLuma(
     const Yuv444Frame& frame,
     std::uint64_t generation)
 {
-    QElapsedTimer timer;
-    timer.start();    if (frame.width <= 0 ||
+    //QElapsedTimer timer;
+    //timer.start();
+
+    if (frame.width <= 0 ||
         frame.height <= 0)
     {
         return;
@@ -1117,10 +1119,10 @@ void VideoEngine::reconstructLuma(
         static_cast<int>(
             outputSlotIndex),
         std::memory_order_release);
-    qDebug()
-        << "Luma reconstruct:"
-        << timer.nsecsElapsed() / 1.0e6
-        << "ms";
+    //qDebug()
+    //    << "Luma reconstruct:"
+    //    << timer.nsecsElapsed() / 1.0e6
+    //    << "ms";
     waveformCondition_.notify_one();
 
     displayCondition_.notify_one();
@@ -1132,4 +1134,9 @@ void VideoEngine::setWaveformChromaFillIntensity(
 {
     waveformRenderer_.setChromaFillIntensity(
         intensity);
+}
+
+void VideoEngine::setWaveformColor(bool enabled)
+{
+    waveformRenderer_.setColor(enabled);
 }

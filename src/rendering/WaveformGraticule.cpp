@@ -47,10 +47,6 @@ void WaveformGraticule::draw(
             150,
             50));
 
-    pen.setWidth(1);
-
-    painter.setPen(pen);
-
     const QFont font =
         labelFont(
             painter.font(),
@@ -76,6 +72,36 @@ void WaveformGraticule::draw(
         const double y =
             voltsToY(volts);
 
+        const bool majorLine =
+            std::abs(volts - 0.0) < 0.001 ||
+            std::abs(volts - 0.3) < 0.001 ||
+            std::abs(volts - 1.0) < 0.001;
+
+        if (majorLine)
+        {
+            pen.setWidth(3);
+            pen.setStyle(Qt::SolidLine);
+            pen.setColor(
+                QColor(
+                    180,
+                    150,
+                    50,
+                    255));
+        }
+        else
+        {
+            pen.setWidth(2);
+            pen.setStyle(Qt::DotLine);
+            pen.setColor(
+                QColor(
+                    180,
+                    150,
+                    50,
+                    140));
+        }
+
+        painter.setPen(pen);
+
         painter.drawLine(
             QPointF(
                 scopeRect.left(),
@@ -97,6 +123,15 @@ void WaveformGraticule::draw(
             y - labelHeight * 0.5,
             labelWidth,
             labelHeight);
+
+        QPen labelPen(
+            QColor(
+                180,
+                150,
+                50,
+                255));
+
+        painter.setPen(labelPen);
 
         painter.drawText(
             labelRect,

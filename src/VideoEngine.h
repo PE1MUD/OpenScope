@@ -52,6 +52,8 @@ public:
     void setWaveformChromaFillIntensity(
         int intensity);
 
+    void setWaveformColor(bool enabled);
+
 signals:
     void frameChanged(const QImage& image);
     void waveformChanged(const QImage& image);

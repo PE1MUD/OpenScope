@@ -33,6 +33,11 @@ void WaveformRenderer::setChromaFillIntensity(
             200);
 }
 
+void WaveformRenderer::setColor(bool enabled)
+{
+    settings_.color = enabled;
+}
+
 void addFillPixel(
     QImage& image,
     int x,
@@ -973,14 +978,35 @@ void WaveformRenderer::renderSingleLine(
             y <= lastY;
             ++y)
         {
-            addFillPixel(
-                image_,
-                screenX,
-                y,
-                chromaRed[index],
-                chromaGreen[index],
-                chromaBlue[index],
-                chromaFillIntensity_);
+            if (settings_.color)
+            {
+                addFillPixel(
+                    image_,
+                    screenX,
+                    y,
+                    chromaRed[index],
+                    chromaGreen[index],
+                    chromaBlue[index],
+                    chromaFillIntensity_);
+            }
+            else
+            {
+                const int grey =
+                    std::max({
+                        chromaRed[index],
+                        chromaGreen[index],
+                        chromaBlue[index]
+                        });
+
+                addFillPixel(
+                    image_,
+                    screenX,
+                    y,
+                    grey,
+                    grey,
+                    grey,
+                    chromaFillIntensity_);
+            }
         }
     }
 
@@ -1285,7 +1311,7 @@ void WaveformRenderer::composeTraceImage()
 
     const int height =
         image_.height();
-
+    
     for (int y = 0;
         y < height;
         ++y)
@@ -1306,11 +1332,32 @@ void WaveformRenderer::composeTraceImage()
             const TracePixel& pixel =
                 trace_[index];
 
-            destination[x] =
-                qRgb(
-                    displayLut_[pixel.red],
-                    displayLut_[pixel.green],
-                    displayLut_[pixel.blue]);
+            if (settings_.color)
+            {
+                destination[x] =
+                    qRgb(
+                        displayLut_[pixel.red],
+                        displayLut_[pixel.green],
+                        displayLut_[pixel.blue]);
+            }
+            else
+            {
+                const std::uint16_t mono =
+                    std::max(
+                        pixel.red,
+                        std::max(
+                            pixel.green,
+                            pixel.blue));
+
+                const int value =
+                    displayLut_[mono];
+
+                destination[x] =
+                    qRgb(
+                        value,
+                        value,
+                        value);
+            }
         }
     }
 }
@@ -1787,3 +1834,4 @@ double WaveformRenderer::traceBandwidthMHz() const
             captureSamplesPerLine *
             kPixelsPerCycleForTraceBW);
 }
+

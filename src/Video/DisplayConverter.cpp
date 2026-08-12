@@ -6,6 +6,12 @@
 #include <QElapsedTimer>
 #include <QDebug>
 
+
+DisplayConverter::DisplayConverter()
+{
+    rebuildDisplayLut();
+}
+
 void DisplayConverter::setHighlightedLine(int line)
 {
     highlightedLine_ = line;
@@ -172,8 +178,21 @@ QImage DisplayConverter::convert(
         const auto* srcV =
             frame.v.data() + lineOffset;
 
+        const int highlightedOutputY =
+            static_cast<int>(
+                std::round(
+                    (
+                        static_cast<double>(highlightedLine_) +
+                        0.5
+                        ) *
+                    static_cast<double>(outputHeight) /
+                    static_cast<double>(frame.height) -
+                    0.5));
+
         const bool invertLine =
-            sourceLine == highlightedLine_;
+            highlightedLine_ >= 0 &&
+            outputY >= highlightedOutputY &&
+            outputY < highlightedOutputY + 2;
 
         timer.restart();
 
@@ -276,6 +295,18 @@ QImage DisplayConverter::convert(
             int outB =
                 qBound(0, b, 255);
 
+            outR =
+                displayLut_[
+                    static_cast<std::size_t>(outR)];
+
+            outG =
+                displayLut_[
+                    static_cast<std::size_t>(outG)];
+
+            outB =
+                displayLut_[
+                    static_cast<std::size_t>(outB)];
+
             if (invertLine)
             {
                 outR = 255 - outR;
@@ -300,4 +331,31 @@ QImage DisplayConverter::convert(
 
 
     return image;
+}
+
+void DisplayConverter::rebuildDisplayLut()
+{
+    constexpr double gamma = 0.8;
+
+    for (std::size_t i = 0;
+        i < displayLut_.size();
+        ++i)
+    {
+        const double input =
+            static_cast<double>(i) /
+            255.0;
+
+        const double output =
+            std::pow(
+                input,
+                gamma);
+
+        displayLut_[i] =
+            static_cast<std::uint8_t>(
+                std::clamp(
+                    std::lround(
+                        output * 255.0),
+                    0l,
+                    255l));
+    }
 }

@@ -13,6 +13,12 @@
 // Minimum horizontal pixels per cycle for a visually pleasing waveform.
 inline constexpr double kPixelsPerCycleForTraceBW = 6.0;
 
+struct WaveformSettings
+{
+    int fillDensity = 0;
+    bool color = false;
+};
+
 class WaveformRenderer final : public Analyzer
 {
 public:
@@ -39,6 +45,8 @@ public:
 
     void setChromaFillIntensity(
         int intensity);
+
+    void setColor(bool enabled);
 
 private:
     struct TracePixel
@@ -105,4 +113,6 @@ private:
     bool zoomed_ = false;
     double scrollPosition_ = 0.0;
     int chromaFillIntensity_ = 64;
+
+    WaveformSettings settings_;
 };
