@@ -1,6 +1,6 @@
 #pragma once
 
-#include "VideoWidget.h"
+#include "widgets/VideoWidget.h"
 
 class QPaintEvent;
 class QResizeEvent;

@@ -1,4 +1,4 @@
-#include "VectorscopeWidget.h"
+#include "widgets/VectorscopeWidget.h"
 #include "VectorscopeSettings.h"
 #include <QPainter>
 

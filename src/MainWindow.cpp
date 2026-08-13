@@ -1,11 +1,12 @@
 #include "MainWindow.h"
 #include "ScopeWorkspace.h"
 #include "VideoEngine.h"
-#include "VideoWidget.h"
-#include "WaveformWidget.h"
+#include "widgets/VideoWidget.h"
+#include "widgets/WaveformWidget.h"
 #include "DeckLinkProbe.h"
-#include "VectorscopeWidget.h"
+#include "widgets/VectorscopeWidget.h"
 #include "settings/SettingsService.h"
+#include "widgets/PerformanceWidget.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -17,6 +18,7 @@
 
 #include <windows.h>
 
+#include <QTimer>
 #include <QLabel>
 #include <QPushButton>
 #include <QSlider>
@@ -35,7 +37,7 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V0.3");
+    setWindowTitle("OpenScope V0.31");
     resize(900, 720);
     SetThreadPriority(
         GetCurrentThread(),
@@ -91,6 +93,32 @@ MainWindow::MainWindow(QWidget* parent)
         .workspace
         .view);
 
+    performanceWidget_ =
+        new PerformanceWidget(this);
+
+    connect(
+        performanceWidget_,
+        &PerformanceWidget::visibilityChanged,
+        this,
+        [this](bool visible)
+        {
+            workspace_->setPerformanceVisible(
+                visible);
+        });
+
+    performanceWidget_->setWindowTitle(
+        "OpenScope Performance");
+
+    performanceWidget_->setWindowFlag(
+        Qt::Tool);
+
+    performanceWidget_->setFixedSize(
+        performanceWidget_->sizeHint());
+
+    performanceWidget_->setFixedSize(
+        performanceWidget_->size());
+
+    performanceWidget_->show();
     // Set the values.
     videoEngine_->setDisplayGamma(
         settingsService_
@@ -170,11 +198,39 @@ MainWindow::MainWindow(QWidget* parent)
                 });
         });
 
+    connect(
+        workspace_,
+        &ScopeWorkspace::performanceVisibilityChanged,
+        this,
+        [this](bool visible)
+        {
+            performanceWidget_->setVisible(
+                visible);
+        });
+
     setCentralWidget(workspace_);
+
+    performanceTimer_ =
+        new QTimer(this);
+
+    performanceTimer_->setInterval(
+        50);
+
+    connect(
+        performanceTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            performanceWidget_->setPerformanceSnapshot(
+                videoEngine_->performanceSnapshot());
+        });
+
+    performanceTimer_->start();
 
     auto* toolbar =
         addToolBar("Line selector");
-
+    
     const bool waveformZoomed =
         settingsService_->settings()
         .control
@@ -312,7 +368,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* persistenceLabel =
         new QLabel(
-            "Pers",
+            "Scopephor",
             toolbar);
 
     toolbar->addWidget(

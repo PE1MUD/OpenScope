@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QRect>
 #include <QCloseEvent>
+class QTimer;
 
 class VectorscopeWidget;
 class VideoEngine;
@@ -10,6 +11,7 @@ class VideoWidget;
 class WaveformWidget;
 class ScopeWorkspace;
 class SettingsService;
+class PerformanceWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -38,4 +40,6 @@ private:
     QRect restoreWindowGeometry_;
     bool customMaximized_ = false;
     SettingsService* settingsService_ = nullptr;
+    PerformanceWidget* performanceWidget_ = nullptr;
+    QTimer* performanceTimer_ = nullptr;
 };

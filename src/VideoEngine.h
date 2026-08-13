@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "util/PerformanceStats.h"
 #include "video/DisplayConverter.h"
 #include "video/Yuv444Frame.h"
 #include "video/ReconstructedLumaFrame.h"
@@ -55,6 +56,8 @@ public:
     void setWaveformColor(bool enabled);
 
     void setDisplayGamma(double gamma);
+
+    PerformanceSnapshot performanceSnapshot() const;
 
 signals:
     void frameChanged(const QImage& image);
@@ -212,4 +215,8 @@ private:
     void reconstructLuma(
         const Yuv444Frame& frame,
         std::uint64_t generation);
+
+    PerformanceStats performanceStats_;
+
+
 };

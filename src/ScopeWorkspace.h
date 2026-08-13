@@ -4,6 +4,7 @@
 
 class QGridLayout;
 class ScopeViewport;
+class ControlWidget;
 
 class ScopeWorkspace final : public QWidget
 {
@@ -19,6 +20,8 @@ public:
         QWidget* parent = nullptr);
     void setWorkspaceView(
         OpenScopeSettings::WorkspaceView view);
+    void setPerformanceVisible(
+        bool visible);
 
 signals:
     void waveformChromaFillIntensityChanged(
@@ -27,6 +30,8 @@ signals:
 signals:
     void workspaceViewChanged(
         OpenScopeSettings::WorkspaceView view);
+    void performanceVisibilityChanged(
+        bool visible);
 
 private:
     void showGrid();
@@ -41,6 +46,7 @@ private:
     ScopeViewport* yuvViewport_ = nullptr;
 
     ScopeViewport* maximizedViewport_ = nullptr;
+    ControlWidget* controlWidget_ = nullptr;
 
 private slots:
     void toggleMaximized(

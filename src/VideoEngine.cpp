@@ -426,6 +426,9 @@ void VideoEngine::displayWorkerLoop()
 
         displayConverter_.setHighlightedLine(
             selectedLine);
+        
+        QElapsedTimer timer;
+        timer.start();
 
         const QImage displayImage =
             displayConverter_.convert(
@@ -433,6 +436,10 @@ void VideoEngine::displayWorkerLoop()
                 reconstructedSlot.frame,
                 outputWidth,
                 outputHeight);
+
+        performanceStats_.display.update(
+            static_cast<std::uint64_t>(
+                timer.nsecsElapsed() / 1000));
 
         const bool captureValid =
             isCaptureSlotValid(
@@ -582,9 +589,16 @@ void VideoEngine::waveformWorkerLoop()
         waveformRenderer_.setSelectedLine(
             selectedLine);
 
+        QElapsedTimer timer;
+        timer.start();
+
         waveformRenderer_.analyze(
             captureSlot.frame,
             reconstructedSlot.frame);
+
+        performanceStats_.waveform.update(
+            static_cast<std::uint64_t>(
+                timer.nsecsElapsed() / 1000));
 
         const bool captureValid =
             isCaptureSlotValid(
@@ -707,8 +721,15 @@ void VideoEngine::vectorscopeWorkerLoop()
         vectorscopeAnalyzer_.setSelectedLine(
             selectedLine);
 
+        QElapsedTimer timer;
+        timer.start();
+
         vectorscopeAnalyzer_.analyze(
             captureSlots_[slotIndex].frame);
+
+        performanceStats_.vectorscope.update(
+            static_cast<std::uint64_t>(
+                timer.nsecsElapsed() / 1000));
 
         const bool stillValid =
             isCaptureSlotValid(
@@ -1039,8 +1060,8 @@ void VideoEngine::reconstructLuma(
     const Yuv444Frame& frame,
     std::uint64_t generation)
 {
-    //QElapsedTimer timer;
-    //timer.start();
+    QElapsedTimer timer;
+    timer.start();
 
     if (frame.width <= 0 ||
         frame.height <= 0)
@@ -1119,14 +1140,14 @@ void VideoEngine::reconstructLuma(
         static_cast<int>(
             outputSlotIndex),
         std::memory_order_release);
-    //qDebug()
-    //    << "Luma reconstruct:"
-    //    << timer.nsecsElapsed() / 1.0e6
-    //    << "ms";
+
+    performanceStats_.reconstruct.update(
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000));
+
     waveformCondition_.notify_one();
 
     displayCondition_.notify_one();
-
 }
 
 void VideoEngine::setWaveformChromaFillIntensity(
@@ -1144,4 +1165,9 @@ void VideoEngine::setWaveformColor(bool enabled)
 void VideoEngine::setDisplayGamma(double gamma)
 {
     displayConverter_.setGamma(gamma);
+}
+
+PerformanceSnapshot VideoEngine::performanceSnapshot() const
+{
+    return performanceStats_.snapshot();
 }

@@ -1,49 +1,8 @@
 #include "ScopeWorkspace.h"
-
 #include "ScopeViewport.h"
+#include "widgets/ControlWidget.h"
 
-#include <QCheckBox>
-#include <QFrame>
 #include <QGridLayout>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QSlider>
-#include <QVBoxLayout>
-
-namespace
-{
-
-    QWidget* createPlaceholder(const QString& text)
-    {
-        auto* frame =
-            new QFrame;
-
-        frame->setFrameShape(
-            QFrame::StyledPanel);
-
-        auto* layout =
-            new QVBoxLayout(frame);
-
-        layout->setContentsMargins(
-            0,
-            0,
-            0,
-            0);
-
-        auto* label =
-            new QLabel(
-                text,
-                frame);
-
-        label->setAlignment(
-            Qt::AlignCenter);
-
-        layout->addWidget(label);
-
-        return frame;
-    }
-
-}
 
 ScopeWorkspace::ScopeWorkspace(
     QWidget* videoWidget,
@@ -67,7 +26,8 @@ ScopeWorkspace::ScopeWorkspace(
         0,
         0);
 
-    layout_->setSpacing(4);
+    layout_->setSpacing(
+        4);
 
     videoViewport_ =
         new ScopeViewport(
@@ -84,36 +44,15 @@ ScopeWorkspace::ScopeWorkspace(
             vectorscopeWidget,
             this);
 
-    auto* controls =
-        new QWidget(this);
-
-    auto* controlsLayout =
-        new QVBoxLayout(controls);
-
-    controlsLayout->setContentsMargins(
-        20,
-        20,
-        20,
-        20);
-
-    controlsLayout->setSpacing(12);
-
-    auto* title =
-        new QLabel(
-            "Waveform",
-            controls);
-
-    auto* vintageCheckBox =
-        new QCheckBox(
-            "Vintage look",
-            controls);
-
-    vintageCheckBox->setChecked(
-        vintageLook);
+    controlWidget_ =
+        new ControlWidget(
+            vintageLook,
+            chromaRenderIntensity,
+            this);
 
     connect(
-        vintageCheckBox,
-        &QCheckBox::toggled,
+        controlWidget_,
+        &ControlWidget::vintageLookChanged,
         this,
         [this](bool enabled)
         {
@@ -121,71 +60,15 @@ ScopeWorkspace::ScopeWorkspace(
                 !enabled);
         });
 
-    auto* intensityRow =
-        new QWidget(controls);
-
-    auto* intensityLayout =
-        new QHBoxLayout(intensityRow);
-
-    intensityLayout->setContentsMargins(
-        0,
-        0,
-        0,
-        0);
-
-    intensityLayout->setSpacing(
-        12);
-
-    auto* intensityLabel =
-        new QLabel(
-            "Color carrier intensity",
-            intensityRow);
-
-    auto* intensitySlider =
-        new QSlider(
-            Qt::Horizontal,
-            intensityRow);
-
-    intensitySlider->setRange(
-        0,
-        200);
-
-    intensitySlider->setValue(
-        chromaRenderIntensity);
-
-    intensityLayout->addWidget(
-        intensityLabel);
-
-    intensityLayout->addWidget(
-        intensitySlider,
-        1);
-
     connect(
-        intensitySlider,
-        &QSlider::valueChanged,
+        controlWidget_,
+        &ControlWidget::chromaRenderIntensityChanged,
         this,
         &ScopeWorkspace::waveformChromaFillIntensityChanged);
 
-    controlsLayout->addWidget(
-        title);
-
-    controlsLayout->addSpacing(
-        4);
-
-    controlsLayout->addWidget(
-        vintageCheckBox);
-
-    controlsLayout->addSpacing(
-        4);
-
-    controlsLayout->addWidget(
-        intensityRow);
-
-    controlsLayout->addStretch();
-
     yuvViewport_ =
         new ScopeViewport(
-            controls,
+            controlWidget_,
             this);
 
     layout_->addWidget(
@@ -242,6 +125,11 @@ ScopeWorkspace::ScopeWorkspace(
         this,
         &ScopeWorkspace::toggleMaximized);
 
+    connect(
+        controlWidget_,
+        &ControlWidget::performanceVisibilityChanged,
+        this,
+        &ScopeWorkspace::performanceVisibilityChanged);
 }
 
 void ScopeWorkspace::toggleMaximized(
@@ -349,15 +237,18 @@ void ScopeWorkspace::setWorkspaceView(
     switch (view)
     {
     case OpenScopeSettings::WorkspaceView::Video:
-        showMaximized(videoViewport_);
+        showMaximized(
+            videoViewport_);
         break;
 
     case OpenScopeSettings::WorkspaceView::Waveform:
-        showMaximized(waveformViewport_);
+        showMaximized(
+            waveformViewport_);
         break;
 
     case OpenScopeSettings::WorkspaceView::Vectorscope:
-        showMaximized(vectorscopeViewport_);
+        showMaximized(
+            vectorscopeViewport_);
         break;
 
     case OpenScopeSettings::WorkspaceView::Matrix:
@@ -368,4 +259,11 @@ void ScopeWorkspace::setWorkspaceView(
         showGrid();
         break;
     }
+}
+
+void ScopeWorkspace::setPerformanceVisible(
+    bool visible)
+{
+    controlWidget_->setPerformanceVisible(
+        visible);
 }

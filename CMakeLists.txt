@@ -77,65 +77,82 @@ add_custom_target(DeckLinkApiGenerated
 )
 
 qt_add_executable(OpenScope
-    src/main.cpp
-    src/MainWindow.cpp
-    src/MainWindow.h
-    src/VideoWidget.cpp
-    src/VideoWidget.h
-    src/WaveformWidget.h
-    src/WaveformWidget.cpp
-    src/TestPatternGenerator.cpp
-    src/TestPatternGenerator.h
-    src/VideoEngine.cpp
-    src/VideoEngine.h
-    src/VideoSource.cpp
-    src/VideoSource.h
-    src/DeckLinkProbe.cpp
-    src/DeckLinkProbe.h
-    src/DeckLinkInputCallback.cpp
-    src/DeckLinkInputCallback.h
-    src/ScopeViewport.h
-    src/ScopeViewport.cpp
-    src/ScopeWorkspace.cpp
-    src/ScopeWorkspace.h
-    src/VectorscopeWidget.h
-    src/VectorscopeWidget.cpp
-    src/VectorscopeSettings.h
-    src/video/Yuv444Frame.h
-    src/video/Uyvy422ToYuv444Converter.h
-    src/video/Uyvy422ToYuv444Converter.cpp
-    src/video/V210ToYuv444Converter.h
-    src/video/V210ToYuv444Converter.cpp
-    src/video/VideoConverter.h
-    src/video/DisplayConverter.h
-    src/video/DisplayConverter.cpp
-    src/video/FrameBufferPool.h
-    src/video/FrameBufferPool.cpp
-    src/video/ReconstructedLumaFrame.h
-    src/analysis/Analyzer.h
-    src/analysis/VectorscopeAnalyzer.h
-    src/analysis/VectorscopeAnalyzer.cpp
-    src/rendering/WaveformRenderer.h
-    src/rendering/WaveformRenderer.cpp
-    src/rendering/VectorscopeGraticule.cpp
-    src/rendering/VectorscopeGraticule.h
-    src/rendering/WaveformGraticule.h
-    src/rendering/WaveformGraticule.cpp
-    src/processing/SignalReconstructor.cpp
-    src/processing/SignalReconstructorAvx2.cpp
-    src/processing/SignalReconstructor.h
-    src/standards/VideoStandard.h
-    src/standards/ColorBars.h
-    src/standards/ColorMatrices.h
-    src/util/CpuFeatures.cpp
-    src/util/CpuFeatures.h
-    src/settings/SettingsStorage.cpp
-    src/settings/SettingsStorage.h
-    src/settings/OpenScopeSettings.h
-    src/settings/SettingsService.h
-    src/settings/SettingsService.cpp
+src/main.cpp
 
-    "${DECKLINK_GENERATED_IID}"
+src/MainWindow.h
+src/MainWindow.cpp
+src/ScopeViewport.h
+src/ScopeViewport.cpp
+src/ScopeWorkspace.h
+src/ScopeWorkspace.cpp
+src/VectorscopeSettings.h
+src/TestPatternGenerator.h
+src/TestPatternGenerator.cpp
+src/VideoEngine.h
+src/VideoEngine.cpp
+src/VideoSource.h
+src/VideoSource.cpp
+src/DeckLinkProbe.h
+src/DeckLinkProbe.cpp
+src/DeckLinkInputCallback.h
+src/DeckLinkInputCallback.cpp
+
+src/analysis/Analyzer.h
+src/analysis/VectorscopeAnalyzer.h
+src/analysis/VectorscopeAnalyzer.cpp
+
+src/processing/SignalReconstructor.h
+src/processing/SignalReconstructor.cpp
+src/processing/SignalReconstructorAvx2.cpp
+
+src/rendering/WaveformRenderer.h
+src/rendering/WaveformRenderer.cpp
+src/rendering/WaveformGraticule.h
+src/rendering/WaveformGraticule.cpp
+src/rendering/VectorscopeGraticule.h
+src/rendering/VectorscopeGraticule.cpp
+
+src/settings/OpenScopeSettings.h
+src/settings/SettingsService.h
+src/settings/SettingsService.cpp
+src/settings/SettingsStorage.h
+src/settings/SettingsStorage.cpp
+
+src/standards/ColorBars.h
+src/standards/ColorMatrices.h
+src/standards/VideoStandard.h
+
+src/ui/RenderLoadBar.h
+src/ui/RenderLoadBar.cpp
+
+src/util/CpuFeatures.h
+src/util/CpuFeatures.cpp
+src/util/PerformanceStats.h
+
+src/video/DisplayConverter.h
+src/video/DisplayConverter.cpp
+src/video/FrameBufferPool.h
+src/video/FrameBufferPool.cpp
+src/video/ReconstructedLumaFrame.h
+src/video/Uyvy422ToYuv444Converter.h
+src/video/Uyvy422ToYuv444Converter.cpp
+src/video/V210ToYuv444Converter.h
+src/video/V210ToYuv444Converter.cpp
+src/video/VideoConverter.h
+src/video/Yuv444Frame.h
+
+src/widgets/PerformanceWidget.h
+src/widgets/PerformanceWidget.cpp
+src/widgets/VectorscopeWidget.h
+src/widgets/VectorscopeWidget.cpp
+src/widgets/VideoWidget.h
+src/widgets/VideoWidget.cpp
+src/widgets/WaveformWidget.h
+src/widgets/WaveformWidget.cpp    
+src/widgets/ControlWidget.h
+src/widgets/ControlWidget.cpp
+
+"${DECKLINK_GENERATED_IID}"
 )
 
 if(WIN32)
