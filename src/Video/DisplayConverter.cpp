@@ -578,11 +578,17 @@ QImage DisplayConverter::convertAvx2(
     alignas(32) int yNextLeft[8];
     alignas(32) int yNextRight[8];
 
-    alignas(32) int uLeft[8];
-    alignas(32) int uRight[8];
+    alignas(32) int uTopLeft[8];
+    alignas(32) int uTopRight[8];
 
-    alignas(32) int vLeft[8];
-    alignas(32) int vRight[8];
+    alignas(32) int uBottomLeft[8];
+    alignas(32) int uBottomRight[8];
+
+    alignas(32) int vTopLeft[8];
+    alignas(32) int vTopRight[8];
+
+    alignas(32) int vBottomLeft[8];
+    alignas(32) int vBottomRight[8];
 
     for (int outputY = 0;
         outputY < outputHeight;
@@ -658,13 +664,21 @@ QImage DisplayConverter::convertAvx2(
             frame.y.data() +
             nextLineOffset;
 
-        const auto* srcU =
+        const auto* srcUTop =
             frame.u.data() +
             topLineOffset;
 
-        const auto* srcV =
+        const auto* srcUBottom =
+            frame.u.data() +
+            bottomLineOffset;
+
+        const auto* srcVTop =
             frame.v.data() +
             topLineOffset;
+
+        const auto* srcVBottom =
+            frame.v.data() +
+            bottomLineOffset;
 
         const int highlightedOutputY =
             static_cast<int>(
@@ -729,17 +743,29 @@ QImage DisplayConverter::convertAvx2(
                 yBottomRight[lane] =
                     srcYBottom[rightIndex];
 
-                uLeft[lane] =
-                    srcU[leftIndex];
+                uTopLeft[lane] =
+                    srcUTop[leftIndex];
 
-                uRight[lane] =
-                    srcU[rightIndex];
+                uTopRight[lane] =
+                    srcUTop[rightIndex];
 
-                vLeft[lane] =
-                    srcV[leftIndex];
+                uBottomLeft[lane] =
+                    srcUBottom[leftIndex];
 
-                vRight[lane] =
-                    srcV[rightIndex];
+                uBottomRight[lane] =
+                    srcUBottom[rightIndex];
+
+                vTopLeft[lane] =
+                    srcVTop[leftIndex];
+
+                vTopRight[lane] =
+                    srcVTop[rightIndex];
+
+                vBottomLeft[lane] =
+                    srcVBottom[leftIndex];
+
+                vBottomRight[lane] =
+                    srcVBottom[rightIndex];
             }
 
             const __m256 yTopLeftFloat =
@@ -798,33 +824,61 @@ QImage DisplayConverter::convertAvx2(
                         const __m256i*>(
                             yNextRight)));
 
-            const __m256 uLeftFloat =
+            const __m256 uTopLeftFloat =
                 _mm256_cvtepi32_ps(
                     _mm256_load_si256(
                         reinterpret_cast<
                         const __m256i*>(
-                            uLeft)));
+                            uTopLeft)));
 
-            const __m256 uRightFloat =
+            const __m256 uTopRightFloat =
                 _mm256_cvtepi32_ps(
                     _mm256_load_si256(
                         reinterpret_cast<
                         const __m256i*>(
-                            uRight)));
+                            uTopRight)));
 
-            const __m256 vLeftFloat =
+            const __m256 uBottomLeftFloat =
                 _mm256_cvtepi32_ps(
                     _mm256_load_si256(
                         reinterpret_cast<
                         const __m256i*>(
-                            vLeft)));
+                            uBottomLeft)));
 
-            const __m256 vRightFloat =
+            const __m256 uBottomRightFloat =
                 _mm256_cvtepi32_ps(
                     _mm256_load_si256(
                         reinterpret_cast<
                         const __m256i*>(
-                            vRight)));
+                            uBottomRight)));
+
+            const __m256 vTopLeftFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            vTopLeft)));
+
+            const __m256 vTopRightFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            vTopRight)));
+
+            const __m256 vBottomLeftFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            vBottomLeft)));
+
+            const __m256 vBottomRightFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            vBottomRight)));
 
             const __m256 fractionVector =
                 _mm256_loadu_ps(
@@ -936,23 +990,63 @@ QImage DisplayConverter::convertAvx2(
                             term2,
                             term3)));
 
-            const __m256 interpolatedU =
+            const __m256 uTop =
                 _mm256_add_ps(
-                    uLeftFloat,
+                    uTopLeftFloat,
                     _mm256_mul_ps(
                         _mm256_sub_ps(
-                            uRightFloat,
-                            uLeftFloat),
+                            uTopRightFloat,
+                            uTopLeftFloat),
                         fractionVector));
+
+            const __m256 uBottom =
+                _mm256_add_ps(
+                    uBottomLeftFloat,
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(
+                            uBottomRightFloat,
+                            uBottomLeftFloat),
+                        fractionVector));
+
+            const __m256 vTop =
+                _mm256_add_ps(
+                    vTopLeftFloat,
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(
+                            vTopRightFloat,
+                            vTopLeftFloat),
+                        fractionVector));
+
+            const __m256 vBottom =
+                _mm256_add_ps(
+                    vBottomLeftFloat,
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(
+                            vBottomRightFloat,
+                            vBottomLeftFloat),
+                        fractionVector));
+
+            const __m256 chromaVerticalFraction =
+                _mm256_set1_ps(
+                    verticalFraction);
+
+            const __m256 interpolatedU =
+                _mm256_add_ps(
+                    uTop,
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(
+                            uBottom,
+                            uTop),
+                        chromaVerticalFraction));
 
             const __m256 interpolatedV =
                 _mm256_add_ps(
-                    vLeftFloat,
+                    vTop,
                     _mm256_mul_ps(
                         _mm256_sub_ps(
-                            vRightFloat,
-                            vLeftFloat),
-                        fractionVector));
+                            vBottom,
+                            vTop),
+                        chromaVerticalFraction));
 
             const __m256i yVector =
                 _mm256_sub_epi32(
@@ -1206,27 +1300,59 @@ QImage DisplayConverter::convertAvx2(
                         yNext) * t3
                     );
 
-            const float interpolatedU =
+            const float uTop =
                 static_cast<float>(
-                    srcU[leftIndex]) +
+                    srcUTop[leftIndex]) +
                 (
                     static_cast<float>(
-                        srcU[rightIndex]) -
+                        srcUTop[rightIndex]) -
                     static_cast<float>(
-                        srcU[leftIndex])
+                        srcUTop[leftIndex])
+                    ) *
+                fraction;
+
+            const float uBottom =
+                static_cast<float>(
+                    srcUBottom[leftIndex]) +
+                (
+                    static_cast<float>(
+                        srcUBottom[rightIndex]) -
+                    static_cast<float>(
+                        srcUBottom[leftIndex])
+                    ) *
+                fraction;
+
+            const float interpolatedU =
+                uTop +
+                (uBottom - uTop) *
+                verticalFraction;
+
+            const float vTop =
+                static_cast<float>(
+                    srcVTop[leftIndex]) +
+                (
+                    static_cast<float>(
+                        srcVTop[rightIndex]) -
+                    static_cast<float>(
+                        srcVTop[leftIndex])
+                    ) *
+                fraction;
+
+            const float vBottom =
+                static_cast<float>(
+                    srcVBottom[leftIndex]) +
+                (
+                    static_cast<float>(
+                        srcVBottom[rightIndex]) -
+                    static_cast<float>(
+                        srcVBottom[leftIndex])
                     ) *
                 fraction;
 
             const float interpolatedV =
-                static_cast<float>(
-                    srcV[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcV[rightIndex]) -
-                    static_cast<float>(
-                        srcV[leftIndex])
-                    ) *
-                fraction;
+                vTop +
+                (vBottom - vTop) *
+                verticalFraction;
 
             const int yy =
                 static_cast<int>(
