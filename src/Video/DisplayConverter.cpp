@@ -566,11 +566,17 @@ QImage DisplayConverter::convertAvx2(
             static_cast<int>(
                 0xff000000u));
 
+    alignas(32) int yPreviousLeft[8];
+    alignas(32) int yPreviousRight[8];
+
     alignas(32) int yTopLeft[8];
     alignas(32) int yTopRight[8];
 
     alignas(32) int yBottomLeft[8];
     alignas(32) int yBottomRight[8];
+
+    alignas(32) int yNextLeft[8];
+    alignas(32) int yNextRight[8];
 
     alignas(32) int uLeft[8];
     alignas(32) int uRight[8];
@@ -603,6 +609,16 @@ QImage DisplayConverter::convertAvx2(
                 topLine + 1,
                 frame.height - 1);
 
+        const int previousLine =
+            std::max(
+                topLine - 1,
+                0);
+
+        const int nextLine =
+            std::min(
+                bottomLine + 1,
+                frame.height - 1);
+
         const float verticalFraction =
             std::clamp(
                 sourceLinePosition -
@@ -625,6 +641,22 @@ QImage DisplayConverter::convertAvx2(
         const auto* srcYBottom =
             frame.y.data() +
             bottomLineOffset;
+
+        const std::size_t previousLineOffset =
+            static_cast<std::size_t>(previousLine) *
+            static_cast<std::size_t>(frame.width);
+
+        const std::size_t nextLineOffset =
+            static_cast<std::size_t>(nextLine) *
+            static_cast<std::size_t>(frame.width);
+
+        const auto* srcYPrevious =
+            frame.y.data() +
+            previousLineOffset;
+
+        const auto* srcYNext =
+            frame.y.data() +
+            nextLineOffset;
 
         const auto* srcU =
             frame.u.data() +
@@ -679,6 +711,18 @@ QImage DisplayConverter::convertAvx2(
                 yTopRight[lane] =
                     srcYTop[rightIndex];
 
+                yPreviousLeft[lane] =
+                    srcYPrevious[leftIndex];
+
+                yPreviousRight[lane] =
+                    srcYPrevious[rightIndex];
+
+                yNextLeft[lane] =
+                    srcYNext[leftIndex];
+
+                yNextRight[lane] =
+                    srcYNext[rightIndex];
+
                 yBottomLeft[lane] =
                     srcYBottom[leftIndex];
 
@@ -726,6 +770,34 @@ QImage DisplayConverter::convertAvx2(
                         const __m256i*>(
                             yBottomRight)));
 
+            const __m256 yPreviousLeftFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            yPreviousLeft)));
+
+            const __m256 yPreviousRightFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            yPreviousRight)));
+
+            const __m256 yNextLeftFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            yNextLeft)));
+
+            const __m256 yNextRightFloat =
+                _mm256_cvtepi32_ps(
+                    _mm256_load_si256(
+                        reinterpret_cast<
+                        const __m256i*>(
+                            yNextRight)));
+
             const __m256 uLeftFloat =
                 _mm256_cvtepi32_ps(
                     _mm256_load_si256(
@@ -758,6 +830,24 @@ QImage DisplayConverter::convertAvx2(
                 _mm256_loadu_ps(
                     horizontalFraction_.data() +
                     outputX);
+            
+            const __m256 yPrevious =
+                _mm256_add_ps(
+                    yPreviousLeftFloat,
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(
+                            yPreviousRightFloat,
+                            yPreviousLeftFloat),
+                        fractionVector));
+
+            const __m256 yNext =
+                _mm256_add_ps(
+                    yNextLeftFloat,
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(
+                            yNextRightFloat,
+                            yNextLeftFloat),
+                        fractionVector));
 
             const __m256 yTop =
                 _mm256_add_ps(
@@ -777,18 +867,74 @@ QImage DisplayConverter::convertAvx2(
                             yBottomLeftFloat),
                         fractionVector));
 
-            const __m256 verticalFractionVector =
+            const __m256 t =
                 _mm256_set1_ps(
                     verticalFraction);
 
-            const __m256 interpolatedY =
-                _mm256_add_ps(
-                    yTop,
-                    _mm256_mul_ps(
+            const __m256 t2 =
+                _mm256_mul_ps(
+                    t,
+                    t);
+
+            const __m256 t3 =
+                _mm256_mul_ps(
+                    t2,
+                    t);
+
+            const __m256 term0 =
+                _mm256_mul_ps(
+                    _mm256_set1_ps(2.0f),
+                    yTop);
+
+            const __m256 term1 =
+                _mm256_mul_ps(
+                    _mm256_add_ps(
                         _mm256_sub_ps(
-                            yBottom,
-                            yTop),
-                        verticalFractionVector));
+                            _mm256_setzero_ps(),
+                            yPrevious),
+                        yBottom),
+                    t);
+
+            const __m256 term2 =
+                _mm256_mul_ps(
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            _mm256_mul_ps(
+                                _mm256_set1_ps(2.0f),
+                                yPrevious),
+                            _mm256_mul_ps(
+                                _mm256_set1_ps(5.0f),
+                                yTop)),
+                        _mm256_sub_ps(
+                            _mm256_mul_ps(
+                                _mm256_set1_ps(4.0f),
+                                yBottom),
+                            yNext)),
+                    t2);
+
+            const __m256 term3 =
+                _mm256_mul_ps(
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            yNext,
+                            yPrevious),
+                        _mm256_mul_ps(
+                            _mm256_set1_ps(3.0f),
+                            _mm256_sub_ps(
+                                yTop,
+                                yBottom))),
+                    t3);
+
+            __m256 interpolatedY =
+                _mm256_mul_ps(
+                    _mm256_set1_ps(0.5f),
+                    _mm256_add_ps(
+                        _mm256_add_ps(
+                            term0,
+                            term1),
+                        _mm256_add_ps(
+                            term2,
+                            term3)));
 
             const __m256 interpolatedU =
                 _mm256_add_ps(
@@ -992,6 +1138,17 @@ QImage DisplayConverter::convertAvx2(
             const float fraction =
                 horizontalFraction_[index];
 
+            const float yPrevious =
+                static_cast<float>(
+                    srcYPrevious[leftIndex]) +
+                (
+                    static_cast<float>(
+                        srcYPrevious[rightIndex]) -
+                    static_cast<float>(
+                        srcYPrevious[leftIndex])
+                    ) *
+                fraction;
+
             const float yTop =
                 static_cast<float>(
                     srcYTop[leftIndex]) +
@@ -1014,10 +1171,40 @@ QImage DisplayConverter::convertAvx2(
                     ) *
                 fraction;
 
-            const float interpolatedY =
-                yTop +
-                (yBottom - yTop) *
+            const float yNext =
+                static_cast<float>(
+                    srcYNext[leftIndex]) +
+                (
+                    static_cast<float>(
+                        srcYNext[rightIndex]) -
+                    static_cast<float>(
+                        srcYNext[leftIndex])
+                    ) *
+                fraction;
+
+            const float t =
                 verticalFraction;
+
+            const float t2 =
+                t * t;
+
+            const float t3 =
+                t2 * t;
+
+            const float interpolatedY =
+                0.5f *
+                (
+                    2.0f * yTop +
+                    (-yPrevious + yBottom) * t +
+                    (2.0f * yPrevious -
+                        5.0f * yTop +
+                        4.0f * yBottom -
+                        yNext) * t2 +
+                    (-yPrevious +
+                        3.0f * yTop -
+                        3.0f * yBottom +
+                        yNext) * t3
+                    );
 
             const float interpolatedU =
                 static_cast<float>(
