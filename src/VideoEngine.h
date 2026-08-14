@@ -288,4 +288,18 @@ private:
     void reconstructLuma(
         const Yuv444Frame& frame,
         std::uint64_t generation);
+
+    std::mutex displayPresenterMutex_;
+
+    QImage pendingDisplayFirst_;
+    QImage pendingDisplaySecond_;
+
+    std::atomic<bool> displayPairReady_{ false };
+    std::atomic<int> displayFieldIndex_{ 0 };
+
+    QTimer* displayPresenterTimer_ = nullptr;
+
+    std::atomic<bool> waveformZoomed_{ false };
+
+    std::atomic<double> waveformScrollPosition_{ 0.0 };
 };

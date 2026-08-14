@@ -62,6 +62,67 @@ VideoEngine::VideoEngine(QObject* parent)
 
     displayThread_.start();
 
+    displayPresenterTimer_ =
+        new QTimer(this);
+
+    displayPresenterTimer_->setTimerType(
+        Qt::PreciseTimer);
+
+    displayPresenterTimer_->setInterval(
+        20);
+
+    connect(
+        displayPresenterTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            QImage imageToPresent;
+
+            {
+                std::lock_guard<std::mutex> lock(
+                    displayPresenterMutex_);
+
+                if (!displayPairReady_.load(
+                    std::memory_order_acquire))
+                {
+                    return;
+                }
+
+                const int fieldIndex =
+                    displayFieldIndex_.load(
+                        std::memory_order_acquire);
+
+                if (fieldIndex == 0)
+                {
+                    imageToPresent =
+                        pendingDisplayFirst_;
+
+                    displayFieldIndex_.store(
+                        1,
+                        std::memory_order_release);
+                }
+                else
+                {
+                    imageToPresent =
+                        pendingDisplaySecond_;
+
+                    displayFieldIndex_.store(
+                        0,
+                        std::memory_order_release);
+
+                    displayPairReady_.store(
+                        false,
+                        std::memory_order_release);
+                }
+            }
+
+            emit frameChanged(
+                imageToPresent);
+        });
+
+    displayPresenterTimer_->start();
+
 }
 
 
@@ -227,6 +288,10 @@ void VideoEngine::setVideoOutputSize(
 void VideoEngine::setWaveformZoomed(
     bool zoomed)
 {
+    waveformZoomed_.store(
+        zoomed,
+        std::memory_order_release);
+
     waveformRenderer_.setZoomed(
         zoomed);
 }
@@ -235,6 +300,10 @@ void VideoEngine::setWaveformZoomed(
 void VideoEngine::setWaveformScrollPosition(
     double position)
 {
+    waveformScrollPosition_.store(
+        position,
+        std::memory_order_release);
+
     waveformRenderer_.setScrollPosition(
         position);
 }
@@ -340,6 +409,47 @@ void VideoEngine::displayWorkerLoop()
             selectedLine_.load(
                 std::memory_order_acquire);
 
+        const bool waveformZoomed =
+            waveformZoomed_.load(
+                std::memory_order_acquire);
+
+        const double waveformScrollPosition =
+            waveformScrollPosition_.load(
+                std::memory_order_acquire);
+
+        if (waveformZoomed)
+        {
+            const int visibleWidth =
+                captureSlot.frame.width / 10;
+
+            const int maximumStart =
+                captureSlot.frame.width -
+                visibleWidth;
+
+            const int startX =
+                static_cast<int>(
+                    waveformScrollPosition *
+                    static_cast<double>(
+                        maximumStart));
+
+            const int endX =
+                startX +
+                visibleWidth;
+
+            displayConverter_.setHighlightedRange(
+                startX,
+                endX);
+        }
+        else
+        {
+            displayConverter_.setHighlightedRange(
+                0,
+                -1);
+        }
+
+        displayConverter_.setHighlightedLine(
+            selectedLine);
+
         displayConverter_.setHighlightedLine(
             selectedLine);
 
@@ -362,12 +472,42 @@ void VideoEngine::displayWorkerLoop()
 
         DisplayPerformance displayPerformance;
 
-        const QImage displayImage =
+        const QImage firstDisplayImage =
             displayConverter_.convert(
                 captureSlot.frame,
+                progressiveLuma_.first.y.data(),
                 outputWidth,
                 outputHeight,
                 displayPerformance);
+
+        DisplayPerformance secondDisplayPerformance;
+
+        const QImage secondDisplayImage =
+            displayConverter_.convert(
+                captureSlot.frame,
+                progressiveLuma_.second.y.data(),
+                outputWidth,
+                outputHeight,
+                secondDisplayPerformance);
+
+        {
+            std::lock_guard<std::mutex> lock(
+                displayPresenterMutex_);
+
+            pendingDisplayFirst_ =
+                firstDisplayImage;
+
+            pendingDisplaySecond_ =
+                secondDisplayImage;
+
+            displayFieldIndex_.store(
+                0,
+                std::memory_order_release);
+
+            displayPairReady_.store(
+                true,
+                std::memory_order_release);
+        }
 
         performanceStats_.displayAllocation.update(
             displayPerformance.allocationUs);
@@ -405,15 +545,6 @@ void VideoEngine::displayWorkerLoop()
                 << "generation ="
                 << generation;
         }
-
-        QMetaObject::invokeMethod(
-            this,
-            [this, displayImage]()
-            {
-                emit frameChanged(
-                    displayImage);
-            },
-            Qt::QueuedConnection);
     }
 }
 

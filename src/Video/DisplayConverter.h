@@ -20,6 +20,7 @@ class DisplayConverter
 public:
     QImage convert(
         const Yuv444Frame& frame,
+        const std::uint16_t* luma,
         int outputWidth,
         int outputHeight,
         DisplayPerformance& performance) const;
@@ -29,6 +30,10 @@ public:
     void setGamma(double gamma);
     void setImplementation(
         DisplayConversionImplementation implementation);
+
+    void setHighlightedRange(
+        int startX,
+        int endX);
 
 private:
     void rebuildDisplayLut();
@@ -55,12 +60,18 @@ private:
     };
     QImage convertScalar(
         const Yuv444Frame& frame,
+        const std::uint16_t* luma,
         int outputWidth,
         int outputHeight,
         DisplayPerformance& performance) const;
+
     QImage convertAvx2(
         const Yuv444Frame& frame,
+        const std::uint16_t* luma,
         int outputWidth,
         int outputHeight,
         DisplayPerformance& performance) const;
+
+    int highlightedStartX_ = 0;
+    int highlightedEndX_ = -1;
 };

@@ -73,6 +73,7 @@ namespace
 
 QImage DisplayConverter::convert(
     const Yuv444Frame& frame,
+    const std::uint16_t* luma,
     int outputWidth,
     int outputHeight,
     DisplayPerformance& performance) const
@@ -82,6 +83,7 @@ QImage DisplayConverter::convert(
     case DisplayConversionImplementation::Avx2:
         return convertAvx2(
             frame,
+            luma,
             outputWidth,
             outputHeight,
             performance);
@@ -90,6 +92,7 @@ QImage DisplayConverter::convert(
     default:
         return convertScalar(
             frame,
+            luma,
             outputWidth,
             outputHeight,
             performance);
@@ -98,6 +101,7 @@ QImage DisplayConverter::convert(
 
 QImage DisplayConverter::convertScalar(
     const Yuv444Frame& frame,
+    const std::uint16_t* luma,
     int outputWidth,
     int outputHeight,
     DisplayPerformance& performance) const
@@ -197,6 +201,29 @@ QImage DisplayConverter::convertScalar(
         static_cast<float>(frame.height) /
         static_cast<float>(outputHeight);
 
+    const bool limitHighlightX =
+        highlightedEndX_ >= 0;
+
+    const int highlightedOutputStartX =
+        limitHighlightX
+        ? std::clamp(
+            highlightedStartX_ *
+            outputWidth /
+            frame.width,
+            0,
+            outputWidth)
+        : 0;
+
+    const int highlightedOutputEndX =
+        limitHighlightX
+        ? std::clamp(
+            highlightedEndX_ *
+            outputWidth /
+            frame.width,
+            0,
+            outputWidth)
+        : outputWidth;
+
     performance.setupUs =
         static_cast<std::uint64_t>(
             timer.nsecsElapsed() / 1000);
@@ -228,7 +255,7 @@ QImage DisplayConverter::convertScalar(
             static_cast<std::size_t>(frame.width);
 
         const auto* srcY =
-            frame.y.data() +
+            luma +
             lineOffset;
 
         const auto* srcU =
@@ -425,6 +452,7 @@ void DisplayConverter::setImplementation(
 }
 QImage DisplayConverter::convertAvx2(
     const Yuv444Frame& frame,
+    const std::uint16_t* luma,
     int outputWidth,
     int outputHeight,
     DisplayPerformance& performance) const
@@ -523,6 +551,29 @@ QImage DisplayConverter::convertAvx2(
     const float verticalScale =
         static_cast<float>(frame.height) /
         static_cast<float>(outputHeight);
+
+    const bool limitHighlightX =
+        highlightedEndX_ >= 0;
+
+    const int highlightedOutputStartX =
+        limitHighlightX
+        ? std::clamp(
+            highlightedStartX_ *
+            outputWidth /
+            frame.width,
+            0,
+            outputWidth)
+        : 0;
+
+    const int highlightedOutputEndX =
+        limitHighlightX
+        ? std::clamp(
+            highlightedEndX_ *
+            outputWidth /
+            frame.width,
+            0,
+            outputWidth)
+        : outputWidth;
 
     performance.setupUs =
         static_cast<std::uint64_t>(
@@ -640,14 +691,6 @@ QImage DisplayConverter::convertAvx2(
             static_cast<std::size_t>(bottomLine) *
             static_cast<std::size_t>(frame.width);
 
-        const auto* srcYTop =
-            frame.y.data() +
-            topLineOffset;
-
-        const auto* srcYBottom =
-            frame.y.data() +
-            bottomLineOffset;
-
         const std::size_t previousLineOffset =
             static_cast<std::size_t>(previousLine) *
             static_cast<std::size_t>(frame.width);
@@ -656,12 +699,21 @@ QImage DisplayConverter::convertAvx2(
             static_cast<std::size_t>(nextLine) *
             static_cast<std::size_t>(frame.width);
 
+
         const auto* srcYPrevious =
-            frame.y.data() +
+            luma +
             previousLineOffset;
 
+        const auto* srcYTop =
+            luma +
+            topLineOffset;
+
+        const auto* srcYBottom =
+            luma +
+            bottomLineOffset;
+
         const auto* srcYNext =
-            frame.y.data() +
+            luma +
             nextLineOffset;
 
         const auto* srcUTop =
@@ -694,7 +746,7 @@ QImage DisplayConverter::convertAvx2(
                         frame.height) -
                     0.5));
 
-        const bool invertLine =
+        const bool highlightThisLine =
             highlightedLine_ >= 0 &&
             outputY >= highlightedOutputY &&
             outputY < highlightedOutputY + 2;
@@ -1165,22 +1217,76 @@ QImage DisplayConverter::convertAvx2(
                     blue,
                     4);
 
-            if (invertLine)
+            if (highlightThisLine)
             {
-                outR =
+                const __m256i xPositions =
+                    _mm256_setr_epi32(
+                        outputX + 0,
+                        outputX + 1,
+                        outputX + 2,
+                        outputX + 3,
+                        outputX + 4,
+                        outputX + 5,
+                        outputX + 6,
+                        outputX + 7);
+
+                const __m256i highlightStartVector =
+                    _mm256_set1_epi32(
+                        highlightedOutputStartX);
+
+                const __m256i highlightEndVector =
+                    _mm256_set1_epi32(
+                        highlightedOutputEndX);
+
+                const __m256i atOrAfterStart =
+                    _mm256_cmpgt_epi32(
+                        xPositions,
+                        _mm256_sub_epi32(
+                            highlightStartVector,
+                            _mm256_set1_epi32(1)));
+
+                const __m256i beforeEnd =
+                    _mm256_cmpgt_epi32(
+                        highlightEndVector,
+                        xPositions);
+
+                const __m256i highlightMask =
+                    _mm256_and_si256(
+                        atOrAfterStart,
+                        beforeEnd);
+
+                const __m256i invertedR =
                     _mm256_sub_epi32(
                         maximum,
                         outR);
 
-                outG =
+                const __m256i invertedG =
                     _mm256_sub_epi32(
                         maximum,
                         outG);
 
-                outB =
+                const __m256i invertedB =
                     _mm256_sub_epi32(
                         maximum,
                         outB);
+
+                outR =
+                    _mm256_blendv_epi8(
+                        outR,
+                        invertedR,
+                        highlightMask);
+
+                outG =
+                    _mm256_blendv_epi8(
+                        outG,
+                        invertedG,
+                        highlightMask);
+
+                outB =
+                    _mm256_blendv_epi8(
+                        outB,
+                        invertedB,
+                        highlightMask);
             }
 
             __m256i pixels =
@@ -1422,16 +1528,24 @@ QImage DisplayConverter::convertAvx2(
                     static_cast<std::size_t>(
                         outB)];
 
-            if (invertLine)
+            if (highlightThisLine)
             {
-                outR =
-                    255 - outR;
+                const bool invertPixel =
+                    highlightThisLine &&
+                    outputX >= highlightedOutputStartX &&
+                    outputX < highlightedOutputEndX;
 
-                outG =
-                    255 - outG;
+                if (invertPixel)
+                {
+                    outR =
+                        255 - outR;
 
-                outB =
-                    255 - outB;
+                    outG =
+                        255 - outG;
+
+                    outB =
+                        255 - outB;
+                }
             }
 
             dst[outputX] =
@@ -1447,4 +1561,15 @@ QImage DisplayConverter::convertAvx2(
             timer.nsecsElapsed() / 1000);
 
     return image;
+}
+
+void DisplayConverter::setHighlightedRange(
+    int startX,
+    int endX)
+{
+    highlightedStartX_ =
+        startX;
+
+    highlightedEndX_ =
+        endX;
 }
