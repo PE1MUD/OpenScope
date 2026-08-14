@@ -12,6 +12,7 @@ namespace
 
     constexpr int kMotionThreshold = 1024;
     constexpr int kCombThreshold = 1536;
+    constexpr int kMaskExpansion = 3;
 
     inline int average2(
         int a,
@@ -404,14 +405,40 @@ void VideoDeinterlacer::deinterlace(
             x < width;
             ++x)
         {
-            if (!needsInterpolation(
-                beforeLine,
-                afterLine,
-                upperLine,
-                lowerLine,
-                width,
-                x,
-                true))
+            bool interpolate =
+                false;
+
+            const int firstTestX =
+                std::max(
+                    0,
+                    x - kMaskExpansion);
+
+            const int lastTestX =
+                std::min(
+                    width - 1,
+                    x + kMaskExpansion);
+
+            for (int testX = firstTestX;
+                testX <= lastTestX;
+                ++testX)
+            {
+                if (needsInterpolation(
+                    beforeLine,
+                    afterLine,
+                    upperLine,
+                    lowerLine,
+                    width,
+                    testX,
+                    true))
+                {
+                    interpolate =
+                        true;
+
+                    break;
+                }
+            }
+
+            if (!interpolate)
             {
                 continue;
             }
@@ -511,14 +538,40 @@ void VideoDeinterlacer::deinterlace(
             x < width;
             ++x)
         {
-            if (!needsInterpolation(
-                beforeLine,
-                afterLine,
-                upperLine,
-                lowerLine,
-                width,
-                x,
-                true))
+            bool interpolate =
+                false;
+
+            const int firstTestX =
+                std::max(
+                    0,
+                    x - kMaskExpansion);
+
+            const int lastTestX =
+                std::min(
+                    width - 1,
+                    x + kMaskExpansion);
+
+            for (int testX = firstTestX;
+                testX <= lastTestX;
+                ++testX)
+            {
+                if (needsInterpolation(
+                    beforeLine,
+                    afterLine,
+                    upperLine,
+                    lowerLine,
+                    width,
+                    testX,
+                    true))
+                {
+                    interpolate =
+                        true;
+
+                    break;
+                }
+            }
+
+            if (!interpolate)
             {
                 continue;
             }
