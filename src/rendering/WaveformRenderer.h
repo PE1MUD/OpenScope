@@ -3,6 +3,8 @@
 #include "analysis/Analyzer.h"
 #include "video/ReconstructedLumaFrame.h"
 #include "rendering/WaveformGraticule.h"
+#include "processing/SignalReconstructor.h"
+
 #include <QImage>
 #include <QRectF>
 #include <array>
@@ -26,10 +28,6 @@ public:
 
     void analyze(
         const Yuv444Frame& frame) override;
-
-    void analyze(
-        const Yuv444Frame& frame,
-        const ReconstructedLumaFrame& reconstructedLuma);
 
     void setSelectedLine(int line);
     void setPersistence(int persistence);
@@ -59,8 +57,7 @@ private:
     void clearOrFadeTrace();
     void clearTrace();
     void renderSingleLine(
-        const Yuv444Frame& frame,
-        const ReconstructedLumaFrame& reconstructedLuma);
+        const Yuv444Frame& frame);
 
     void renderAllLines(
         const Yuv444Frame& frame);
@@ -94,13 +91,19 @@ private:
         int blue,
         int intensity);
 
-    
+    LineResampler singleLineReconstructor_{
+    kLumaReconstructionRadius,
+    kLumaReconstructionCutoff
+    };
+
     QRectF scaledScopeRect() const;
     QImage image_;
 
     WaveformGraticule graticule_;
     QRectF scopeRect() const;
     QRectF viewportRect() const;
+    
+//    LineResampler singleLineReconstructor_;
 
     std::vector<std::uint32_t> hits_;
     std::vector<TracePixel> trace_;
@@ -113,8 +116,14 @@ private:
     std::vector<float> displayYMax_;
     std::vector<float> displayU_;
     std::vector<float> displayV_;
+    
+    std::vector<float> singleLineSource_;
+    std::vector<float> singleLineReconstructed_;
 
     std::array<std::uint8_t, 65536> displayLut_{};
+    
+    static constexpr int kLumaReconstructionRadius = 24;
+    static constexpr float kLumaReconstructionCutoff = 1.00f;
 
     int selectedLine_ = -1;
     int persistence_ = 0;

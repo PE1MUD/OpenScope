@@ -14,18 +14,26 @@ namespace
         const char* label;
         const PerformanceMetricSnapshot* metric;
     };
+}
 
-    std::array<Bar, 4> makeBars(
-        const PerformanceSnapshot& snapshot)
+auto makeBars(
+    const PerformanceSnapshot& snapshot)
+{
+    return std::array
     {
-        return
-        {
-            Bar{ "Luma Upsampling", &snapshot.reconstruct },
-            Bar{ "Waveform", &snapshot.waveform },
-            Bar{ "Vectorscope", &snapshot.vectorscope },
-            Bar{ "Display", &snapshot.display }
-        };
-    }
+        Bar{ "Luma Upsampling", &snapshot.reconstruct },
+        Bar{ "Deinterlace", &snapshot.deinterlace },
+        Bar{ "Waveform", &snapshot.waveform },
+        Bar{ "Vectorscope", &snapshot.vectorscope },
+        Bar{ "Display 1", &snapshot.displayFirst },
+        Bar{ "Display allocation", &snapshot.displayAllocation },
+        Bar{ "Display setup", &snapshot.displaySetup },
+        Bar{ "Display compose", &snapshot.displayCompose },
+        Bar{ "Display 2", &snapshot.displaySecond },
+        Bar{ "Display interpolation", &snapshot.displayInterpolation },
+        Bar{ "Display YUV-RGB", &snapshot.displayColorConversion },
+        Bar{ "Display output", &snapshot.displayOutput },
+    };
 }
 
 PerformanceWidget::PerformanceWidget(

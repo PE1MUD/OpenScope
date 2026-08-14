@@ -104,6 +104,8 @@ src/analysis/VectorscopeAnalyzer.cpp
 src/processing/SignalReconstructor.h
 src/processing/SignalReconstructor.cpp
 src/processing/SignalReconstructorAvx2.cpp
+src/processing/VideoDeinterlacer.cpp
+src/processing/VideoDeinterlacer.h
 
 src/rendering/WaveformRenderer.h
 src/rendering/WaveformRenderer.cpp
@@ -140,6 +142,8 @@ src/video/V210ToYuv444Converter.h
 src/video/V210ToYuv444Converter.cpp
 src/video/VideoConverter.h
 src/video/Yuv444Frame.h
+src/video/ProgressiveLumaPair.h
+src/video/DisplayPerformance.h
 
 src/widgets/PerformanceWidget.h
 src/widgets/PerformanceWidget.cpp

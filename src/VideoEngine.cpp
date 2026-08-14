@@ -5,75 +5,23 @@
 #include <QElapsedTimer>
 #include <algorithm>
 #include <thread>
-
+#include <QTimer>
 
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
 {
     vectorscopeAnalyzer_.setScale(
         VectorscopeSettings::scale);
+    
+    displayConverter_.setImplementation(
+        DisplayConversionImplementation::Avx2);
+
     for (CapturedFrameSlot& slot : captureSlots_)
     {
         slot.frame.resize(
             kCaptureWidth,
             kCaptureHeight);
     }
-    for (ReconstructedLumaFrameSlot& slot :
-        reconstructedSlots_)
-    {
-        slot.frame.resize(
-            kReconstructedLumaWidth,
-            kCaptureHeight);
-    }
-    const unsigned int hardwareThreads =
-        std::thread::hardware_concurrency();
-
-    const unsigned int workerCount =
-        std::max(
-            kMinimumWorkerCount,
-            hardwareThreads /
-            kLumaWorkerDivisor);
-
-
-    lumaWorkers_.resize(workerCount);
-    qDebug()
-        << "hardware threads:"
-        << hardwareThreads
-        << "luma workers:"
-        << workerCount;
-    for (LumaWorker& worker : lumaWorkers_)
-    {
-        worker.reconstructor.setImplementation(
-            ResamplerImplementation::Avx2);
-
-        worker.sourceLine.resize(
-            static_cast<std::size_t>(
-                kCaptureWidth));
-
-        worker.reconstructedLine.resize(
-            kReconstructedLumaWidth);
-    }
-
-    lumaThreads_.reserve(
-        lumaWorkers_.size());
-
-    for (std::size_t workerIndex = 0;
-        workerIndex < lumaWorkers_.size();
-        ++workerIndex)
-    {
-        lumaThreads_.emplace_back(
-            [this, workerIndex]()
-            {
-                lumaWorkerLoop(workerIndex);
-            });
-    }
-
-    lumaCoordinatorThread_ =
-        std::jthread(
-            [this]()
-            {
-                lumaCoordinatorLoop();
-            });
 
     vectorscopeAnalyzer_.moveToThread(
         &vectorscopeThread_);
@@ -119,29 +67,6 @@ VideoEngine::VideoEngine(QObject* parent)
 
 VideoEngine::~VideoEngine()
 {
-    {
-        std::lock_guard<std::mutex> lock(
-            lumaInputMutex_);
-
-        lumaCoordinatorStop_ = true;
-    }
-
-    lumaInputCondition_.notify_one();
-
-    if (lumaCoordinatorThread_.joinable())
-    {
-        lumaCoordinatorThread_.join();
-    }
-    {
-        std::lock_guard<std::mutex> lock(
-            lumaMutex_);
-
-        lumaStop_ = true;
-    }
-
-    lumaCondition_.notify_all();
-    lumaThreads_.clear();
-
     {
         std::lock_guard<std::mutex> lock(
             displayMutex_);
@@ -225,8 +150,9 @@ void VideoEngine::submitWriteFrame()
         static_cast<int>(slotIndex),
         std::memory_order_release);
 
+    displayCondition_.notify_one();
     vectorscopeCondition_.notify_one();
-    lumaInputCondition_.notify_one();
+    waveformCondition_.notify_one();
 }
 
 
@@ -313,14 +239,11 @@ void VideoEngine::setWaveformScrollPosition(
         position);
 }
 
-
 void VideoEngine::displayWorkerLoop()
 {
     for (;;)
     {
         std::uint64_t generation = 0;
-        int reconstructedSlotIndex =
-            kInvalidSlotIndex;
 
         int captureSlotIndex =
             kInvalidSlotIndex;
@@ -339,7 +262,7 @@ void VideoEngine::displayWorkerLoop()
                     }
 
                     const int latestSlot =
-                        latestReconstructedSlot_.load(
+                        latestCaptureSlot_.load(
                             std::memory_order_acquire);
 
                     if (latestSlot == kInvalidSlotIndex)
@@ -348,7 +271,7 @@ void VideoEngine::displayWorkerLoop()
                     }
 
                     const auto& slot =
-                        reconstructedSlots_[
+                        captureSlots_[
                             static_cast<std::size_t>(
                                 latestSlot)];
 
@@ -366,14 +289,14 @@ void VideoEngine::displayWorkerLoop()
                 return;
             }
 
-            reconstructedSlotIndex =
-                latestReconstructedSlot_.load(
+            captureSlotIndex =
+                latestCaptureSlot_.load(
                     std::memory_order_acquire);
 
             generation =
-                reconstructedSlots_[
+                captureSlots_[
                     static_cast<std::size_t>(
-                        reconstructedSlotIndex)]
+                        captureSlotIndex)]
                 .generation.load(
                     std::memory_order_acquire);
 
@@ -388,14 +311,12 @@ void VideoEngine::displayWorkerLoop()
             {
                 qDebug()
                     << "Display skipped"
-                    << (generation - previousGeneration - 1)
+                    << (generation -
+                        previousGeneration -
+                        1)
                     << "frame(s)";
             }
         }
-
-        captureSlotIndex =
-            findCaptureSlotByGeneration(
-                generation);
 
         if (captureSlotIndex == kInvalidSlotIndex)
         {
@@ -406,11 +327,6 @@ void VideoEngine::displayWorkerLoop()
             captureSlots_[
                 static_cast<std::size_t>(
                     captureSlotIndex)];
-
-        const auto& reconstructedSlot =
-            reconstructedSlots_[
-                static_cast<std::size_t>(
-                    reconstructedSlotIndex)];
 
         const int outputWidth =
             videoOutputWidth_.load(
@@ -426,20 +342,55 @@ void VideoEngine::displayWorkerLoop()
 
         displayConverter_.setHighlightedLine(
             selectedLine);
-        
-        QElapsedTimer timer;
-        timer.start();
+
+        QElapsedTimer deinterlaceTimer;
+        deinterlaceTimer.start();
+
+        videoDeinterlacer_.deinterlace(
+            captureSlot.frame.y.data(),
+            captureSlot.frame.width,
+            captureSlot.frame.height,
+            progressiveLuma_);
+
+        performanceStats_.deinterlace.update(
+            static_cast<std::uint64_t>(
+                deinterlaceTimer.nsecsElapsed() /
+                1000));
+
+        QElapsedTimer displayTimer;
+        displayTimer.start();
+
+        DisplayPerformance displayPerformance;
 
         const QImage displayImage =
             displayConverter_.convert(
                 captureSlot.frame,
-                reconstructedSlot.frame,
                 outputWidth,
-                outputHeight);
+                outputHeight,
+                displayPerformance);
 
-        performanceStats_.display.update(
+        performanceStats_.displayAllocation.update(
+            displayPerformance.allocationUs);
+
+        performanceStats_.displaySetup.update(
+            displayPerformance.setupUs);
+
+        performanceStats_.displayCompose.update(
+            displayPerformance.composeUs);
+
+        performanceStats_.displayInterpolation.update(
+            displayPerformance.interpolationUs);
+
+        performanceStats_.displayColorConversion.update(
+            displayPerformance.colorConversionUs);
+
+        performanceStats_.displayOutput.update(
+            displayPerformance.outputUs);
+
+        performanceStats_.displayFirst.update(
             static_cast<std::uint64_t>(
-                timer.nsecsElapsed() / 1000));
+                displayTimer.nsecsElapsed() /
+                1000));
 
         const bool captureValid =
             isCaptureSlotValid(
@@ -447,38 +398,30 @@ void VideoEngine::displayWorkerLoop()
                     captureSlotIndex),
                 generation);
 
-        const bool reconstructedValid =
-            isReconstructedSlotValid(
-                static_cast<std::size_t>(
-                    reconstructedSlotIndex),
-                generation);
-
-        if (!captureValid ||
-            !reconstructedValid)
+        if (!captureValid)
         {
             qDebug()
                 << "Display lagging:"
-                << "generation =" << generation;
+                << "generation ="
+                << generation;
         }
 
         QMetaObject::invokeMethod(
             this,
             [this, displayImage]()
             {
-                emit frameChanged(displayImage);
+                emit frameChanged(
+                    displayImage);
             },
             Qt::QueuedConnection);
     }
 }
-
 
 void VideoEngine::waveformWorkerLoop()
 {
     for (;;)
     {
         std::uint64_t generation = 0;
-        int reconstructedSlotIndex =
-            kInvalidSlotIndex;
 
         int captureSlotIndex =
             kInvalidSlotIndex;
@@ -497,7 +440,7 @@ void VideoEngine::waveformWorkerLoop()
                     }
 
                     const int latestSlot =
-                        latestReconstructedSlot_.load(
+                        latestCaptureSlot_.load(
                             std::memory_order_acquire);
 
                     if (latestSlot == kInvalidSlotIndex)
@@ -506,7 +449,7 @@ void VideoEngine::waveformWorkerLoop()
                     }
 
                     const auto& slot =
-                        reconstructedSlots_[
+                        captureSlots_[
                             static_cast<std::size_t>(
                                 latestSlot)];
 
@@ -524,14 +467,14 @@ void VideoEngine::waveformWorkerLoop()
                 return;
             }
 
-            reconstructedSlotIndex =
-                latestReconstructedSlot_.load(
+            captureSlotIndex =
+                latestCaptureSlot_.load(
                     std::memory_order_acquire);
 
             generation =
-                reconstructedSlots_[
+                captureSlots_[
                     static_cast<std::size_t>(
-                        reconstructedSlotIndex)]
+                        captureSlotIndex)]
                 .generation.load(
                     std::memory_order_acquire);
 
@@ -546,14 +489,12 @@ void VideoEngine::waveformWorkerLoop()
             {
                 qDebug()
                     << "Waveform skipped"
-                    << (generation - previousGeneration - 1)
+                    << (generation -
+                        previousGeneration -
+                        1)
                     << "frame(s)";
             }
         }
-
-        captureSlotIndex =
-            findCaptureSlotByGeneration(
-                generation);
 
         if (captureSlotIndex == kInvalidSlotIndex)
         {
@@ -564,11 +505,6 @@ void VideoEngine::waveformWorkerLoop()
             captureSlots_[
                 static_cast<std::size_t>(
                     captureSlotIndex)];
-
-        const auto& reconstructedSlot =
-            reconstructedSlots_[
-                static_cast<std::size_t>(
-                    reconstructedSlotIndex)];
 
         const int outputWidth =
             waveformOutputWidth_.load(
@@ -592,13 +528,18 @@ void VideoEngine::waveformWorkerLoop()
         QElapsedTimer timer;
         timer.start();
 
+        //
+        // Tijdelijk nog alleen capture frame.
+        // De waveform-specifieke Y reconstructie
+        // voegen we hierna binnen dit pad toe.
+        //
         waveformRenderer_.analyze(
-            captureSlot.frame,
-            reconstructedSlot.frame);
+            captureSlot.frame);
 
         performanceStats_.waveform.update(
             static_cast<std::uint64_t>(
-                timer.nsecsElapsed() / 1000));
+                timer.nsecsElapsed() /
+                1000));
 
         const bool captureValid =
             isCaptureSlotValid(
@@ -606,25 +547,18 @@ void VideoEngine::waveformWorkerLoop()
                     captureSlotIndex),
                 generation);
 
-        const bool reconstructedValid =
-            isReconstructedSlotValid(
-                static_cast<std::size_t>(
-                    reconstructedSlotIndex),
-                generation);
-
-        if (!captureValid ||
-            !reconstructedValid)
+        if (!captureValid)
         {
             qDebug()
                 << "Waveform lagging:"
-                << "generation =" << generation;
+                << "generation ="
+                << generation;
         }
 
         emit waveformChanged(
             waveformRenderer_.image());
     }
 }
-
 
 void VideoEngine::vectorscopeWorkerLoop()
 {
@@ -749,217 +683,6 @@ void VideoEngine::vectorscopeWorkerLoop()
 }
 
 
-void VideoEngine::lumaCoordinatorLoop()
-{
-    for (;;)
-    {
-        std::size_t slotIndex = 0;
-        std::uint64_t generation = 0;
-
-        {
-            std::unique_lock<std::mutex> lock(
-                lumaInputMutex_);
-
-            lumaInputCondition_.wait(
-                lock,
-                [this]()
-                {
-                    if (lumaCoordinatorStop_)
-                    {
-                        return true;
-                    }
-
-                    const int latestSlot =
-                        latestCaptureSlot_.load(
-                            std::memory_order_acquire);
-
-                    if (latestSlot == kInvalidSlotIndex)
-                    {
-                        return false;
-                    }
-
-                    const std::uint64_t latestGeneration =
-                        captureSlots_[
-                            static_cast<std::size_t>(
-                                latestSlot)]
-                        .generation.load(
-                            std::memory_order_acquire);
-
-                    return
-                        latestGeneration !=
-                        lumaLastCaptureGeneration_;
-                });
-
-            if (lumaCoordinatorStop_)
-            {
-                return;
-            }
-
-            const int latestSlot =
-                latestCaptureSlot_.load(
-                    std::memory_order_acquire);
-
-            slotIndex =
-                static_cast<std::size_t>(
-                    latestSlot);
-
-            generation =
-                captureSlots_[slotIndex]
-                .generation.load(
-                    std::memory_order_acquire);
-
-            const std::uint64_t previousGeneration =
-                lumaLastCaptureGeneration_;
-
-            lumaLastCaptureGeneration_ =
-                generation;
-
-            if (previousGeneration != 0 &&
-                generation > previousGeneration + 1)
-            {
-                qDebug()
-                    << "Luma skipped"
-                    << (generation - previousGeneration - 1)
-                    << "frame(s)";
-            }
-        }
-
-        reconstructLuma(
-            captureSlots_[slotIndex].frame,
-            generation);
-
-        const bool stillValid =
-            isCaptureSlotValid(
-                slotIndex,
-                generation);
-
-        if (!stillValid)
-        {
-            qDebug()
-                << "Luma lagging:"
-                << "generation =" << generation;
-        }
-
-    }
-}
-
-
-void VideoEngine::lumaWorkerLoop(
-    std::size_t workerIndex)
-{
-    std::uint64_t lastGeneration = 0;
-
-    for (;;)
-    {
-        const Yuv444Frame* frame = nullptr;
-        int firstLine = 0;
-        int lastLine = 0;
-
-        {
-            std::unique_lock<std::mutex> lock(
-                lumaMutex_);
-
-            lumaCondition_.wait(
-                lock,
-                [this, &lastGeneration]()
-                {
-                    return
-                        lumaStop_ ||
-                        lumaGeneration_ != lastGeneration;
-                });
-
-            if (lumaStop_)
-            {
-                return;
-            }
-
-            lastGeneration =
-                lumaGeneration_;
-
-            frame =
-                lumaFrame_;
-
-            const int workerCount =
-                static_cast<int>(
-                    lumaWorkers_.size());
-
-            const int linesPerWorker =
-                (frame->height + workerCount - 1) /
-                workerCount;
-
-            firstLine =
-                static_cast<int>(workerIndex) *
-                linesPerWorker;
-
-            lastLine =
-                std::min(
-                    firstLine + linesPerWorker,
-                    frame->height);
-        }
-
-        if (firstLine < lastLine)
-        {
-            LumaWorker& worker =
-                lumaWorkers_[workerIndex];
-
-            for (int line = firstLine;
-                line < lastLine;
-                ++line)
-            {
-                const std::size_t sourceOffset =
-                    static_cast<std::size_t>(line) *
-                    static_cast<std::size_t>(
-                        frame->width);
-
-                for (int x = 0;
-                    x < frame->width;
-                    ++x)
-                {
-                    worker.sourceLine[
-                        static_cast<std::size_t>(x)] =
-                        static_cast<float>(
-                            frame->y[
-                                sourceOffset +
-                                    static_cast<std::size_t>(x)]);
-                }
-
-                worker.reconstructor.resample(
-                    worker.sourceLine,
-                    worker.reconstructedLine);
-
-                const std::size_t destinationOffset =
-                    static_cast<std::size_t>(line) *
-                    kReconstructedLumaWidth;
-
-                for (std::size_t x = 0;
-                    x < kReconstructedLumaWidth;
-                    ++x)
-                {
-                    lumaOutputFrame_->y[
-                        destinationOffset + x] =
-                        static_cast<std::uint16_t>(
-                            std::clamp(
-                                worker.reconstructedLine[x],
-                                0.0f,
-                                65535.0f));
-                }
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(
-                lumaMutex_);
-
-            --lumaWorkersRemaining_;
-
-            if (lumaWorkersRemaining_ == 0)
-            {
-                lumaDoneCondition_.notify_one();
-            }
-        }
-    }
-}
-
 
 int VideoEngine::findCaptureSlotByGeneration(
     std::uint64_t generation) const
@@ -1010,24 +733,6 @@ bool VideoEngine::isCaptureSlotValid(
 }
 
 
-bool VideoEngine::isReconstructedSlotValid(
-    std::size_t slotIndex,
-    std::uint64_t generation) const
-{
-    const ReconstructedLumaFrameSlot& slot =
-        reconstructedSlots_[slotIndex];
-
-    if (slot.writing.load(
-        std::memory_order_acquire))
-    {
-        return false;
-    }
-
-    return
-        slot.generation.load(
-            std::memory_order_acquire) ==
-        generation;
-}
 
 
 std::size_t VideoEngine::acquireNextCaptureWriteSlot()
@@ -1040,114 +745,6 @@ std::size_t VideoEngine::acquireNextCaptureWriteSlot()
         kFrameSlotCount;
 
     return slot;
-}
-
-
-std::size_t VideoEngine::acquireNextReconstructedWriteSlot()
-{
-    const std::size_t slot =
-        nextReconstructedWriteSlot_;
-
-    nextReconstructedWriteSlot_ =
-        (nextReconstructedWriteSlot_ + 1) %
-        kFrameSlotCount;
-
-    return slot;
-}
-
-
-void VideoEngine::reconstructLuma(
-    const Yuv444Frame& frame,
-    std::uint64_t generation)
-{
-    QElapsedTimer timer;
-    timer.start();
-
-    if (frame.width <= 0 ||
-        frame.height <= 0)
-    {
-        return;
-    }
-
-    const int workerCount =
-        static_cast<int>(
-            lumaWorkers_.size());
-
-    if (workerCount <= 0)
-    {
-        return;
-    }
-
-    const std::size_t outputSlotIndex =
-        acquireNextReconstructedWriteSlot();
-
-    ReconstructedLumaFrameSlot& outputSlot =
-        reconstructedSlots_[
-            outputSlotIndex];
-
-    outputSlot.writing.store(
-        true,
-        std::memory_order_release);
-
-    outputSlot.frame.resize(
-        kReconstructedLumaWidth,
-        frame.height);
-
-    {
-        std::lock_guard<std::mutex> lock(
-            lumaMutex_);
-
-        lumaFrame_ =
-            &frame;
-
-        lumaOutputFrame_ =
-            &outputSlot.frame;
-
-        lumaWorkersRemaining_ =
-            workerCount;
-
-        ++lumaGeneration_;
-    }
-
-    lumaCondition_.notify_all();
-
-    {
-        std::unique_lock<std::mutex> lock(
-            lumaMutex_);
-
-        lumaDoneCondition_.wait(
-            lock,
-            [this]()
-            {
-                return
-                    lumaWorkersRemaining_ == 0;
-            });
-    }
-
-    outputSlot.frame.generation =
-        generation;
-
-    outputSlot.generation.store(
-        generation,
-        std::memory_order_release);
-
-    outputSlot.writing.store(
-        false,
-        std::memory_order_release);
-
-
-    latestReconstructedSlot_.store(
-        static_cast<int>(
-            outputSlotIndex),
-        std::memory_order_release);
-
-    performanceStats_.reconstruct.update(
-        static_cast<std::uint64_t>(
-            timer.nsecsElapsed() / 1000));
-
-    waveformCondition_.notify_one();
-
-    displayCondition_.notify_one();
 }
 
 void VideoEngine::setWaveformChromaFillIntensity(

@@ -358,33 +358,18 @@ void WaveformRenderer::analyze(
         return;
     }
 
+    if (selectedLine_ >= 0 &&
+        selectedLine_ < frame.height)
+    {
+        renderSingleLine(
+            frame);
+
+        return;
+    }
+
     renderAllLines(frame);
 }
 
-void WaveformRenderer::analyze(
-    const Yuv444Frame& frame,
-    const ReconstructedLumaFrame& reconstructedLuma)
-{
-    if (reconstructedLuma.width <= 0 ||
-        reconstructedLuma.height <= 0 ||
-        reconstructedLuma.y.empty())
-    {
-        image_.fill(Qt::black);
-        return;
-    }
-
-    if (selectedLine_ >= 0 &&
-        selectedLine_ < reconstructedLuma.height)
-    {
-        renderSingleLine(
-            frame,
-            reconstructedLuma);
-
-        return;
-    }
-
-    analyze(frame);
-}
 
 void WaveformRenderer::clearOrFadeTrace()
 {
@@ -516,8 +501,7 @@ QRectF WaveformRenderer::scaledScopeRect() const
 }
 
 void WaveformRenderer::renderSingleLine(
-    const Yuv444Frame& frame,
-    const ReconstructedLumaFrame& reconstructedLuma)
+    const Yuv444Frame& frame)
 {
     clearOrFadeTrace();
 
@@ -526,29 +510,49 @@ void WaveformRenderer::renderSingleLine(
             frame.width);
 
     const std::size_t reconstructedWidth =
-        static_cast<std::size_t>(
-            reconstructedLuma.width);
+        zoomed_
+        ? sourceWidth * 4u
+        : sourceWidth;
 
     const std::size_t sourceLineOffset =
         static_cast<std::size_t>(
             selectedLine_) *
         sourceWidth;
 
-    const std::size_t reconstructedLineOffset =
-        static_cast<std::size_t>(
-            selectedLine_) *
-        reconstructedWidth;
+    if (zoomed_)
+    {
+        singleLineSource_.resize(
+            sourceWidth);
+
+        singleLineReconstructed_.resize(
+            reconstructedWidth);
+
+        for (std::size_t x = 0;
+            x < sourceWidth;
+            ++x)
+        {
+            singleLineSource_[x] =
+                static_cast<float>(
+                    frame.y[
+                        sourceLineOffset +
+                            x]);
+        }
+
+        singleLineReconstructor_.resample(
+            singleLineSource_,
+            singleLineReconstructed_);
+    }
 
     /*
-     * Determine which part of the reconstructed line
+     * Determine which part of the line
      * is visible.
      *
      * X1:
-     *     complete reconstructed line.
+     *     complete native 720-sample line.
      *
      * X10:
-     *     one tenth of the reconstructed line,
-     *     continuously movable with scrollPosition_.
+     *     selected line reconstructed to 2880 samples,
+     *     then one tenth is shown.
      */
     std::size_t reconstructedViewWidth =
         reconstructedWidth;
@@ -573,16 +577,6 @@ void WaveformRenderer::renderSingleLine(
                     maximumOffset));
     }
 
-    /*
-     * Luma comes from the permanently reconstructed
-     * high-resolution line.
-     *
-     * Convert 10-bit BT.601 legal-range Y
-     * to equivalent PAL video voltage:
-     *
-     *   Y = 64  -> 0.3 V
-     *   Y = 940 -> 1.0 V
-     */
     sourceY_.resize(
         reconstructedViewWidth);
 
@@ -603,12 +597,27 @@ void WaveformRenderer::renderSingleLine(
         x < reconstructedViewWidth;
         ++x)
     {
-        const double y10 =
-            static_cast<double>(
-                reconstructedLuma.y[
-                    reconstructedLineOffset +
+        double y16 = 0.0;
+
+        if (zoomed_)
+        {
+            y16 =
+                static_cast<double>(
+                    singleLineReconstructed_[
                         reconstructedViewOffset +
-                        x]) /
+                            x]);
+        }
+        else
+        {
+            y16 =
+                static_cast<double>(
+                    frame.y[
+                        sourceLineOffset +
+                            x]);
+        }
+
+        const double y10 =
+            y16 /
             64.0;
 
         sourceY_[x] =
@@ -616,8 +625,7 @@ void WaveformRenderer::renderSingleLine(
                 analog.blackVolts +
                 (y10 - digitalLevels.yBlack) *
                 voltsPerCode);
-    }
-    /*
+    }    /*
      * U/V are still native 720-sample data.
      * Map the same visible interval from the
      * reconstructed coordinate system back into

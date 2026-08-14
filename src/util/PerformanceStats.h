@@ -100,26 +100,50 @@ struct PerformanceMetric
 struct PerformanceSnapshot
 {
     PerformanceMetricSnapshot reconstruct;
+    PerformanceMetricSnapshot deinterlace;
     PerformanceMetricSnapshot waveform;
     PerformanceMetricSnapshot vectorscope;
-    PerformanceMetricSnapshot display;
+    PerformanceMetricSnapshot displayFirst;
+    PerformanceMetricSnapshot displaySecond;
+    PerformanceMetricSnapshot displayAllocation;
+    PerformanceMetricSnapshot displaySetup;
+    PerformanceMetricSnapshot displayCompose;
+    PerformanceMetricSnapshot displayInterpolation;
+    PerformanceMetricSnapshot displayColorConversion;
+    PerformanceMetricSnapshot displayOutput;
 };
 
 struct PerformanceStats
 {
     PerformanceMetric reconstruct;
+    PerformanceMetric deinterlace;
     PerformanceMetric waveform;
     PerformanceMetric vectorscope;
-    PerformanceMetric display;
+    PerformanceMetric displayFirst;
+    PerformanceMetric displaySecond;
+    PerformanceMetric displayAllocation;
+    PerformanceMetric displaySetup;
+    PerformanceMetric displayCompose;
+    PerformanceMetric displayInterpolation;
+    PerformanceMetric displayColorConversion;
+    PerformanceMetric displayOutput;
 
     PerformanceSnapshot snapshot() const
     {
         return
         {
             reconstruct.snapshot(),
+            deinterlace.snapshot(),
             waveform.snapshot(),
             vectorscope.snapshot(),
-            display.snapshot()
+            displayFirst.snapshot(),
+            displaySecond.snapshot(),
+            displayAllocation.snapshot(),
+            displaySetup.snapshot(),
+            displayCompose.snapshot(),
+            displayInterpolation.snapshot(),
+            displayColorConversion.snapshot(),
+            displayOutput.snapshot()
         };
     }
 };

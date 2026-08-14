@@ -13,14 +13,15 @@
 #include <thread>
 #include <vector>
 
+#include "analysis/VectorscopeAnalyzer.h"
+#include "processing/SignalReconstructor.h"
+#include "processing/VideoDeinterlacer.h"
+#include "rendering/WaveformRenderer.h"
 #include "util/PerformanceStats.h"
 #include "video/DisplayConverter.h"
-#include "video/Yuv444Frame.h"
+#include "video/ProgressiveLumaPair.h"
 #include "video/ReconstructedLumaFrame.h"
-
-#include "rendering/WaveformRenderer.h"
-#include "processing/SignalReconstructor.h"
-#include "analysis/VectorscopeAnalyzer.h"
+#include "video/Yuv444Frame.h"
 
 class VideoEngine : public QObject
 {
@@ -35,34 +36,48 @@ public:
     void cancelWriteFrame();
 
     void setSelectedLine(int line);
-    void setWaveformZoomed(bool zoomed);
-    void setWaveformScrollPosition(
-        double position);
-    void setWaveformOutputSize(
-        int width,
-        int height);
-    void setVectorscopeOutputSize(
-        int width,
-        int height);
-    void setWaveformPersistence(int persistence);
 
     void setVideoOutputSize(
         int width,
         int height);
 
+    void setDisplayGamma(
+        double gamma);
+
+    void setWaveformOutputSize(
+        int width,
+        int height);
+
+    void setWaveformZoomed(
+        bool zoomed);
+
+    void setWaveformScrollPosition(
+        double position);
+
+    void setWaveformPersistence(
+        int persistence);
+
     void setWaveformChromaFillIntensity(
         int intensity);
 
-    void setWaveformColor(bool enabled);
+    void setWaveformColor(
+        bool enabled);
 
-    void setDisplayGamma(double gamma);
+    void setVectorscopeOutputSize(
+        int width,
+        int height);
 
     PerformanceSnapshot performanceSnapshot() const;
 
 signals:
-    void frameChanged(const QImage& image);
-    void waveformChanged(const QImage& image);
-    void vectorscopeChanged(const QImage& image);
+    void frameChanged(
+        const QImage& image);
+
+    void waveformChanged(
+        const QImage& image);
+
+    void vectorscopeChanged(
+        const QImage& image);
 
 private:
     static constexpr unsigned int kLumaWorkerDivisor = 8;
@@ -77,14 +92,11 @@ private:
     static constexpr int kMinimumOutputSize = 1;
     static constexpr int kDefaultSelectedLine = 320;
 
-    static constexpr std::size_t kCaptureSlotCount = 3;
-    static constexpr std::size_t kReconstructedSlotCount = 3;
+    static constexpr std::size_t kFrameSlotCount = 3;
+    static constexpr int kInvalidSlotIndex = -1;
 
     static constexpr int kLumaReconstructionRadius = 24;
     static constexpr float kLumaReconstructionCutoff = 1.00f;
-
-    static constexpr std::size_t kFrameSlotCount = 3;
-    static constexpr int kInvalidSlotIndex = -1;
 
     struct CapturedFrameSlot
     {
@@ -94,54 +106,87 @@ private:
         Yuv444Frame frame;
     };
 
-    struct ReconstructedLumaFrameSlot
-    {
-        std::atomic<std::uint64_t> generation{ 0 };
-        std::atomic_bool writing{ false };
+    //struct ReconstructedLumaFrameSlot
+    //{
+    //    std::atomic<std::uint64_t> generation{ 0 };
+    //    std::atomic_bool writing{ false };
 
-        ReconstructedLumaFrame frame;
+    //    ReconstructedLumaFrame frame;
+    //};
+
+    //struct LumaWorker
+    //{
+    //    LineResampler reconstructor{
+    //        kLumaReconstructionRadius,
+    //        kLumaReconstructionCutoff
+    //    };
+
+    //    std::vector<float> sourceLine;
+    //    std::vector<float> reconstructedLine;
+    //};
+
+    // General state
+
+    std::atomic<int> selectedLine_{
+        kDefaultSelectedLine
     };
 
-    struct LumaWorker
-    {
-        LineResampler reconstructor{
-            kLumaReconstructionRadius,
-            kLumaReconstructionCutoff
-        };
+    // Output sizes
 
-        std::vector<float> sourceLine;
-        std::vector<float> reconstructedLine;
+    std::atomic<int> videoOutputWidth_{
+        kDefaultVideoWidth
     };
 
-    std::atomic<int> selectedLine_{ kDefaultSelectedLine };
+    std::atomic<int> videoOutputHeight_{
+        kDefaultVideoHeight
+    };
 
-    std::atomic<int> videoOutputWidth_{ kDefaultVideoWidth };
-    std::atomic<int> videoOutputHeight_{ kDefaultVideoHeight };
+    std::atomic<int> waveformOutputWidth_{
+        kMinimumOutputSize
+    };
 
-    std::atomic<int> waveformOutputWidth_{ kMinimumOutputSize };
-    std::atomic<int> waveformOutputHeight_{ kMinimumOutputSize };
+    std::atomic<int> waveformOutputHeight_{
+        kMinimumOutputSize
+    };
 
-    std::atomic<int> vectorscopeOutputWidth_{ kMinimumOutputSize };
-    std::atomic<int> vectorscopeOutputHeight_{ kMinimumOutputSize };
+    std::atomic<int> vectorscopeOutputWidth_{
+        kMinimumOutputSize
+    };
+
+    std::atomic<int> vectorscopeOutputHeight_{
+        kMinimumOutputSize
+    };
+
+    // Capture buffers
 
     std::array<
         CapturedFrameSlot,
         kFrameSlotCount> captureSlots_;
 
-    std::atomic<int> latestCaptureSlot_{ kInvalidSlotIndex };
+    std::atomic<int> latestCaptureSlot_{
+        kInvalidSlotIndex
+    };
 
     std::size_t nextCaptureWriteSlot_ = 0;
     std::size_t activeCaptureWriteSlot_ = 0;
 
-    std::atomic<std::uint64_t> captureGeneration_{ 0 };
+    std::atomic<std::uint64_t> captureGeneration_{
+        0
+    };
 
-    std::array<
-        ReconstructedLumaFrameSlot,
-        kFrameSlotCount> reconstructedSlots_;
+    // Reconstructed luma buffers
 
-    std::atomic<int> latestReconstructedSlot_{ kInvalidSlotIndex };
+    //std::array<
+    //    ReconstructedLumaFrameSlot,
+    //    kFrameSlotCount> reconstructedSlots_;
+
+    //std::atomic<int> latestReconstructedSlot_{
+    //    kInvalidSlotIndex
+    //};
 
     std::size_t nextReconstructedWriteSlot_ = 0;
+
+    // Display worker
 
     QThread displayThread_;
     std::mutex displayMutex_;
@@ -150,12 +195,16 @@ private:
     bool displayStop_ = false;
     std::uint64_t displayLastGeneration_ = 0;
 
+    // Waveform worker
+
     QThread waveformThread_;
     std::mutex waveformMutex_;
     std::condition_variable waveformCondition_;
 
     bool waveformStop_ = false;
     std::uint64_t waveformLastGeneration_ = 0;
+
+    // Vectorscope worker
 
     QThread vectorscopeThread_;
     std::mutex vectorscopeMutex_;
@@ -164,31 +213,49 @@ private:
     bool vectorscopeStop_ = false;
     std::uint64_t vectorscopeLastGeneration_ = 0;
 
-    std::vector<std::jthread> lumaThreads_;
-    std::vector<LumaWorker> lumaWorkers_;
+    // Luma workers
 
-    std::mutex lumaMutex_;
-    std::condition_variable lumaCondition_;
-    std::condition_variable lumaDoneCondition_;
+    //std::vector<std::jthread> lumaThreads_;
+    //std::vector<LumaWorker> lumaWorkers_;
 
-    bool lumaStop_ = false;
+    //std::mutex lumaMutex_;
+    //std::condition_variable lumaCondition_;
+    //std::condition_variable lumaDoneCondition_;
 
-    std::jthread lumaCoordinatorThread_;
-    std::mutex lumaInputMutex_;
-    std::condition_variable lumaInputCondition_;
+    //bool lumaStop_ = false;
 
-    bool lumaCoordinatorStop_ = false;
-    std::uint64_t lumaLastCaptureGeneration_ = 0;
+    //const Yuv444Frame* lumaFrame_ = nullptr;
+    //ReconstructedLumaFrame* lumaOutputFrame_ = nullptr;
 
-    const Yuv444Frame* lumaFrame_ = nullptr;
-    ReconstructedLumaFrame* lumaOutputFrame_ = nullptr;
+    //int lumaWorkersRemaining_ = 0;
+    //std::uint64_t lumaGeneration_ = 0;
 
-    int lumaWorkersRemaining_ = 0;
-    std::uint64_t lumaGeneration_ = 0;
+    // Luma coordinator
+
+    //std::jthread lumaCoordinatorThread_;
+    //std::mutex lumaInputMutex_;
+    //std::condition_variable lumaInputCondition_;
+
+    //bool lumaCoordinatorStop_ = false;
+    //std::uint64_t lumaLastCaptureGeneration_ = 0;
+
+    // Processing components
 
     DisplayConverter displayConverter_;
     WaveformRenderer waveformRenderer_;
     VectorscopeAnalyzer vectorscopeAnalyzer_;
+
+    VideoDeinterlacer videoDeinterlacer_;
+    ProgressiveLumaPair progressiveLuma_;
+
+    PerformanceStats performanceStats_;
+
+    LineResampler singleLineReconstructor_{
+    kLumaReconstructionRadius,
+    kLumaReconstructionCutoff
+    };
+
+    // Worker loops
 
     void displayWorkerLoop();
     void waveformWorkerLoop();
@@ -197,6 +264,8 @@ private:
 
     void lumaWorkerLoop(
         std::size_t workerIndex);
+
+    // Slot helpers
 
     int findCaptureSlotByGeneration(
         std::uint64_t generation) const;
@@ -212,11 +281,11 @@ private:
     std::size_t acquireNextCaptureWriteSlot();
     std::size_t acquireNextReconstructedWriteSlot();
 
+    //std::vector<float> singleLineSource_;
+    //std::vector<float> singleLineReconstructed_;
+    // Processing
+
     void reconstructLuma(
         const Yuv444Frame& frame,
         std::uint64_t generation);
-
-    PerformanceStats performanceStats_;
-
-
 };
