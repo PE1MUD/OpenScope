@@ -60,6 +60,10 @@ private:
     mutable std::vector<int> horizontalRightIndex_;
     mutable std::vector<float> horizontalFraction_;
 
+    mutable std::array<std::vector<float>, 4> resampledYLines_;
+    mutable std::array<std::vector<float>, 2> resampledULines_;
+    mutable std::array<std::vector<float>, 2> resampledVLines_;
+
     mutable int cachedInputWidth_ = 0;
     mutable int cachedOutputWidth_ = 0;
     double displayGamma_ = 1.0;

@@ -558,6 +558,7 @@ QImage DisplayConverter::convertAvx2(
         frame.height <= 0 ||
         outputWidth <= 0 ||
         outputHeight <= 0 ||
+        luma == nullptr ||
         frame.u.empty() ||
         frame.v.empty() ||
         frame.y.empty())
@@ -614,13 +615,16 @@ QImage DisplayConverter::convertAvx2(
         cachedOutputWidth_ != outputWidth)
     {
         horizontalLeftIndex_.resize(
-            static_cast<std::size_t>(outputWidth));
+            static_cast<std::size_t>(
+                outputWidth));
 
         horizontalRightIndex_.resize(
-            static_cast<std::size_t>(outputWidth));
+            static_cast<std::size_t>(
+                outputWidth));
 
         horizontalFraction_.resize(
-            static_cast<std::size_t>(outputWidth));
+            static_cast<std::size_t>(
+                outputWidth));
 
         for (int outputX = 0;
             outputX < outputWidth;
@@ -634,24 +638,27 @@ QImage DisplayConverter::convertAvx2(
             const int leftIndex =
                 std::clamp(
                     static_cast<int>(
-                        std::floor(sourcePosition)),
+                        std::floor(
+                            sourcePosition)),
                     0,
                     frame.width - 1);
 
             const int rightIndex =
-                std::min(
+                (std::min)(
                     leftIndex + 1,
                     frame.width - 1);
 
             const float fraction =
                 std::clamp(
                     sourcePosition -
-                    static_cast<float>(leftIndex),
+                    static_cast<float>(
+                        leftIndex),
                     0.0f,
                     1.0f);
 
             const std::size_t index =
-                static_cast<std::size_t>(outputX);
+                static_cast<std::size_t>(
+                    outputX);
 
             horizontalLeftIndex_[index] =
                 leftIndex;
@@ -669,6 +676,198 @@ QImage DisplayConverter::convertAvx2(
         cachedOutputWidth_ =
             outputWidth;
     }
+
+    for (auto& line : resampledYLines_)
+    {
+        line.resize(
+            static_cast<std::size_t>(
+                outputWidth));
+    }
+
+    for (auto& line : resampledULines_)
+    {
+        line.resize(
+            static_cast<std::size_t>(
+                outputWidth));
+    }
+
+    for (auto& line : resampledVLines_)
+    {
+        line.resize(
+            static_cast<std::size_t>(
+                outputWidth));
+    }
+
+    std::array<int, 4> cachedYLineNumbers{
+        -1, -1, -1, -1
+    };
+
+    std::array<int, 2> cachedULineNumbers{
+        -1, -1
+    };
+
+    std::array<int, 2> cachedVLineNumbers{
+        -1, -1
+    };
+
+    std::size_t nextYCacheSlot = 0;
+    std::size_t nextUCacheSlot = 0;
+    std::size_t nextVCacheSlot = 0;
+
+    const auto horizontalResample =
+        [this, outputWidth](
+            const std::uint16_t* source,
+            std::vector<float>& destination)
+        {
+            for (int x = 0;
+                x < outputWidth;
+                ++x)
+            {
+                const std::size_t index =
+                    static_cast<std::size_t>(x);
+
+                const int leftIndex =
+                    horizontalLeftIndex_[index];
+
+                const int rightIndex =
+                    horizontalRightIndex_[index];
+
+                const float fraction =
+                    horizontalFraction_[index];
+
+                const float left =
+                    static_cast<float>(
+                        source[leftIndex]);
+
+                const float right =
+                    static_cast<float>(
+                        source[rightIndex]);
+
+                destination[index] =
+                    left +
+                    (right - left) *
+                    fraction;
+            }
+        };
+
+    const auto getYLine =
+        [&](int lineNumber) -> const float*
+        {
+            for (std::size_t slot = 0;
+                slot < cachedYLineNumbers.size();
+                ++slot)
+            {
+                if (cachedYLineNumbers[slot] ==
+                    lineNumber)
+                {
+                    return
+                        resampledYLines_[slot].data();
+                }
+            }
+
+            const std::size_t slot =
+                nextYCacheSlot;
+
+            nextYCacheSlot =
+                (nextYCacheSlot + 1) %
+                resampledYLines_.size();
+
+            const std::size_t lineOffset =
+                static_cast<std::size_t>(
+                    lineNumber) *
+                static_cast<std::size_t>(
+                    frame.width);
+
+            horizontalResample(
+                luma + lineOffset,
+                resampledYLines_[slot]);
+
+            cachedYLineNumbers[slot] =
+                lineNumber;
+
+            return
+                resampledYLines_[slot].data();
+        };
+
+    const auto getULine =
+        [&](int lineNumber) -> const float*
+        {
+            for (std::size_t slot = 0;
+                slot < cachedULineNumbers.size();
+                ++slot)
+            {
+                if (cachedULineNumbers[slot] ==
+                    lineNumber)
+                {
+                    return
+                        resampledULines_[slot].data();
+                }
+            }
+
+            const std::size_t slot =
+                nextUCacheSlot;
+
+            nextUCacheSlot =
+                (nextUCacheSlot + 1) %
+                resampledULines_.size();
+
+            const std::size_t lineOffset =
+                static_cast<std::size_t>(
+                    lineNumber) *
+                static_cast<std::size_t>(
+                    frame.width);
+
+            horizontalResample(
+                frame.u.data() +
+                lineOffset,
+                resampledULines_[slot]);
+
+            cachedULineNumbers[slot] =
+                lineNumber;
+
+            return
+                resampledULines_[slot].data();
+        };
+
+    const auto getVLine =
+        [&](int lineNumber) -> const float*
+        {
+            for (std::size_t slot = 0;
+                slot < cachedVLineNumbers.size();
+                ++slot)
+            {
+                if (cachedVLineNumbers[slot] ==
+                    lineNumber)
+                {
+                    return
+                        resampledVLines_[slot].data();
+                }
+            }
+
+            const std::size_t slot =
+                nextVCacheSlot;
+
+            nextVCacheSlot =
+                (nextVCacheSlot + 1) %
+                resampledVLines_.size();
+
+            const std::size_t lineOffset =
+                static_cast<std::size_t>(
+                    lineNumber) *
+                static_cast<std::size_t>(
+                    frame.width);
+
+            horizontalResample(
+                frame.v.data() +
+                lineOffset,
+                resampledVLines_[slot]);
+
+            cachedVLineNumbers[slot] =
+                lineNumber;
+
+            return
+                resampledVLines_[slot].data();
+        };
 
     const float verticalScale =
         static_cast<float>(frame.height) /
@@ -697,6 +896,22 @@ QImage DisplayConverter::convertAvx2(
             outputWidth)
         : outputWidth;
 
+    const int highlightedOutputY =
+        highlightedLine_ >= 0
+        ? static_cast<int>(
+            std::round(
+                (
+                    static_cast<double>(
+                        highlightedLine_) +
+                    0.5
+                    ) *
+                static_cast<double>(
+                    outputHeight) /
+                static_cast<double>(
+                    frame.height) -
+                0.5))
+        : -1;
+
     performance.setupUs =
         static_cast<std::uint64_t>(
             timer.nsecsElapsed() / 1000);
@@ -706,6 +921,26 @@ QImage DisplayConverter::convertAvx2(
     const __m256 scaleTo8Bit =
         _mm256_set1_ps(
             1.0f / 256.0f);
+
+    const __m256 half =
+        _mm256_set1_ps(
+            0.5f);
+
+    const __m256 two =
+        _mm256_set1_ps(
+            2.0f);
+
+    const __m256 three =
+        _mm256_set1_ps(
+            3.0f);
+
+    const __m256 four =
+        _mm256_set1_ps(
+            4.0f);
+
+    const __m256 five =
+        _mm256_set1_ps(
+            5.0f);
 
     const __m256i yOffset =
         _mm256_set1_epi32(16);
@@ -739,30 +974,6 @@ QImage DisplayConverter::convertAvx2(
             static_cast<int>(
                 0xff000000u));
 
-    alignas(32) int yPreviousLeft[8];
-    alignas(32) int yPreviousRight[8];
-
-    alignas(32) int yTopLeft[8];
-    alignas(32) int yTopRight[8];
-
-    alignas(32) int yBottomLeft[8];
-    alignas(32) int yBottomRight[8];
-
-    alignas(32) int yNextLeft[8];
-    alignas(32) int yNextRight[8];
-
-    alignas(32) int uTopLeft[8];
-    alignas(32) int uTopRight[8];
-
-    alignas(32) int uBottomLeft[8];
-    alignas(32) int uBottomRight[8];
-
-    alignas(32) int vTopLeft[8];
-    alignas(32) int vTopRight[8];
-
-    alignas(32) int vBottomLeft[8];
-    alignas(32) int vBottomRight[8];
-
     for (int outputY = firstOutputY;
         outputY < lastOutputY;
         ++outputY)
@@ -782,94 +993,87 @@ QImage DisplayConverter::convertAvx2(
         const int topLine =
             std::clamp(
                 static_cast<int>(
-                    std::floor(sourceLinePosition)),
+                    std::floor(
+                        sourceLinePosition)),
                 0,
                 frame.height - 1);
 
         const int bottomLine =
-            std::min(
+            (std::min)(
                 topLine + 1,
                 frame.height - 1);
 
         const int previousLine =
-            std::max(
+            (std::max)(
                 topLine - 1,
                 0);
 
         const int nextLine =
-            std::min(
+            (std::min)(
                 bottomLine + 1,
                 frame.height - 1);
 
         const float verticalFraction =
             std::clamp(
                 sourceLinePosition -
-                static_cast<float>(topLine),
+                static_cast<float>(
+                    topLine),
                 0.0f,
                 1.0f);
 
-        const std::size_t topLineOffset =
-            static_cast<std::size_t>(topLine) *
-            static_cast<std::size_t>(frame.width);
+        const float t =
+            verticalFraction;
 
-        const std::size_t bottomLineOffset =
-            static_cast<std::size_t>(bottomLine) *
-            static_cast<std::size_t>(frame.width);
+        const float t2 =
+            t * t;
 
-        const std::size_t previousLineOffset =
-            static_cast<std::size_t>(previousLine) *
-            static_cast<std::size_t>(frame.width);
+        const float t3 =
+            t2 * t;
 
-        const std::size_t nextLineOffset =
-            static_cast<std::size_t>(nextLine) *
-            static_cast<std::size_t>(frame.width);
+        const __m256 tVector =
+            _mm256_set1_ps(t);
 
+        const __m256 t2Vector =
+            _mm256_set1_ps(t2);
 
-        const auto* srcYPrevious =
-            luma +
-            previousLineOffset;
+        const __m256 t3Vector =
+            _mm256_set1_ps(t3);
 
-        const auto* srcYTop =
-            luma +
-            topLineOffset;
+        const __m256 chromaVerticalFraction =
+            _mm256_set1_ps(
+                verticalFraction);
 
-        const auto* srcYBottom =
-            luma +
-            bottomLineOffset;
+        const float* yPreviousLine =
+            getYLine(
+                previousLine);
 
-        const auto* srcYNext =
-            luma +
-            nextLineOffset;
+        const float* yTopLine =
+            getYLine(
+                topLine);
 
-        const auto* srcUTop =
-            frame.u.data() +
-            topLineOffset;
+        const float* yBottomLine =
+            getYLine(
+                bottomLine);
 
-        const auto* srcUBottom =
-            frame.u.data() +
-            bottomLineOffset;
+        const float* yNextLine =
+            getYLine(
+                nextLine);
 
-        const auto* srcVTop =
-            frame.v.data() +
-            topLineOffset;
+        const float* uTopLine =
+            getULine(
+                topLine);
 
-        const auto* srcVBottom =
-            frame.v.data() +
-            bottomLineOffset;
+        const float* uBottomLine =
+            getULine(
+                bottomLine);
 
-        const int highlightedOutputY =
-            static_cast<int>(
-                std::round(
-                    (
-                        static_cast<double>(
-                            highlightedLine_) +
-                        0.5
-                        ) *
-                    static_cast<double>(
-                        outputHeight) /
-                    static_cast<double>(
-                        frame.height) -
-                    0.5));
+        const float* vTopLine =
+            getVLine(
+                topLine);
+
+        const float* vBottomLine =
+            getVLine(
+                bottomLine);
 
         const bool highlightThisLine =
             highlightedLine_ >= 0 &&
@@ -882,266 +1086,54 @@ QImage DisplayConverter::convertAvx2(
             outputX + 7 < outputWidth;
             outputX += 8)
         {
-            for (int lane = 0;
-                lane < 8;
-                ++lane)
-            {
-                const std::size_t index =
-                    static_cast<std::size_t>(
-                        outputX + lane);
-
-                const int leftIndex =
-                    horizontalLeftIndex_[index];
-
-                const int rightIndex =
-                    horizontalRightIndex_[index];
-
-                yTopLeft[lane] =
-                    srcYTop[leftIndex];
-
-                yTopRight[lane] =
-                    srcYTop[rightIndex];
-
-                yPreviousLeft[lane] =
-                    srcYPrevious[leftIndex];
-
-                yPreviousRight[lane] =
-                    srcYPrevious[rightIndex];
-
-                yNextLeft[lane] =
-                    srcYNext[leftIndex];
-
-                yNextRight[lane] =
-                    srcYNext[rightIndex];
-
-                yBottomLeft[lane] =
-                    srcYBottom[leftIndex];
-
-                yBottomRight[lane] =
-                    srcYBottom[rightIndex];
-
-                uTopLeft[lane] =
-                    srcUTop[leftIndex];
-
-                uTopRight[lane] =
-                    srcUTop[rightIndex];
-
-                uBottomLeft[lane] =
-                    srcUBottom[leftIndex];
-
-                uBottomRight[lane] =
-                    srcUBottom[rightIndex];
-
-                vTopLeft[lane] =
-                    srcVTop[leftIndex];
-
-                vTopRight[lane] =
-                    srcVTop[rightIndex];
-
-                vBottomLeft[lane] =
-                    srcVBottom[leftIndex];
-
-                vBottomRight[lane] =
-                    srcVBottom[rightIndex];
-            }
-
-            const __m256 yTopLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yTopLeft)));
-
-            const __m256 yTopRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yTopRight)));
-
-            const __m256 yBottomLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yBottomLeft)));
-
-            const __m256 yBottomRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yBottomRight)));
-
-            const __m256 yPreviousLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yPreviousLeft)));
-
-            const __m256 yPreviousRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yPreviousRight)));
-
-            const __m256 yNextLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yNextLeft)));
-
-            const __m256 yNextRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            yNextRight)));
-
-            const __m256 uTopLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            uTopLeft)));
-
-            const __m256 uTopRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            uTopRight)));
-
-            const __m256 uBottomLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            uBottomLeft)));
-
-            const __m256 uBottomRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            uBottomRight)));
-
-            const __m256 vTopLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            vTopLeft)));
-
-            const __m256 vTopRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            vTopRight)));
-
-            const __m256 vBottomLeftFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            vBottomLeft)));
-
-            const __m256 vBottomRightFloat =
-                _mm256_cvtepi32_ps(
-                    _mm256_load_si256(
-                        reinterpret_cast<
-                        const __m256i*>(
-                            vBottomRight)));
-
-            const __m256 fractionVector =
+            const __m256 yPrevious =
                 _mm256_loadu_ps(
-                    horizontalFraction_.data() +
+                    yPreviousLine +
                     outputX);
 
-            const __m256 yPrevious =
-                _mm256_add_ps(
-                    yPreviousLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            yPreviousRightFloat,
-                            yPreviousLeftFloat),
-                        fractionVector));
-
-            const __m256 yNext =
-                _mm256_add_ps(
-                    yNextLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            yNextRightFloat,
-                            yNextLeftFloat),
-                        fractionVector));
-
             const __m256 yTop =
-                _mm256_add_ps(
-                    yTopLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            yTopRightFloat,
-                            yTopLeftFloat),
-                        fractionVector));
+                _mm256_loadu_ps(
+                    yTopLine +
+                    outputX);
 
             const __m256 yBottom =
-                _mm256_add_ps(
-                    yBottomLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            yBottomRightFloat,
-                            yBottomLeftFloat),
-                        fractionVector));
+                _mm256_loadu_ps(
+                    yBottomLine +
+                    outputX);
 
-            const __m256 t =
-                _mm256_set1_ps(
-                    verticalFraction);
-
-            const __m256 t2 =
-                _mm256_mul_ps(
-                    t,
-                    t);
-
-            const __m256 t3 =
-                _mm256_mul_ps(
-                    t2,
-                    t);
+            const __m256 yNext =
+                _mm256_loadu_ps(
+                    yNextLine +
+                    outputX);
 
             const __m256 term0 =
                 _mm256_mul_ps(
-                    _mm256_set1_ps(2.0f),
+                    two,
                     yTop);
 
             const __m256 term1 =
                 _mm256_mul_ps(
-                    _mm256_add_ps(
-                        _mm256_sub_ps(
-                            _mm256_setzero_ps(),
-                            yPrevious),
-                        yBottom),
-                    t);
+                    _mm256_sub_ps(
+                        yBottom,
+                        yPrevious),
+                    tVector);
 
             const __m256 term2 =
                 _mm256_mul_ps(
-                    _mm256_add_ps(
-                        _mm256_sub_ps(
+                    _mm256_sub_ps(
+                        _mm256_add_ps(
                             _mm256_mul_ps(
-                                _mm256_set1_ps(2.0f),
+                                two,
                                 yPrevious),
                             _mm256_mul_ps(
-                                _mm256_set1_ps(5.0f),
-                                yTop)),
-                        _mm256_sub_ps(
+                                four,
+                                yBottom)),
+                        _mm256_add_ps(
                             _mm256_mul_ps(
-                                _mm256_set1_ps(4.0f),
-                                yBottom),
+                                five,
+                                yTop),
                             yNext)),
-                    t2);
+                    t2Vector);
 
             const __m256 term3 =
                 _mm256_mul_ps(
@@ -1150,15 +1142,15 @@ QImage DisplayConverter::convertAvx2(
                             yNext,
                             yPrevious),
                         _mm256_mul_ps(
-                            _mm256_set1_ps(3.0f),
+                            three,
                             _mm256_sub_ps(
                                 yTop,
                                 yBottom))),
-                    t3);
+                    t3Vector);
 
-            __m256 interpolatedY =
+            const __m256 interpolatedY =
                 _mm256_mul_ps(
-                    _mm256_set1_ps(0.5f),
+                    half,
                     _mm256_add_ps(
                         _mm256_add_ps(
                             term0,
@@ -1168,44 +1160,24 @@ QImage DisplayConverter::convertAvx2(
                             term3)));
 
             const __m256 uTop =
-                _mm256_add_ps(
-                    uTopLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            uTopRightFloat,
-                            uTopLeftFloat),
-                        fractionVector));
+                _mm256_loadu_ps(
+                    uTopLine +
+                    outputX);
 
             const __m256 uBottom =
-                _mm256_add_ps(
-                    uBottomLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            uBottomRightFloat,
-                            uBottomLeftFloat),
-                        fractionVector));
+                _mm256_loadu_ps(
+                    uBottomLine +
+                    outputX);
 
             const __m256 vTop =
-                _mm256_add_ps(
-                    vTopLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            vTopRightFloat,
-                            vTopLeftFloat),
-                        fractionVector));
+                _mm256_loadu_ps(
+                    vTopLine +
+                    outputX);
 
             const __m256 vBottom =
-                _mm256_add_ps(
-                    vBottomLeftFloat,
-                    _mm256_mul_ps(
-                        _mm256_sub_ps(
-                            vBottomRightFloat,
-                            vBottomLeftFloat),
-                        fractionVector));
-
-            const __m256 chromaVerticalFraction =
-                _mm256_set1_ps(
-                    verticalFraction);
+                _mm256_loadu_ps(
+                    vBottomLine +
+                    outputX);
 
             const __m256 interpolatedU =
                 _mm256_add_ps(
@@ -1262,13 +1234,10 @@ QImage DisplayConverter::convertAvx2(
                         coefficientRV));
 
             red =
-                _mm256_add_epi32(
-                    red,
-                    rounding);
-
-            red =
                 _mm256_srai_epi32(
-                    red,
+                    _mm256_add_epi32(
+                        red,
+                        rounding),
                     8);
 
             __m256i green =
@@ -1286,13 +1255,10 @@ QImage DisplayConverter::convertAvx2(
                         coefficientGV));
 
             green =
-                _mm256_add_epi32(
-                    green,
-                    rounding);
-
-            green =
                 _mm256_srai_epi32(
-                    green,
+                    _mm256_add_epi32(
+                        green,
+                        rounding),
                     8);
 
             __m256i blue =
@@ -1303,13 +1269,10 @@ QImage DisplayConverter::convertAvx2(
                         coefficientBU));
 
             blue =
-                _mm256_add_epi32(
-                    blue,
-                    rounding);
-
-            blue =
                 _mm256_srai_epi32(
-                    blue,
+                    _mm256_add_epi32(
+                        blue,
+                        rounding),
                     8);
 
             red =
@@ -1380,37 +1343,28 @@ QImage DisplayConverter::convertAvx2(
                         atOrAfterStart,
                         beforeEnd);
 
-                const __m256i invertedR =
-                    _mm256_sub_epi32(
-                        maximum,
-                        outR);
-
-                const __m256i invertedG =
-                    _mm256_sub_epi32(
-                        maximum,
-                        outG);
-
-                const __m256i invertedB =
-                    _mm256_sub_epi32(
-                        maximum,
-                        outB);
-
                 outR =
                     _mm256_blendv_epi8(
                         outR,
-                        invertedR,
+                        _mm256_sub_epi32(
+                            maximum,
+                            outR),
                         highlightMask);
 
                 outG =
                     _mm256_blendv_epi8(
                         outG,
-                        invertedG,
+                        _mm256_sub_epi32(
+                            maximum,
+                            outG),
                         highlightMask);
 
                 outB =
                     _mm256_blendv_epi8(
                         outB,
-                        invertedB,
+                        _mm256_sub_epi32(
+                            maximum,
+                            outB),
                         highlightMask);
             }
 
@@ -1442,79 +1396,21 @@ QImage DisplayConverter::convertAvx2(
                 pixels);
         }
 
-        //
-        // Scalar tail: alleen als outputWidth
-        // niet deelbaar is door 8.
-        //
         for (;
             outputX < outputWidth;
             ++outputX)
         {
-            const std::size_t index =
-                static_cast<std::size_t>(
-                    outputX);
-
-            const int leftIndex =
-                horizontalLeftIndex_[index];
-
-            const int rightIndex =
-                horizontalRightIndex_[index];
-
-            const float fraction =
-                horizontalFraction_[index];
-
             const float yPrevious =
-                static_cast<float>(
-                    srcYPrevious[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcYPrevious[rightIndex]) -
-                    static_cast<float>(
-                        srcYPrevious[leftIndex])
-                    ) *
-                fraction;
+                yPreviousLine[outputX];
 
             const float yTop =
-                static_cast<float>(
-                    srcYTop[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcYTop[rightIndex]) -
-                    static_cast<float>(
-                        srcYTop[leftIndex])
-                    ) *
-                fraction;
+                yTopLine[outputX];
 
             const float yBottom =
-                static_cast<float>(
-                    srcYBottom[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcYBottom[rightIndex]) -
-                    static_cast<float>(
-                        srcYBottom[leftIndex])
-                    ) *
-                fraction;
+                yBottomLine[outputX];
 
             const float yNext =
-                static_cast<float>(
-                    srcYNext[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcYNext[rightIndex]) -
-                    static_cast<float>(
-                        srcYNext[leftIndex])
-                    ) *
-                fraction;
-
-            const float t =
-                verticalFraction;
-
-            const float t2 =
-                t * t;
-
-            const float t3 =
-                t2 * t;
+                yNextLine[outputX];
 
             const float interpolatedY =
                 0.5f *
@@ -1531,58 +1427,16 @@ QImage DisplayConverter::convertAvx2(
                         yNext) * t3
                     );
 
-            const float uTop =
-                static_cast<float>(
-                    srcUTop[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcUTop[rightIndex]) -
-                    static_cast<float>(
-                        srcUTop[leftIndex])
-                    ) *
-                fraction;
-
-            const float uBottom =
-                static_cast<float>(
-                    srcUBottom[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcUBottom[rightIndex]) -
-                    static_cast<float>(
-                        srcUBottom[leftIndex])
-                    ) *
-                fraction;
-
             const float interpolatedU =
-                uTop +
-                (uBottom - uTop) *
+                uTopLine[outputX] +
+                (uBottomLine[outputX] -
+                    uTopLine[outputX]) *
                 verticalFraction;
 
-            const float vTop =
-                static_cast<float>(
-                    srcVTop[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcVTop[rightIndex]) -
-                    static_cast<float>(
-                        srcVTop[leftIndex])
-                    ) *
-                fraction;
-
-            const float vBottom =
-                static_cast<float>(
-                    srcVBottom[leftIndex]) +
-                (
-                    static_cast<float>(
-                        srcVBottom[rightIndex]) -
-                    static_cast<float>(
-                        srcVBottom[leftIndex])
-                    ) *
-                fraction;
-
             const float interpolatedV =
-                vTop +
-                (vBottom - vTop) *
+                vTopLine[outputX] +
+                (vBottomLine[outputX] -
+                    vTopLine[outputX]) *
                 verticalFraction;
 
             const int yy =
@@ -1607,18 +1461,23 @@ QImage DisplayConverter::convertAvx2(
                 298 * yy;
 
             const int r =
-                (c + 409 * v + 128) >> 8;
+                (c +
+                    409 * v +
+                    128) >>
+                8;
 
             const int g =
                 (c -
                     100 * u -
                     208 * v +
-                    128) >> 8;
+                    128) >>
+                8;
 
             const int b =
                 (c +
                     516 * u +
-                    128) >> 8;
+                    128) >>
+                8;
 
             int outR =
                 qBound(
@@ -1653,24 +1512,21 @@ QImage DisplayConverter::convertAvx2(
                     static_cast<std::size_t>(
                         outB)];
 
-            if (highlightThisLine)
+            if (highlightThisLine &&
+                outputX >= highlightedOutputStartX &&
+                outputX < highlightedOutputEndX)
             {
-                const bool invertPixel =
-                    highlightThisLine &&
-                    outputX >= highlightedOutputStartX &&
-                    outputX < highlightedOutputEndX;
+                outR =
+                    255 -
+                    outR;
 
-                if (invertPixel)
-                {
-                    outR =
-                        255 - outR;
+                outG =
+                    255 -
+                    outG;
 
-                    outG =
-                        255 - outG;
-
-                    outB =
-                        255 - outB;
-                }
+                outB =
+                    255 -
+                    outB;
             }
 
             dst[outputX] =
