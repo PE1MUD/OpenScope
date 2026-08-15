@@ -14,12 +14,16 @@ public:
     explicit WaveformWidget(QWidget* parent = nullptr);
 
     bool isZoomed() const;
+    int zoomFactor() const;
+
     void setZoomed(bool zoomed);
+    void setZoomFactor(int factor);
     void setZoomEnabled(bool enabled);
     void setScrollPosition(double position);
 
 signals:
     void zoomChanged(bool zoomed);
+    void zoomFactorChanged(int factor);
     void scrollPositionChanged(double position);
 
 protected:
@@ -27,8 +31,10 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    void updateScrollSliderGeometry();
+
     QSlider* scrollSlider_ = nullptr;
-    bool zoomed_ = false;
+    int zoomFactor_ = 1;
     bool zoomEnabled_ = true;
     double scrollPosition_ = 0.0;
 };

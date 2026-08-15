@@ -328,11 +328,33 @@ void WaveformRenderer::setOutputSize(
 void WaveformRenderer::setZoomed(
     bool zoomed)
 {
-    qDebug()
-        << "WaveformRenderer zoomed:"
-        << zoomed;
+    setZoomFactor(
+        zoomed
+        ? 10
+        : 1);
+}
 
-    zoomed_ = zoomed;
+void WaveformRenderer::setZoomFactor(
+    int factor)
+{
+    if (factor != 1 &&
+        factor != 5 &&
+        factor != 10)
+    {
+        factor = 1;
+    }
+
+    if (zoomFactor_ == factor)
+    {
+        return;
+    }
+
+    qDebug()
+        << "WaveformRenderer zoom factor:"
+        << factor;
+
+    zoomFactor_ = factor;
+    clearTrace();
 }
 
 
@@ -484,10 +506,8 @@ QRectF WaveformRenderer::viewportRect() const
             image_.height() - 1);
 
     const double aspectRatio =
-        aspectRatio_ ==
-        OpenScopeSettings::AspectRatio::Ratio16x9
-        ? 16.0 / 9.0
-        : 4.0 / 3.0;
+        OpenScopeSettings::aspectRatioValue(
+            aspectRatio_);
 
     double width =
         widgetWidth;
@@ -577,7 +597,7 @@ void WaveformRenderer::renderSingleLine(
             frame.width);
 
     const std::size_t reconstructedWidth =
-        zoomed_
+        zoomFactor_ > 1
         ? sourceWidth * 4u
         : sourceWidth;
 
@@ -586,7 +606,7 @@ void WaveformRenderer::renderSingleLine(
             selectedLine_) *
         sourceWidth;
 
-    if (zoomed_)
+    if (zoomFactor_ > 1)
     {
         singleLineSource_.resize(
             sourceWidth);
@@ -626,11 +646,12 @@ void WaveformRenderer::renderSingleLine(
 
     std::size_t reconstructedViewOffset = 0u;
 
-    if (zoomed_)
+    if (zoomFactor_ > 1)
     {
         reconstructedViewWidth =
             std::max<std::size_t>(
-                reconstructedWidth / 10u,
+                reconstructedWidth /
+                static_cast<std::size_t>(zoomFactor_),
                 1u);
 
         const std::size_t maximumOffset =
@@ -666,7 +687,7 @@ void WaveformRenderer::renderSingleLine(
     {
         double y16 = 0.0;
 
-        if (zoomed_)
+        if (zoomFactor_ > 1)
         {
             y16 =
                 static_cast<double>(
@@ -703,11 +724,12 @@ void WaveformRenderer::renderSingleLine(
 
     std::size_t sourceViewOffset = 0u;
 
-    if (zoomed_)
+    if (zoomFactor_ > 1)
     {
         sourceViewWidth =
             std::max<std::size_t>(
-                sourceWidth / 10u,
+                sourceWidth /
+                static_cast<std::size_t>(zoomFactor_),
                 1u);
 
         const std::size_t maximumSourceOffset =
@@ -1266,7 +1288,7 @@ void WaveformRenderer::plotLuminanceTrace()
         };
 
     // Keep the original smooth waveform as the primary trace.
-    if (zoomed_)
+    if (zoomFactor_ > 1)
     {
         plotSmoothCurve(
             sampleZoomed,

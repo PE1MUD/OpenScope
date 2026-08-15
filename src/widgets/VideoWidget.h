@@ -1,8 +1,14 @@
 #pragma once
 
-#include <QImage>
-#include <QWidget>
 #include "settings/OpenScopeSettings.h"
+
+#include <QImage>
+#include <QSize>
+#include <QWidget>
+
+class QMouseEvent;
+class QPaintEvent;
+class QResizeEvent;
 
 class VideoWidget : public QWidget
 {
@@ -10,7 +16,9 @@ class VideoWidget : public QWidget
 
 public:
     explicit VideoWidget(QWidget* parent = nullptr);
+
     void setImage(const QImage& image);
+
     void setAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
 
@@ -19,8 +27,32 @@ signals:
         int width,
         int height);
 
+    void imageClicked(
+        double normalizedX,
+        double normalizedY);
+
+    void leftInteractionStarted();
+    void doubleClickRestoreRequested();
+
+    void rightClicked();
+
 protected:
     const QImage& image() const;
+
+    QSize fitAspectSize(
+        int availableWidth,
+        int availableHeight) const;
+
+    void emitOutputSize();
+
+    void mousePressEvent(
+        QMouseEvent* event) override;
+
+    void mouseMoveEvent(
+        QMouseEvent* event) override;
+
+    void mouseDoubleClickEvent(
+        QMouseEvent* event) override;
 
     void paintEvent(
         QPaintEvent* event) override;
@@ -29,7 +61,11 @@ protected:
         QResizeEvent* event) override;
 
 private:
+    bool emitImagePosition(
+        const QPointF& position);
+
     QImage image_;
+
     OpenScopeSettings::AspectRatio aspectRatio_ =
-        OpenScopeSettings::AspectRatio::Ratio4x3;
+        OpenScopeSettings::AspectRatio::Ratio16x9;
 };

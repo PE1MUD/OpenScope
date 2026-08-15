@@ -8,6 +8,15 @@ struct OpenScopeSettings
         Ratio16x9
     };
 
+    static constexpr double aspectRatioValue(
+        AspectRatio aspectRatio) noexcept
+    {
+        return
+            aspectRatio == AspectRatio::Ratio4x3
+            ? 4.0 / 3.0
+            : 16.0 / 9.0;
+    }
+
     enum class WorkspaceView
     {
         Headless = -1,
@@ -85,7 +94,7 @@ struct OpenScopeSettings
             double gamma = 0.80;
 
             AspectRatio aspectRatio =
-                AspectRatio::Ratio4x3;
+                AspectRatio::Ratio16x9;
 
             bool deinterlace = false;
         };
@@ -107,9 +116,24 @@ struct OpenScopeSettings
                 WorkspaceView::Matrix;
         };
 
+        struct Floaty
+        {
+            int x = 0;
+            int y = 0;
+
+            bool positionValid = false;
+        };
+
+        struct Floaties
+        {
+            Floaty performance;
+            Floaty settings;
+        };
+
         Display display;
         Window window;
         Workspace workspace;
+        Floaties floaties;
     };
 
     Control control;

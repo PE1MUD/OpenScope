@@ -1,8 +1,13 @@
 #pragma once
 
+#include "settings/OpenScopeSettings.h"
+
 #include <QWidget>
 
 class QCheckBox;
+class QButtonGroup;
+class QToolButton;
+class QSpinBox;
 
 class ControlWidget : public QWidget
 {
@@ -10,27 +15,41 @@ class ControlWidget : public QWidget
 
 public:
     explicit ControlWidget(
-        bool vintageLook,
-        int chromaRenderIntensity,
+        const OpenScopeSettings& settings,
         QWidget* parent = nullptr);
+
     void setPerformanceVisible(
         bool visible);
 
+    void setLineNumber(
+        int lineNumber);
+
+    void setWaveformZoomFactor(
+        int zoomFactor);
+
+    void setAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio);
+
 signals:
-    void vintageLookChanged(
-        bool enabled);
+    void lineNumberChanged(int lineNumber);
+    void waveformZoomChanged(int zoomFactor);
+    void waveformPersistenceChanged(int persistence);
 
-    void chromaRenderIntensityChanged(
-        int intensity);
-    void performanceVisibilityChanged(
-        bool visible);
+    void vintageLookChanged(bool enabled);
+    void chromaRenderIntensityChanged(int intensity);
 
-    void noiseReductionChanged(
-        bool enabled);
+    void noiseReductionChanged(bool enabled);
+    void noiseReductionIntensityChanged(int intensity);
 
-    void noiseReductionIntensityChanged(
-        int intensity);
+    void performanceVisibilityChanged(bool visible);
+    void legacyAspectRatioChanged(bool legacyEnabled);
 
 private:
     QCheckBox* performanceCheckBox_ = nullptr;
+    QCheckBox* legacyAspectRatioCheckBox_ = nullptr;
+    QButtonGroup* waveformZoomButtonGroup_ = nullptr;
+    QToolButton* waveformZoom1Button_ = nullptr;
+    QToolButton* waveformZoom5Button_ = nullptr;
+    QToolButton* waveformZoom10Button_ = nullptr;
+    QSpinBox* lineSelector_ = nullptr;
 };

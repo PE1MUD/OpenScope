@@ -3,22 +3,38 @@
 #include "widgets/ControlWidget.h"
 
 #include <QGridLayout>
+#include <QPoint>
+#include <QWindow>
+
+#include <algorithm>
+#include <cmath>
+
+namespace
+{
+    constexpr int kFloatingSettingsWidth = 360;
+}
 
 ScopeWorkspace::ScopeWorkspace(
     QWidget* videoWidget,
     QWidget* waveformWidget,
     QWidget* vectorscopeWidget,
-    bool vintageLook,
-    int chromaRenderIntensity,
+    const OpenScopeSettings& settings,
     QWidget* parent)
     : QWidget(parent)
+    , aspectRatio_(
+        settings.local.display.aspectRatio)
+    , settingsFloatingPosition_(
+        settings.local.floaties.settings.x,
+        settings.local.floaties.settings.y)
+    , settingsFloatingPositionValid_(
+        settings.local.floaties.settings.positionValid)
 {
     layout_ =
         new QGridLayout(this);
 
     setMinimumSize(
         768,
-        576);
+        432);
 
     layout_->setContentsMargins(
         0,
@@ -26,8 +42,7 @@ ScopeWorkspace::ScopeWorkspace(
         0,
         0);
 
-    layout_->setSpacing(
-        4);
+    layout_->setSpacing(4);
 
     videoViewport_ =
         new ScopeViewport(
@@ -46,27 +61,10 @@ ScopeWorkspace::ScopeWorkspace(
 
     controlWidget_ =
         new ControlWidget(
-            vintageLook,
-            chromaRenderIntensity,
+            settings,
             this);
 
-    connect(
-        controlWidget_,
-        &ControlWidget::vintageLookChanged,
-        this,
-        [this](bool enabled)
-        {
-            emit waveformColorChanged(
-                !enabled);
-        });
-
-    connect(
-        controlWidget_,
-        &ControlWidget::chromaRenderIntensityChanged,
-        this,
-        &ScopeWorkspace::waveformChromaFillIntensityChanged);
-
-    yuvViewport_ =
+    settingsViewport_ =
         new ScopeViewport(
             controlWidget_,
             this);
@@ -87,7 +85,7 @@ ScopeWorkspace::ScopeWorkspace(
         0);
 
     layout_->addWidget(
-        yuvViewport_,
+        settingsViewport_,
         1,
         1);
 
@@ -127,6 +125,40 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::lineNumberChanged,
+        this,
+        &ScopeWorkspace::lineNumberChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::waveformZoomChanged,
+        this,
+        &ScopeWorkspace::waveformZoomChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::waveformPersistenceChanged,
+        this,
+        &ScopeWorkspace::waveformPersistenceChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::vintageLookChanged,
+        this,
+        [this](bool enabled)
+        {
+            emit waveformColorChanged(
+                !enabled);
+        });
+
+    connect(
+        controlWidget_,
+        &ControlWidget::chromaRenderIntensityChanged,
+        this,
+        &ScopeWorkspace::waveformChromaFillIntensityChanged);
+
+    connect(
+        controlWidget_,
         &ControlWidget::performanceVisibilityChanged,
         this,
         &ScopeWorkspace::performanceVisibilityChanged);
@@ -139,11 +171,15 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
-        &ControlWidget::
-        noiseReductionIntensityChanged,
+        &ControlWidget::noiseReductionIntensityChanged,
         this,
-        &ScopeWorkspace::
-        noiseReductionIntensityChanged);
+        &ScopeWorkspace::noiseReductionIntensityChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::legacyAspectRatioChanged,
+        this,
+        &ScopeWorkspace::legacyAspectRatioChanged);
 }
 
 void ScopeWorkspace::toggleMaximized(
@@ -158,8 +194,7 @@ void ScopeWorkspace::toggleMaximized(
 
         if (leavingVideo)
         {
-            emit videoMaximizedChanged(
-                false);
+            emit videoMaximizedChanged(false);
         }
 
         emit workspaceViewChanged(
@@ -205,12 +240,10 @@ void ScopeWorkspace::showMaximized(
     videoViewport_->hide();
     waveformViewport_->hide();
     vectorscopeViewport_->hide();
-    yuvViewport_->hide();
+    settingsViewport_->hide();
 
     layout_->removeWidget(
         viewport);
-
-    viewport->show();
 
     layout_->addWidget(
         viewport,
@@ -219,12 +252,18 @@ void ScopeWorkspace::showMaximized(
         2,
         2);
 
+    viewport->show();
+
     maximizedViewport_ =
         viewport;
+
+    floatSettings();
 }
 
 void ScopeWorkspace::showGrid()
 {
+    dockSettings();
+
     layout_->removeWidget(
         videoViewport_);
 
@@ -233,9 +272,6 @@ void ScopeWorkspace::showGrid()
 
     layout_->removeWidget(
         vectorscopeViewport_);
-
-    layout_->removeWidget(
-        yuvViewport_);
 
     layout_->addWidget(
         videoViewport_,
@@ -253,17 +289,146 @@ void ScopeWorkspace::showGrid()
         0);
 
     layout_->addWidget(
-        yuvViewport_,
+        settingsViewport_,
         1,
         1);
 
     videoViewport_->show();
     waveformViewport_->show();
     vectorscopeViewport_->show();
-    yuvViewport_->show();
+    settingsViewport_->show();
 
     maximizedViewport_ =
         nullptr;
+}
+
+void ScopeWorkspace::floatSettings()
+{
+    if (settingsFloating_)
+    {
+        resizeFloatingSettings();
+        settingsViewport_->show();
+        return;
+    }
+
+    const QPoint floatingPosition =
+        settingsFloatingPositionValid_
+        ? settingsFloatingPosition_
+        : mapToGlobal(
+            QPoint(
+                (std::max)(
+                    width() -
+                    kFloatingSettingsWidth -
+                    20,
+                    20),
+                20));
+
+    QWindow* mainWindowHandle = nullptr;
+
+    if (QWidget* const mainWindow = window())
+    {
+        // Force creation of the native main-window handle before
+        // the settings viewport becomes a top-level tool window.
+        mainWindow->winId();
+        mainWindowHandle =
+            mainWindow->windowHandle();
+    }
+
+    layout_->removeWidget(
+        settingsViewport_);
+
+    settingsViewport_->hide();
+    settingsViewport_->setParent(nullptr);
+
+    settingsViewport_->setWindowFlags(
+        Qt::Tool |
+        Qt::CustomizeWindowHint |
+        Qt::WindowTitleHint);
+
+    settingsViewport_->setWindowTitle(
+        "OpenScope Settings");
+
+    // Force creation of the tool-window handle so we can make it
+    // transient for the OpenScope main window. This keeps Settings
+    // above OpenScope without making it system-wide always-on-top.
+    settingsViewport_->winId();
+
+    if (QWindow* const settingsWindowHandle =
+        settingsViewport_->windowHandle())
+    {
+        settingsWindowHandle->setTransientParent(
+            mainWindowHandle);
+    }
+
+    resizeFloatingSettings();
+    settingsViewport_->move(
+        floatingPosition);
+
+    settingsFloatingPosition_ =
+        floatingPosition;
+
+    settingsFloatingPositionValid_ =
+        true;
+
+    settingsFloating_ = true;
+    settingsViewport_->show();
+    settingsViewport_->raise();
+}
+
+void ScopeWorkspace::dockSettings()
+{
+    if (!settingsFloating_)
+    {
+        return;
+    }
+
+    settingsFloatingPosition_ =
+        settingsViewport_->pos();
+
+    settingsFloatingPositionValid_ =
+        true;
+
+    settingsViewport_->hide();
+    settingsViewport_->setParent(this);
+    settingsViewport_->setWindowFlags(
+        Qt::Widget);
+
+    settingsFloating_ = false;
+}
+
+void ScopeWorkspace::resizeFloatingSettings()
+{
+    const double aspectRatio =
+        OpenScopeSettings::aspectRatioValue(
+            aspectRatio_);
+
+    const int height =
+        static_cast<int>(
+            std::lround(
+                static_cast<double>(
+                    kFloatingSettingsWidth) /
+                aspectRatio));
+
+    settingsViewport_->resize(
+        kFloatingSettingsWidth,
+        height);
+}
+
+QPoint ScopeWorkspace::floatingSettingsPosition() const
+{
+    if (settingsFloating_)
+    {
+        return settingsViewport_->pos();
+    }
+
+    return settingsFloatingPosition_;
+}
+
+bool ScopeWorkspace::hasFloatingSettingsPosition() const
+{
+    return
+        settingsFloating_ ||
+        settingsFloatingPositionValid_;
 }
 
 void ScopeWorkspace::setWorkspaceView(
@@ -275,24 +440,18 @@ void ScopeWorkspace::setWorkspaceView(
     switch (view)
     {
     case OpenScopeSettings::WorkspaceView::Video:
-        showMaximized(
-            videoViewport_);
+        showMaximized(videoViewport_);
         break;
 
     case OpenScopeSettings::WorkspaceView::Waveform:
-        showMaximized(
-            waveformViewport_);
+        showMaximized(waveformViewport_);
         break;
 
     case OpenScopeSettings::WorkspaceView::Vectorscope:
-        showMaximized(
-            vectorscopeViewport_);
+        showMaximized(vectorscopeViewport_);
         break;
 
     case OpenScopeSettings::WorkspaceView::Matrix:
-        showGrid();
-        break;
-
     case OpenScopeSettings::WorkspaceView::Headless:
         showGrid();
         break;
@@ -308,11 +467,18 @@ void ScopeWorkspace::setWorkspaceView(
     }
 }
 
-bool ScopeWorkspace::isVideoMaximized() const
+void ScopeWorkspace::setLineNumber(
+    int lineNumber)
 {
-    return
-        maximizedViewport_ ==
-        videoViewport_;
+    controlWidget_->setLineNumber(
+        lineNumber);
+}
+
+void ScopeWorkspace::setWaveformZoomFactor(
+    int zoomFactor)
+{
+    controlWidget_->setWaveformZoomFactor(
+        zoomFactor);
 }
 
 void ScopeWorkspace::setPerformanceVisible(
@@ -320,4 +486,30 @@ void ScopeWorkspace::setPerformanceVisible(
 {
     controlWidget_->setPerformanceVisible(
         visible);
+}
+
+void ScopeWorkspace::setAspectRatio(
+    OpenScopeSettings::AspectRatio aspectRatio)
+{
+    if (aspectRatio_ == aspectRatio)
+    {
+        return;
+    }
+
+    aspectRatio_ = aspectRatio;
+
+    controlWidget_->setAspectRatio(
+        aspectRatio);
+
+    if (settingsFloating_)
+    {
+        resizeFloatingSettings();
+    }
+}
+
+bool ScopeWorkspace::isVideoMaximized() const
+{
+    return
+        maximizedViewport_ ==
+        videoViewport_;
 }

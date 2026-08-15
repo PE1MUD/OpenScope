@@ -1,16 +1,216 @@
-#include "WaveformWidget.h"
+#include "widgets/WaveformWidget.h"
 
 #include <QPainter>
+#include <QMouseEvent>
+#include <QPaintEvent>
 #include <QResizeEvent>
 #include <QSlider>
+#include <QStyle>
+#include <QStyleOptionSlider>
+
 #include <algorithm>
 #include <cmath>
+
+namespace
+{
+    constexpr int kScrollSliderHeight = 24;
+
+    class ScrollValueSlider final : public QSlider
+    {
+    public:
+        explicit ScrollValueSlider(
+            Qt::Orientation orientation,
+            QWidget* parent = nullptr)
+            : QSlider(
+                orientation,
+                parent)
+        {
+        }
+
+    protected:
+        void mousePressEvent(
+            QMouseEvent* event) override
+        {
+            if (event->button() == Qt::LeftButton)
+            {
+                setSliderDown(
+                    true);
+
+                setValueFromMouse(
+                    event->position());
+
+                event->accept();
+                return;
+            }
+
+            QSlider::mousePressEvent(
+                event);
+        }
+
+        void mouseMoveEvent(
+            QMouseEvent* event) override
+        {
+            if (isSliderDown() &&
+                (event->buttons() & Qt::LeftButton) != 0)
+            {
+                setValueFromMouse(
+                    event->position());
+
+                event->accept();
+                return;
+            }
+
+            QSlider::mouseMoveEvent(
+                event);
+        }
+
+        void mouseReleaseEvent(
+            QMouseEvent* event) override
+        {
+            if (event->button() == Qt::LeftButton &&
+                isSliderDown())
+            {
+                setValueFromMouse(
+                    event->position());
+
+                setSliderDown(
+                    false);
+
+                event->accept();
+                return;
+            }
+
+            QSlider::mouseReleaseEvent(
+                event);
+        }
+
+        void paintEvent(
+            QPaintEvent* event) override
+        {
+            QSlider::paintEvent(
+                event);
+
+            QStyleOptionSlider option;
+            initStyleOption(
+                &option);
+
+            const QRect nativeHandleRect =
+                style()->subControlRect(
+                    QStyle::CC_Slider,
+                    &option,
+                    QStyle::SC_SliderHandle,
+                    this);
+
+            QRect handleRect =
+                nativeHandleRect;
+
+            constexpr int kValueWidth = 34;
+
+            handleRect.setWidth(
+                kValueWidth);
+
+            handleRect.moveCenter(
+                nativeHandleRect.center());
+
+            const int displayedPosition =
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(
+                            value()) /
+                        10.0));
+
+            QPainter painter(
+                this);
+
+            painter.setRenderHint(
+                QPainter::Antialiasing);
+
+            painter.setPen(
+                palette().color(
+                    QPalette::Mid));
+
+            painter.setBrush(
+                palette().color(
+                    QPalette::Button));
+
+            painter.drawRoundedRect(
+                handleRect.adjusted(
+                    0,
+                    1,
+                    -1,
+                    -1),
+                3.0,
+                3.0);
+
+            QFont font =
+                painter.font();
+
+            if (font.pointSizeF() > 0.0)
+            {
+                font.setPointSizeF(
+                    std::max(
+                        7.0,
+                        font.pointSizeF() - 1.0));
+            }
+
+            font.setBold(
+                true);
+
+            painter.setFont(
+                font);
+
+            painter.setPen(
+                isEnabled()
+                ? palette().color(
+                    QPalette::ButtonText)
+                : palette().color(
+                    QPalette::Disabled,
+                    QPalette::ButtonText));
+
+            painter.drawText(
+                handleRect,
+                Qt::AlignCenter,
+                QString::number(
+                    displayedPosition));
+        }
+
+    private:
+        void setValueFromMouse(
+            const QPointF& position)
+        {
+            constexpr int kValueWidth = 34;
+
+            const int span =
+                (std::max)(
+                    width() - kValueWidth,
+                    1);
+
+            const int pixelPosition =
+                std::clamp(
+                    static_cast<int>(
+                        std::lround(
+                            position.x() -
+                            kValueWidth * 0.5)),
+                    0,
+                    span);
+
+            setValue(
+                QStyle::sliderValueFromPosition(
+                    minimum(),
+                    maximum(),
+                    pixelPosition,
+                    span,
+                    invertedAppearance()));
+        }
+    };
+
+}
 
 WaveformWidget::WaveformWidget(QWidget* parent)
     : VideoWidget(parent)
 {
     scrollSlider_ =
-        new QSlider(
+        new ScrollValueSlider(
             Qt::Horizontal,
             this);
 
@@ -35,7 +235,12 @@ WaveformWidget::WaveformWidget(QWidget* parent)
 
 bool WaveformWidget::isZoomed() const
 {
-    return zoomed_;
+    return zoomFactor_ > 1;
+}
+
+int WaveformWidget::zoomFactor() const
+{
+    return zoomFactor_;
 }
 
 void WaveformWidget::setScrollPosition(
@@ -76,40 +281,53 @@ void WaveformWidget::setZoomEnabled(bool enabled)
 
     zoomEnabled_ = enabled;
 
-    if (!zoomEnabled_ && zoomed_)
+    if (!zoomEnabled_ && zoomFactor_ != 1)
     {
-        setZoomed(false);
+        setZoomFactor(1);
     }
 }
 
 void WaveformWidget::setZoomed(bool zoomed)
 {
-    if (zoomed && !zoomEnabled_)
+    setZoomFactor(
+        zoomed
+        ? 10
+        : 1);
+}
+
+void WaveformWidget::setZoomFactor(int factor)
+{
+    if (factor != 1 &&
+        factor != 5 &&
+        factor != 10)
     {
-        return;
+        factor = 1;
     }
-    if (zoomed_ == zoomed)
+
+    if (factor > 1 && !zoomEnabled_)
+    {
+        factor = 1;
+    }
+
+    if (zoomFactor_ == factor)
     {
         return;
     }
 
-    zoomed_ = zoomed;
+    zoomFactor_ = factor;
 
     scrollSlider_->setVisible(
-        zoomed_);
+        zoomFactor_ > 1);
+
+    updateScrollSliderGeometry();
+
+    emit zoomFactorChanged(
+        zoomFactor_);
 
     emit zoomChanged(
-        zoomed_);
+        zoomFactor_ > 1);
 
-    const int sliderHeight =
-        scrollSlider_->isVisible()
-        ? scrollSlider_->height()
-        : 0;
-
-    emit outputSizeChanged(
-        width(),
-        height() - sliderHeight);
-
+    emitOutputSize();
     update();
 }
 
@@ -129,20 +347,23 @@ void WaveformWidget::paintEvent(
         return;
     }
 
-    const int sliderHeight =
-        scrollSlider_->isVisible()
-        ? scrollSlider_->height()
-        : 0;
+    const QSize outputSize =
+        fitAspectSize(
+            width(),
+            height());
 
-    const int waveformHeight =
-        height() - sliderHeight;
+    const int x =
+        (width() - outputSize.width()) / 2;
+
+    const int y =
+        (height() - outputSize.height()) / 2;
 
     painter.drawImage(
         QRect(
-            0,
-            0,
-            width(),
-            waveformHeight),
+            x,
+            y,
+            outputSize.width(),
+            outputSize.height()),
         image());
 }
 
@@ -151,21 +372,17 @@ void WaveformWidget::resizeEvent(
 {
     QWidget::resizeEvent(event);
 
-    constexpr int sliderHeight = 24;
+    updateScrollSliderGeometry();
+    emitOutputSize();
+}
 
+void WaveformWidget::updateScrollSliderGeometry()
+{
     scrollSlider_->setGeometry(
         0,
-        height() - sliderHeight,
+        height() - kScrollSliderHeight,
         width(),
-        sliderHeight);
+        kScrollSliderHeight);
 
-    const int waveformHeight =
-        height() -
-        (scrollSlider_->isVisible()
-            ? sliderHeight
-            : 0);
-
-    emit outputSizeChanged(
-        width(),
-        waveformHeight);
+    scrollSlider_->raise();
 }

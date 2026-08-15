@@ -63,6 +63,9 @@ public:
     void setWaveformZoomed(
         bool zoomed);
 
+    void setWaveformZoomFactor(
+        int factor);
+
     void setWaveformScrollPosition(
         double position);
 
@@ -395,7 +398,7 @@ private:
     QImage lastPresentedSecond_;
     bool lastPresentedPairValid_ = false;
 
-    std::atomic<bool> waveformZoomed_{ false };
+    std::atomic<int> waveformZoomFactor_{ 1 };
 
     std::atomic<double> waveformScrollPosition_{ 0.0 };
 

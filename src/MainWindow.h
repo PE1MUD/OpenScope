@@ -1,11 +1,13 @@
 #pragma once
 
+#include "settings/OpenScopeSettings.h"
+
+#include <QCloseEvent>
 #include <QMainWindow>
 #include <QRect>
 #include <QSize>
-#include <QCloseEvent>
+
 class QTimer;
-class QToolBar;
 
 class VectorscopeWidget;
 class VideoEngine;
@@ -28,6 +30,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+
     bool nativeEvent(
         const QByteArray& eventType,
         void* message,
@@ -47,12 +50,13 @@ private:
     WaveformWidget* waveformWidget_ = nullptr;
     ScopeWorkspace* workspace_ = nullptr;
     VectorscopeWidget* vectorscopeWidget_ = nullptr;
+
     QRect restoreWindowGeometry_;
     bool customMaximized_ = false;
+
     SettingsService* settingsService_ = nullptr;
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
-    QToolBar* instrumentToolBar_ = nullptr;
 
     QSize videoRenderSize_;
     QSize waveformRenderSize_;
@@ -60,6 +64,16 @@ private:
 
     RenderView activeRenderView_ =
         RenderView::Matrix;
+
+    int preVideoClickLineNumber_ = -1;
+    double preVideoClickScrollPosition_ = 0.0;
+    bool preVideoClickStateValid_ = false;
+
+    double windowAspectRatio() const;
+
+    void applyDisplayAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio,
+        bool resizeWindow);
 
     void updateVideoFullscreenUi(
         bool fullscreen);

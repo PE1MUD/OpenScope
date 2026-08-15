@@ -133,6 +133,15 @@ VideoEngine::~VideoEngine()
 
     displayPhaseCondition_.notify_all();
 
+    for (std::jthread& worker :
+        displayPhaseWorkers_)
+    {
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(
             waveformMutex_);
@@ -329,12 +338,28 @@ void VideoEngine::setVideoOutputSize(
 void VideoEngine::setWaveformZoomed(
     bool zoomed)
 {
-    waveformZoomed_.store(
-        zoomed,
+    setWaveformZoomFactor(
+        zoomed
+        ? 10
+        : 1);
+}
+
+void VideoEngine::setWaveformZoomFactor(
+    int factor)
+{
+    if (factor != 1 &&
+        factor != 5 &&
+        factor != 10)
+    {
+        factor = 1;
+    }
+
+    waveformZoomFactor_.store(
+        factor,
         std::memory_order_release);
 
-    waveformRenderer_.setZoomed(
-        zoomed);
+    waveformRenderer_.setZoomFactor(
+        factor);
 }
 
 
@@ -708,8 +733,8 @@ void VideoEngine::displayWorkerLoop()
             videoHighlightEnabled_.load(
                 std::memory_order_acquire);
 
-        const bool waveformZoomed =
-            waveformZoomed_.load(
+        const int waveformZoomFactor =
+            waveformZoomFactor_.load(
                 std::memory_order_acquire);
 
         const double waveformScrollPosition =
@@ -719,10 +744,11 @@ void VideoEngine::displayWorkerLoop()
         int highlightStartX = 0;
         int highlightEndX = -1;
 
-        if (waveformZoomed)
+        if (waveformZoomFactor > 1)
         {
             const int visibleWidth =
-                displayFrame->width / 10;
+                displayFrame->width /
+                waveformZoomFactor;
 
             const int maximumStart =
                 displayFrame->width -
@@ -1317,6 +1343,27 @@ void VideoEngine::displayPresenterLoop()
 
         recordPresentInterval();
 
+        {
+            const Clock::time_point now =
+                Clock::now();
+
+            const auto offsetUs =
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                        now - captureTickTime)
+                .count();
+
+            const std::uint64_t presentUs =
+                40000u +
+                static_cast<std::uint64_t>(
+                    std::max<std::int64_t>(
+                        offsetUs,
+                        0));
+
+            performanceStats_.field1Present.update(
+                presentUs);
+        }
+
         emit frameChanged(
             firstImage);
 
@@ -1374,6 +1421,27 @@ void VideoEngine::displayPresenterLoop()
         if (!secondImage.isNull())
         {
             recordPresentInterval();
+
+            {
+                const Clock::time_point now =
+                    Clock::now();
+
+                const auto offsetUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds>(
+                            now - captureTickTime)
+                    .count();
+
+                const std::uint64_t presentUs =
+                    40000u +
+                    static_cast<std::uint64_t>(
+                        std::max<std::int64_t>(
+                            offsetUs,
+                            0));
+
+                performanceStats_.field2Present.update(
+                    presentUs);
+            }
 
             emit frameChanged(
                 secondImage);

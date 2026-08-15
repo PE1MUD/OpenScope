@@ -37,6 +37,7 @@ public:
         int height);
 
     void setZoomed(bool zoomed);
+    void setZoomFactor(int factor);
     void setScrollPosition(double position);
     void setContentScale(double scale);
 
@@ -135,7 +136,7 @@ private:
     int selectedLine_ = -1;
     int persistence_ = 0;
 
-    bool zoomed_ = false;
+    int zoomFactor_ = 1;
     double scrollPosition_ = 0.0;
     double contentScale_ = 1.0;
     int chromaFillIntensity_ = 64;
@@ -143,5 +144,5 @@ private:
     WaveformSettings settings_;
 
     OpenScopeSettings::AspectRatio aspectRatio_ =
-        OpenScopeSettings::AspectRatio::Ratio4x3;
+        OpenScopeSettings::AspectRatio::Ratio16x9;
 };

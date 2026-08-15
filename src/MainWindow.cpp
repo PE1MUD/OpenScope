@@ -19,26 +19,16 @@
 #include <windows.h>
 
 #include <QTimer>
-#include <QLabel>
-#include <QPushButton>
-#include <QSlider>
-#include <QSpinBox>
-#include <QToolBar>
+#include <algorithm>
 #include <cmath>
-
-namespace
-{
-    constexpr double kWindowAspectRatio =
-        5.0 / 4.0;
-}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V0.31");
-    resize(900, 720);
+    setWindowTitle("OpenScope V0.4");
+
     SetThreadPriority(
         GetCurrentThread(),
         THREAD_PRIORITY_HIGHEST);
@@ -52,509 +42,50 @@ MainWindow::MainWindow(QWidget* parent)
     settingsService_ =
         new SettingsService(this);
 
-    const auto& windowSettings =
-        settingsService_->settings().local.window;
+    const OpenScopeSettings& initialSettings =
+        settingsService_->settings();
 
     const auto displayAspectRatio =
-        settingsService_->settings()
-        .local
-        .display
-        .aspectRatio;
+        initialSettings.local
+            .display
+            .aspectRatio;
 
-    videoWidget_->setAspectRatio(
-        displayAspectRatio);
+    const auto& windowSettings =
+        initialSettings.local.window;
 
-    videoEngine_->setWaveformAspectRatio(
-        displayAspectRatio);
+    const double initialAspectRatio =
+        OpenScopeSettings::aspectRatioValue(
+            displayAspectRatio);
+
+    const int initialWindowWidth =
+        (std::max)(windowSettings.width, 640);
+
+    const int initialWindowHeight =
+        static_cast<int>(
+            std::lround(
+                static_cast<double>(initialWindowWidth) /
+                initialAspectRatio));
 
     resize(
-        windowSettings.width,
-        windowSettings.height);
+        initialWindowWidth,
+        initialWindowHeight);
 
     move(
         windowSettings.x,
         windowSettings.y);
-
-    if (windowSettings.maximized)
-    {
-        showMaximized();
-    }
 
     workspace_ =
         new ScopeWorkspace(
             videoWidget_,
             waveformWidget_,
             vectorscopeWidget_,
-            settingsService_
-            ->settings()
-            .control
-            .instrument
-            .waveform
-            .vintageLook,
-            settingsService_
-            ->settings()
-            .control
-            .instrument
-            .waveform
-            .chromaRenderIntensity,
+            initialSettings,
             this);
-
-    const OpenScopeSettings::WorkspaceView
-        initialWorkspaceView =
-        settingsService_->settings()
-        .local
-        .workspace
-        .view;
-
-    workspace_->setWorkspaceView(
-        initialWorkspaceView);
-
-    switch (initialWorkspaceView)
-    {
-    case OpenScopeSettings::WorkspaceView::Video:
-        activeRenderView_ =
-            RenderView::Video;
-        break;
-
-    case OpenScopeSettings::WorkspaceView::Waveform:
-        activeRenderView_ =
-            RenderView::Waveform;
-        break;
-
-    case OpenScopeSettings::WorkspaceView::Vectorscope:
-        activeRenderView_ =
-            RenderView::Vectorscope;
-        break;
-
-    case OpenScopeSettings::WorkspaceView::Matrix:
-    case OpenScopeSettings::WorkspaceView::Headless:
-    default:
-        activeRenderView_ =
-            RenderView::Matrix;
-        break;
-    }
-
-    performanceWidget_ =
-        new PerformanceWidget(this);
-
-    connect(
-        performanceWidget_,
-        &PerformanceWidget::visibilityChanged,
-        this,
-        [this](bool visible)
-        {
-            workspace_->setPerformanceVisible(
-                visible);
-        });
-
-    performanceWidget_->setWindowTitle(
-        "OpenScope Performance");
-
-    performanceWidget_->setWindowFlag(
-        Qt::Tool);
-
-    performanceWidget_->setFixedSize(
-        performanceWidget_->sizeHint());
-
-    performanceWidget_->setFixedSize(
-        performanceWidget_->size());
-
-    performanceWidget_->show();
-    // Set the values.
-    videoEngine_->setDisplayGamma(
-        settingsService_
-        ->settings()
-        .local
-        .display
-        .gamma);
-
-    videoEngine_->setWaveformColor(
-        !settingsService_
-        ->settings()
-        .control
-        .instrument
-        .waveform
-        .vintageLook);
-
-    videoEngine_->setWaveformChromaFillIntensity(
-        settingsService_
-        ->settings()
-        .control
-        .instrument
-        .waveform
-        .chromaRenderIntensity);
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::waveformChromaFillIntensityChanged,
-        this,
-        [this](int intensity)
-        {
-            settingsService_->update(
-                [intensity](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .waveform
-                        .chromaRenderIntensity =
-                        intensity;
-                });
-
-            videoEngine_->
-                setWaveformChromaFillIntensity(
-                    intensity);
-        });
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::waveformColorChanged,
-        this,
-        [this](bool colorEnabled)
-        {
-            settingsService_->update(
-                [colorEnabled](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .waveform
-                        .vintageLook =
-                        !colorEnabled;
-                });
-
-            videoEngine_->setWaveformColor(
-                colorEnabled);
-        });
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::workspaceViewChanged,
-        this,
-        [this](OpenScopeSettings::WorkspaceView view)
-        {
-            settingsService_->update(
-                [view](OpenScopeSettings& settings)
-                {
-                    settings.local.workspace.view =
-                        view;
-                });
-
-            switch (view)
-            {
-            case OpenScopeSettings::WorkspaceView::Video:
-                activeRenderView_ =
-                    RenderView::Video;
-                break;
-
-            case OpenScopeSettings::WorkspaceView::Waveform:
-                activeRenderView_ =
-                    RenderView::Waveform;
-                break;
-
-            case OpenScopeSettings::WorkspaceView::Vectorscope:
-                activeRenderView_ =
-                    RenderView::Vectorscope;
-                break;
-
-            case OpenScopeSettings::WorkspaceView::Matrix:
-            case OpenScopeSettings::WorkspaceView::Headless:
-            default:
-                activeRenderView_ =
-                    RenderView::Matrix;
-                break;
-            }
-
-            updateRenderResolutionTitle();
-        });
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::performanceVisibilityChanged,
-        this,
-        [this](bool visible)
-        {
-            performanceWidget_->setVisible(
-                visible);
-        });
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::noiseReductionChanged,
-        videoEngine_,
-        &VideoEngine::setNoiseReductionEnabled);
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::
-        noiseReductionIntensityChanged,
-        videoEngine_,
-        &VideoEngine::
-        setNoiseReductionIntensity);
-
-    connect(
-        workspace_,
-        &ScopeWorkspace::videoMaximizedChanged,
-        this,
-        [this](bool maximized)
-        {
-            updateVideoFullscreenUi(
-                maximized);
-        });
 
     setCentralWidget(workspace_);
 
-    performanceTimer_ =
-        new QTimer(this);
-
-    performanceTimer_->setInterval(
-        50);
-
-    connect(
-        performanceTimer_,
-        &QTimer::timeout,
-        this,
-        [this]()
-        {
-            performanceWidget_->setPerformanceSnapshot(
-                videoEngine_->performanceSnapshot());
-        });
-
-    performanceTimer_->start();
-
-    instrumentToolBar_ =
-        addToolBar("Line selector");
-
-    QToolBar* const toolbar =
-        instrumentToolBar_;
-
-    const bool waveformZoomed =
-        settingsService_->settings()
-        .control
-        .instrument
-        .waveform
-        .zoom == 10;
-
-    auto* waveformZoomButton =
-        new QPushButton(
-            waveformZoomed
-            ? "X10"
-            : "X1",
-            toolbar);
-
-    waveformZoomButton->setCheckable(true);
-
-    waveformZoomButton->setChecked(
-        waveformZoomed);
-
-    toolbar->addWidget(
-        waveformZoomButton);
-
-    const double waveformScrollPosition =
-        settingsService_->settings()
-        .control
-        .instrument
-        .waveform
-        .scrollPosition;
-
-    waveformWidget_->setScrollPosition(
-        waveformScrollPosition);
-
-    videoEngine_->setWaveformScrollPosition(
-        waveformScrollPosition);
-
-    waveformWidget_->setZoomed(
-        waveformZoomed);
-
-    videoEngine_->setWaveformZoomed(
-        waveformZoomed);
-
-    connect(
-        waveformZoomButton,
-        &QPushButton::toggled,
-        this,
-        [this, waveformZoomButton](bool zoomed)
-        {
-            settingsService_->update(
-                [zoomed](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .waveform
-                        .zoom =
-                        zoomed
-                        ? 10
-                        : 1;
-                });
-
-            waveformWidget_->setZoomed(
-                zoomed);
-
-            videoEngine_->setWaveformZoomed(
-                zoomed);
-
-            waveformZoomButton->setText(
-                zoomed
-                ? "X10"
-                : "X1");
-        });
-
-    connect(
-        waveformWidget_,
-        &WaveformWidget::scrollPositionChanged,
-        this,
-        [this](double position)
-        {
-            settingsService_->update(
-                [position](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .waveform
-                        .scrollPosition =
-                        position;
-                });
-
-            videoEngine_->setWaveformScrollPosition(
-                position);
-        });
-
-    auto* lineSelector =
-        new QSpinBox(toolbar);
-
-    lineSelector->setRange(
-        -1,
-        575);
-
-    const int lineNumber =
-        settingsService_->settings()
-        .control
-        .instrument
-        .lineNumber;
-
-    lineSelector->setValue(
-        lineNumber);
-
-    lineSelector->setSpecialValueText(
-        "All");
-
-    toolbar->addWidget(
-        lineSelector);
-
-    videoEngine_->setSelectedLine(
-        lineNumber);
-
-    const bool waveformZoomEnabled =
-        lineNumber >= 0;
-
-    waveformZoomButton->setEnabled(
-        waveformZoomEnabled);
-
-    waveformWidget_->setZoomEnabled(
-        waveformZoomEnabled);
-
-    if (!waveformZoomEnabled &&
-        waveformZoomButton->isChecked())
-    {
-        waveformZoomButton->setChecked(
-            false);
-    }
-
-    connect(
-        lineSelector,
-        &QSpinBox::valueChanged,
-        this,
-        [this, waveformZoomButton](int lineNumber)
-        {
-            settingsService_->update(
-                [lineNumber](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .lineNumber =
-                        lineNumber;
-                });
-
-            videoEngine_->setSelectedLine(
-                lineNumber);
-
-            const bool waveformZoomEnabled =
-                lineNumber >= 0;
-
-            waveformZoomButton->setEnabled(
-                waveformZoomEnabled);
-
-            waveformWidget_->setZoomEnabled(
-                waveformZoomEnabled);
-
-            if (!waveformZoomEnabled &&
-                waveformZoomButton->isChecked())
-            {
-                waveformZoomButton->setChecked(
-                    false);
-            }
-        });
-
-    auto* persistenceLabel =
-        new QLabel(
-            "Scopephor",
-            toolbar);
-
-    toolbar->addWidget(
-        persistenceLabel);
-
-    auto* persistenceSlider =
-        new QSlider(
-            Qt::Horizontal,
-            toolbar);
-
-    persistenceSlider->setRange(
-        0,
-        255);
-
-    const int persistenceFrames =
-        settingsService_->settings()
-        .control
-        .instrument
-        .waveform
-        .persistenceFrames;
-
-    persistenceSlider->setValue(
-        persistenceFrames);
-
-    persistenceSlider->setFixedWidth(
-        140);
-
-    toolbar->addWidget(
-        persistenceSlider);
-
-    videoEngine_->setWaveformPersistence(
-        persistenceFrames);
-
-    connect(
-        persistenceSlider,
-        &QSlider::valueChanged,
-        this,
-        [this](int persistenceFrames)
-        {
-            settingsService_->update(
-                [persistenceFrames](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .waveform
-                        .persistenceFrames =
-                        persistenceFrames;
-                });
-
-            videoEngine_->setWaveformPersistence(
-                persistenceFrames);
-        });
-
-    connect(
-        videoEngine_,
-        &VideoEngine::vectorscopeChanged,
-        vectorscopeWidget_,
-        &VectorscopeWidget::setImage);
-
+    // Render-output wiring first. Aspect-ratio changes can now safely
+    // emit fresh output sizes into the engine.
     connect(
         vectorscopeWidget_,
         &VectorscopeWidget::renderSizeChanged,
@@ -593,25 +124,164 @@ MainWindow::MainWindow(QWidget* parent)
                 QSize(width, height);
 
             if (activeRenderView_ ==
-                RenderView::Video ||
+                    RenderView::Video ||
                 activeRenderView_ ==
-                RenderView::Matrix)
+                    RenderView::Matrix)
             {
                 updateRenderResolutionTitle();
             }
         });
 
     connect(
-        videoEngine_,
-        &VideoEngine::frameChanged,
         videoWidget_,
-        &VideoWidget::setImage);
+        &VideoWidget::leftInteractionStarted,
+        this,
+        [this]()
+        {
+            if (activeRenderView_ !=
+                RenderView::Matrix)
+            {
+                preVideoClickStateValid_ =
+                    false;
+                return;
+            }
+
+            const OpenScopeSettings& settings =
+                settingsService_->settings();
+
+            preVideoClickLineNumber_ =
+                settings.control
+                    .instrument
+                    .lineNumber;
+
+            preVideoClickScrollPosition_ =
+                settings.control
+                    .instrument
+                    .waveform
+                    .scrollPosition;
+
+            preVideoClickStateValid_ =
+                true;
+        });
 
     connect(
-        videoEngine_,
-        &VideoEngine::waveformChanged,
-        waveformWidget_,
-        &WaveformWidget::setImage);
+        videoWidget_,
+        &VideoWidget::doubleClickRestoreRequested,
+        this,
+        [this]()
+        {
+            if (!preVideoClickStateValid_ ||
+                activeRenderView_ !=
+                    RenderView::Matrix)
+            {
+                return;
+            }
+
+            workspace_->setLineNumber(
+                preVideoClickLineNumber_);
+
+            waveformWidget_->setScrollPosition(
+                preVideoClickScrollPosition_);
+
+            preVideoClickStateValid_ =
+                false;
+        });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::imageClicked,
+        this,
+        [this](double normalizedX,
+               double normalizedY)
+        {
+            // Point-and-measure is intentionally a matrix-only action.
+            // A single click in a maximized video viewer remains inert.
+            if (activeRenderView_ !=
+                RenderView::Matrix)
+            {
+                return;
+            }
+
+            constexpr int kPalLineCount = 576;
+
+            const int selectedLine =
+                std::clamp(
+                    static_cast<int>(
+                        std::lround(
+                            normalizedY *
+                            static_cast<double>(
+                                kPalLineCount - 1))),
+                    0,
+                    kPalLineCount - 1);
+
+            // Updating the ControlWidget deliberately goes through its
+            // existing valueChanged path. That keeps the spin box,
+            // settings and VideoEngine selected-line state in sync.
+            workspace_->setLineNumber(
+                selectedLine);
+
+            const int zoomFactor =
+                waveformWidget_->zoomFactor();
+
+            if (zoomFactor <= 1)
+            {
+                return;
+            }
+
+            // Centre the clicked source-X position in the visible
+            // waveform window. The waveform renderer's scroll value is
+            // 0..1 over the legal start-position range, not over the
+            // complete source line.
+            const double visibleFraction =
+                1.0 /
+                static_cast<double>(zoomFactor);
+
+            const double maximumStart =
+                1.0 -
+                visibleFraction;
+
+            const double requestedStart =
+                normalizedX -
+                (visibleFraction * 0.5);
+
+            const double scrollPosition =
+                maximumStart > 0.0
+                ? std::clamp(
+                    requestedStart /
+                        maximumStart,
+                    0.0,
+                    1.0)
+                : 0.0;
+
+            waveformWidget_->setScrollPosition(
+                scrollPosition);
+        });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::rightClicked,
+        this,
+        [this]()
+        {
+            if (activeRenderView_ !=
+                RenderView::Matrix)
+            {
+                return;
+            }
+
+            const int currentZoom =
+                waveformWidget_->zoomFactor();
+
+            const int nextZoom =
+                currentZoom <= 1
+                ? 5
+                : (currentZoom <= 5
+                    ? 10
+                    : 1);
+
+            workspace_->setWaveformZoomFactor(
+                nextZoom);
+        });
 
     connect(
         waveformWidget_,
@@ -635,21 +305,601 @@ MainWindow::MainWindow(QWidget* parent)
             }
         });
 
+    connect(
+        videoEngine_,
+        &VideoEngine::frameChanged,
+        videoWidget_,
+        &VideoWidget::setImage);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformChanged,
+        waveformWidget_,
+        &WaveformWidget::setImage);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::vectorscopeChanged,
+        vectorscopeWidget_,
+        &VectorscopeWidget::setImage);
+
+    // Initial processing/instrument state.
+    videoEngine_->setDisplayGamma(
+        initialSettings.local
+            .display
+            .gamma);
+
+    videoEngine_->setNoiseReductionEnabled(
+        initialSettings.control
+            .processing
+            .noiseFilter
+            .enabled);
+
+    videoEngine_->setNoiseReductionIntensity(
+        initialSettings.control
+            .processing
+            .noiseFilter
+            .strength);
+
+    videoEngine_->setWaveformColor(
+        !initialSettings.control
+            .instrument
+            .waveform
+            .vintageLook);
+
+    videoEngine_->setWaveformChromaFillIntensity(
+        initialSettings.control
+            .instrument
+            .waveform
+            .chromaRenderIntensity);
+
+    videoEngine_->setSelectedLine(
+        initialSettings.control
+            .instrument
+            .lineNumber);
+
+    videoEngine_->setWaveformPersistence(
+        initialSettings.control
+            .instrument
+            .waveform
+            .persistenceFrames);
+
+    videoEngine_->setWaveformScrollPosition(
+        initialSettings.control
+            .instrument
+            .waveform
+            .scrollPosition);
+
+    waveformWidget_->setScrollPosition(
+        initialSettings.control
+            .instrument
+            .waveform
+            .scrollPosition);
+
+    waveformWidget_->setZoomEnabled(
+        initialSettings.control
+            .instrument
+            .lineNumber >= 0);
+
+    waveformWidget_->setZoomFactor(
+        initialSettings.control
+            .instrument
+            .waveform
+            .zoom);
+
+    videoEngine_->setWaveformZoomFactor(
+        initialSettings.control
+            .instrument
+            .waveform
+            .zoom);
+
+    applyDisplayAspectRatio(
+        displayAspectRatio,
+        false);
+
+    // Control-panel wiring.
+    connect(
+        workspace_,
+        &ScopeWorkspace::lineNumberChanged,
+        this,
+        [this](int lineNumber)
+        {
+            settingsService_->update(
+                [lineNumber](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .lineNumber =
+                        lineNumber;
+                });
+
+            videoEngine_->setSelectedLine(
+                lineNumber);
+
+            waveformWidget_->setZoomEnabled(
+                lineNumber >= 0);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformZoomChanged,
+        this,
+        [this](int zoomFactor)
+        {
+            settingsService_->update(
+                [zoomFactor](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .zoom =
+                        zoomFactor;
+                });
+
+            waveformWidget_->setZoomFactor(
+                zoomFactor);
+
+            videoEngine_->setWaveformZoomFactor(
+                zoomFactor);
+        });
+
+    connect(
+        waveformWidget_,
+        &WaveformWidget::scrollPositionChanged,
+        this,
+        [this](double position)
+        {
+            settingsService_->update(
+                [position](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .scrollPosition =
+                        position;
+                });
+
+            videoEngine_->setWaveformScrollPosition(
+                position);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformPersistenceChanged,
+        this,
+        [this](int persistence)
+        {
+            settingsService_->update(
+                [persistence](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .persistenceFrames =
+                        persistence;
+                });
+
+            videoEngine_->setWaveformPersistence(
+                persistence);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformChromaFillIntensityChanged,
+        this,
+        [this](int intensity)
+        {
+            settingsService_->update(
+                [intensity](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .chromaRenderIntensity =
+                        intensity;
+                });
+
+            videoEngine_->setWaveformChromaFillIntensity(
+                intensity);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformColorChanged,
+        this,
+        [this](bool colorEnabled)
+        {
+            settingsService_->update(
+                [colorEnabled](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .vintageLook =
+                        !colorEnabled;
+                });
+
+            videoEngine_->setWaveformColor(
+                colorEnabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::noiseReductionChanged,
+        this,
+        [this](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .processing
+                        .noiseFilter
+                        .enabled =
+                        enabled;
+                });
+
+            videoEngine_->setNoiseReductionEnabled(
+                enabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::noiseReductionIntensityChanged,
+        this,
+        [this](int strength)
+        {
+            settingsService_->update(
+                [strength](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .processing
+                        .noiseFilter
+                        .strength =
+                        strength;
+                });
+
+            videoEngine_->setNoiseReductionIntensity(
+                strength);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::legacyAspectRatioChanged,
+        this,
+        [this](bool legacyEnabled)
+        {
+            const auto aspectRatio =
+                legacyEnabled
+                ? OpenScopeSettings::AspectRatio::Ratio4x3
+                : OpenScopeSettings::AspectRatio::Ratio16x9;
+
+            settingsService_->update(
+                [aspectRatio](OpenScopeSettings& settings)
+                {
+                    settings.local
+                        .display
+                        .aspectRatio =
+                        aspectRatio;
+                });
+
+            applyDisplayAspectRatio(
+                aspectRatio,
+                true);
+        });
+
+    performanceWidget_ =
+        new PerformanceWidget(this);
+
+    performanceWidget_->setWindowTitle(
+        "OpenScope Performance");
+
+    performanceWidget_->setWindowFlag(
+        Qt::Tool);
+
+    performanceWidget_->setFixedSize(
+        performanceWidget_->sizeHint());
+
+    performanceWidget_->setFixedSize(
+        performanceWidget_->size());
+
+    if (initialSettings.local
+        .floaties
+        .performance
+        .positionValid)
+    {
+        performanceWidget_->move(
+            initialSettings.local
+                .floaties
+                .performance
+                .x,
+            initialSettings.local
+                .floaties
+                .performance
+                .y);
+    }
+
+    connect(
+        performanceWidget_,
+        &PerformanceWidget::visibilityChanged,
+        this,
+        [this](bool visible)
+        {
+            workspace_->setPerformanceVisible(
+                visible);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::performanceVisibilityChanged,
+        performanceWidget_,
+        &PerformanceWidget::setVisible);
+
+    performanceWidget_->show();
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::workspaceViewChanged,
+        this,
+        [this](OpenScopeSettings::WorkspaceView view)
+        {
+            settingsService_->update(
+                [view](OpenScopeSettings& settings)
+                {
+                    settings.local.workspace.view =
+                        view;
+                });
+
+            switch (view)
+            {
+            case OpenScopeSettings::WorkspaceView::Video:
+                activeRenderView_ = RenderView::Video;
+                break;
+
+            case OpenScopeSettings::WorkspaceView::Waveform:
+                activeRenderView_ = RenderView::Waveform;
+                break;
+
+            case OpenScopeSettings::WorkspaceView::Vectorscope:
+                activeRenderView_ = RenderView::Vectorscope;
+                break;
+
+            case OpenScopeSettings::WorkspaceView::Matrix:
+            case OpenScopeSettings::WorkspaceView::Headless:
+            default:
+                activeRenderView_ = RenderView::Matrix;
+                break;
+            }
+
+            updateRenderResolutionTitle();
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::videoMaximizedChanged,
+        this,
+        [this](bool maximized)
+        {
+            updateVideoFullscreenUi(
+                maximized);
+        });
+
+    const OpenScopeSettings::WorkspaceView initialWorkspaceView =
+        initialSettings.local
+            .workspace
+            .view;
+
+    switch (initialWorkspaceView)
+    {
+    case OpenScopeSettings::WorkspaceView::Video:
+        activeRenderView_ = RenderView::Video;
+        break;
+    case OpenScopeSettings::WorkspaceView::Waveform:
+        activeRenderView_ = RenderView::Waveform;
+        break;
+    case OpenScopeSettings::WorkspaceView::Vectorscope:
+        activeRenderView_ = RenderView::Vectorscope;
+        break;
+    case OpenScopeSettings::WorkspaceView::Matrix:
+    case OpenScopeSettings::WorkspaceView::Headless:
+    default:
+        activeRenderView_ = RenderView::Matrix;
+        break;
+    }
+
+    workspace_->setWorkspaceView(
+        initialWorkspaceView);
+
+    if (windowSettings.maximized)
+    {
+        showMaximized();
+    }
+
+    performanceTimer_ =
+        new QTimer(this);
+
+    performanceTimer_->setInterval(50);
+
+    connect(
+        performanceTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            performanceWidget_->setPerformanceSnapshot(
+                videoEngine_->performanceSnapshot());
+        });
+
+    performanceTimer_->start();
+
     updateVideoFullscreenUi(
         workspace_->isVideoMaximized());
 
     updateRenderResolutionTitle();
 }
 
+double MainWindow::windowAspectRatio() const
+{
+    if (settingsService_ != nullptr &&
+        settingsService_->settings()
+            .local
+            .display
+            .aspectRatio ==
+        OpenScopeSettings::AspectRatio::Ratio4x3)
+    {
+        return
+            OpenScopeSettings::aspectRatioValue(
+                OpenScopeSettings::AspectRatio::Ratio4x3);
+    }
+
+    return
+        OpenScopeSettings::aspectRatioValue(
+            OpenScopeSettings::AspectRatio::Ratio16x9);
+}
+
+void MainWindow::applyDisplayAspectRatio(
+    OpenScopeSettings::AspectRatio aspectRatio,
+    bool resizeWindow)
+{
+    videoWidget_->setAspectRatio(
+        aspectRatio);
+
+    waveformWidget_->setAspectRatio(
+        aspectRatio);
+
+    vectorscopeWidget_->setAspectRatio(
+        aspectRatio);
+
+    videoEngine_->setWaveformAspectRatio(
+        aspectRatio);
+
+    if (workspace_ != nullptr)
+    {
+        workspace_->setAspectRatio(
+            aspectRatio);
+    }
+
+    if (!resizeWindow)
+    {
+        return;
+    }
+
+    const double aspect =
+        OpenScopeSettings::aspectRatioValue(
+            aspectRatio);
+
+    // If the OpenScope window is in our aspect-ratio-constrained
+    // custom maximized state, two geometries must be updated:
+    //
+    // 1. The saved normal geometry, otherwise restoring from
+    //    maximized uses the aspect ratio that was active before
+    //    the switch.
+    // 2. The currently maximized geometry itself. It must be fit
+    //    to the monitor work area using the new aspect ratio.
+    if (customMaximized_)
+    {
+        if (restoreWindowGeometry_.isValid())
+        {
+            const int restoredHeight =
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(
+                            restoreWindowGeometry_.width()) /
+                        aspect));
+
+            restoreWindowGeometry_.setHeight(
+                restoredHeight);
+        }
+
+        const HWND hwnd =
+            reinterpret_cast<HWND>(
+                winId());
+
+        const HMONITOR monitor =
+            MonitorFromWindow(
+                hwnd,
+                MONITOR_DEFAULTTONEAREST);
+
+        MONITORINFO monitorInfo{};
+        monitorInfo.cbSize =
+            sizeof(MONITORINFO);
+
+        if (GetMonitorInfo(
+            monitor,
+            &monitorInfo))
+        {
+            const RECT& workArea =
+                monitorInfo.rcWork;
+
+            const int availableWidth =
+                workArea.right -
+                workArea.left;
+
+            const int availableHeight =
+                workArea.bottom -
+                workArea.top;
+
+            int windowWidth =
+                availableWidth;
+
+            int windowHeight =
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(
+                            windowWidth) /
+                        aspect));
+
+            if (windowHeight > availableHeight)
+            {
+                windowHeight =
+                    availableHeight;
+
+                windowWidth =
+                    static_cast<int>(
+                        std::lround(
+                            static_cast<double>(
+                                windowHeight) *
+                            aspect));
+            }
+
+            const int x =
+                workArea.left +
+                (availableWidth -
+                    windowWidth) / 2;
+
+            const int y =
+                workArea.top +
+                (availableHeight -
+                    windowHeight) / 2;
+
+            SetWindowPos(
+                hwnd,
+                nullptr,
+                x,
+                y,
+                windowWidth,
+                windowHeight,
+                SWP_NOZORDER |
+                SWP_NOACTIVATE);
+
+            return;
+        }
+    }
+
+    const int newHeight =
+        static_cast<int>(
+            std::lround(
+                static_cast<double>(width()) /
+                aspect));
+
+    resize(
+        width(),
+        newHeight);
+}
+
 void MainWindow::updateVideoFullscreenUi(
     bool fullscreen)
 {
-    if (instrumentToolBar_ != nullptr)
-    {
-        instrumentToolBar_->setVisible(
-            !fullscreen);
-    }
-
     videoEngine_->setVideoHighlightEnabled(
         !fullscreen);
 }
@@ -771,7 +1021,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         windowWidth /
-                        kWindowAspectRatio));
+                        windowAspectRatio()));
 
             if (windowHeight > availableHeight)
             {
@@ -782,7 +1032,7 @@ bool MainWindow::nativeEvent(
                     static_cast<int>(
                         std::lround(
                             windowHeight *
-                            kWindowAspectRatio));
+                            windowAspectRatio()));
             }
 
             const int x =
@@ -859,7 +1109,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         width /
-                        kWindowAspectRatio));
+                        windowAspectRatio()));
 
             rect->bottom =
                 rect->top +
@@ -875,7 +1125,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         height *
-                        kWindowAspectRatio));
+                        windowAspectRatio()));
 
             rect->right =
                 rect->left +
@@ -893,7 +1143,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         width /
-                        kWindowAspectRatio));
+                        windowAspectRatio()));
 
             if (msg->wParam == WMSZ_TOPLEFT ||
                 msg->wParam == WMSZ_TOPRIGHT)
@@ -940,7 +1190,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         currentWidth /
-                        kWindowAspectRatio));
+                        windowAspectRatio()));
         }
 
         if (currentHeight > maxHeight)
@@ -952,7 +1202,7 @@ bool MainWindow::nativeEvent(
                 static_cast<int>(
                     std::lround(
                         currentHeight *
-                        kWindowAspectRatio));
+                        windowAspectRatio()));
         }
 
         switch (msg->wParam)
@@ -1004,8 +1254,30 @@ void MainWindow::closeEvent(
     const QRect geometry =
         normalGeometry();
 
+    const QPoint performancePosition =
+        performanceWidget_ != nullptr
+        ? performanceWidget_->pos()
+        : QPoint();
+
+    const bool performancePositionValid =
+        performanceWidget_ != nullptr;
+
+    const QPoint settingsPosition =
+        workspace_ != nullptr
+        ? workspace_->floatingSettingsPosition()
+        : QPoint();
+
+    const bool settingsPositionValid =
+        workspace_ != nullptr &&
+        workspace_->hasFloatingSettingsPosition();
+
     settingsService_->update(
-        [&geometry, this](OpenScopeSettings& settings)
+        [&geometry,
+         this,
+         performancePosition,
+         performancePositionValid,
+         settingsPosition,
+         settingsPositionValid](OpenScopeSettings& settings)
         {
             settings.local.window.x =
                 geometry.x();
@@ -1021,6 +1293,48 @@ void MainWindow::closeEvent(
 
             settings.local.window.maximized =
                 isMaximized();
+
+            if (performancePositionValid)
+            {
+                settings.local
+                    .floaties
+                    .performance
+                    .x =
+                    performancePosition.x();
+
+                settings.local
+                    .floaties
+                    .performance
+                    .y =
+                    performancePosition.y();
+
+                settings.local
+                    .floaties
+                    .performance
+                    .positionValid =
+                    true;
+            }
+
+            if (settingsPositionValid)
+            {
+                settings.local
+                    .floaties
+                    .settings
+                    .x =
+                    settingsPosition.x();
+
+                settings.local
+                    .floaties
+                    .settings
+                    .y =
+                    settingsPosition.y();
+
+                settings.local
+                    .floaties
+                    .settings
+                    .positionValid =
+                    true;
+            }
         });
 
     QMainWindow::closeEvent(event);

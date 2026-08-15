@@ -118,6 +118,8 @@ struct PerformanceSnapshot
     PerformanceMetricSnapshot field2Margin;
 
     PerformanceMetricSnapshot presentInterval;
+    PerformanceMetricSnapshot field1Present;
+    PerformanceMetricSnapshot field2Present;
 
     std::uint64_t field1DeadlineMisses = 0;
     std::uint64_t field2DeadlineMisses = 0;
@@ -151,6 +153,8 @@ struct PerformanceStats
     PerformanceMetric field2Margin;
 
     PerformanceMetric presentInterval;
+    PerformanceMetric field1Present;
+    PerformanceMetric field2Present;
 
     std::atomic<std::uint64_t> field1DeadlineMisses{ 0 };
     std::atomic<std::uint64_t> field2DeadlineMisses{ 0 };
@@ -185,6 +189,8 @@ struct PerformanceStats
             field2Margin.snapshot(),
 
             presentInterval.snapshot(),
+            field1Present.snapshot(),
+            field2Present.snapshot(),
 
             field1DeadlineMisses.load(
                 std::memory_order_relaxed),

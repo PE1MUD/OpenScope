@@ -1,5 +1,8 @@
 #pragma once
+
 #include "settings/OpenScopeSettings.h"
+
+#include <QPoint>
 #include <QWidget>
 
 class QGridLayout;
@@ -15,51 +18,75 @@ public:
         QWidget* videoWidget,
         QWidget* waveformWidget,
         QWidget* vectorscopeWidget,
-        bool vintageLook,
-        int chromaRenderIntensity,
+        const OpenScopeSettings& settings,
         QWidget* parent = nullptr);
+
     void setWorkspaceView(
         OpenScopeSettings::WorkspaceView view);
+
     void setPerformanceVisible(
         bool visible);
 
+    void setLineNumber(
+        int lineNumber);
+
+    void setWaveformZoomFactor(
+        int zoomFactor);
+
+    void setAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio);
+
     bool isVideoMaximized() const;
 
+    QPoint floatingSettingsPosition() const;
+    bool hasFloatingSettingsPosition() const;
+
 signals:
-    void waveformChromaFillIntensityChanged(
-        int intensity);
+    void lineNumberChanged(int lineNumber);
+    void waveformZoomChanged(int zoomFactor);
+    void waveformPersistenceChanged(int persistence);
+
+    void waveformChromaFillIntensityChanged(int intensity);
     void waveformColorChanged(bool enabled);
-signals:
+
     void workspaceViewChanged(
         OpenScopeSettings::WorkspaceView view);
-    void performanceVisibilityChanged(
-        bool visible);
 
-    void noiseReductionChanged(
-        bool enabled);
+    void performanceVisibilityChanged(bool visible);
 
-    void noiseReductionIntensityChanged(
-        int intensity);
+    void noiseReductionChanged(bool enabled);
+    void noiseReductionIntensityChanged(int intensity);
 
-    void videoMaximizedChanged(
-        bool maximized);
+    void legacyAspectRatioChanged(bool legacyEnabled);
+
+    void videoMaximizedChanged(bool maximized);
 
 private:
     void showGrid();
-    void showMaximized(
-        ScopeViewport* viewport);
+    void showMaximized(ScopeViewport* viewport);
+
+    void floatSettings();
+    void dockSettings();
+    void resizeFloatingSettings();
 
     QGridLayout* layout_ = nullptr;
 
     ScopeViewport* videoViewport_ = nullptr;
     ScopeViewport* waveformViewport_ = nullptr;
     ScopeViewport* vectorscopeViewport_ = nullptr;
-    ScopeViewport* yuvViewport_ = nullptr;
+    ScopeViewport* settingsViewport_ = nullptr;
 
     ScopeViewport* maximizedViewport_ = nullptr;
     ControlWidget* controlWidget_ = nullptr;
 
+    OpenScopeSettings::AspectRatio aspectRatio_ =
+        OpenScopeSettings::AspectRatio::Ratio16x9;
+
+    bool settingsFloating_ = false;
+
+    QPoint settingsFloatingPosition_;
+    bool settingsFloatingPositionValid_ = false;
+
 private slots:
-    void toggleMaximized(
-        ScopeViewport* viewport);
+    void toggleMaximized(ScopeViewport* viewport);
 };

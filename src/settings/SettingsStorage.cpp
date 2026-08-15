@@ -367,6 +367,42 @@ OpenScopeSettings SettingsStorage::load() const
             .toString(),
             result.local.workspace.view);
 
+    result.local.floaties.performance.x =
+        settings.value(
+            "Local/Floaties/Performance/X",
+            result.local.floaties.performance.x)
+        .toInt();
+
+    result.local.floaties.performance.y =
+        settings.value(
+            "Local/Floaties/Performance/Y",
+            result.local.floaties.performance.y)
+        .toInt();
+
+    result.local.floaties.performance.positionValid =
+        settings.value(
+            "Local/Floaties/Performance/PositionValid",
+            result.local.floaties.performance.positionValid)
+        .toBool();
+
+    result.local.floaties.settings.x =
+        settings.value(
+            "Local/Floaties/Settings/X",
+            result.local.floaties.settings.x)
+        .toInt();
+
+    result.local.floaties.settings.y =
+        settings.value(
+            "Local/Floaties/Settings/Y",
+            result.local.floaties.settings.y)
+        .toInt();
+
+    result.local.floaties.settings.positionValid =
+        settings.value(
+            "Local/Floaties/Settings/PositionValid",
+            result.local.floaties.settings.positionValid)
+        .toBool();
+
     return result;
 }
 
@@ -530,6 +566,30 @@ void SettingsStorage::save(
         "Local/Workspace/View",
         workspaceViewToString(
             settings.local.workspace.view));
+
+    storage.setValue(
+        "Local/Floaties/Performance/X",
+        settings.local.floaties.performance.x);
+
+    storage.setValue(
+        "Local/Floaties/Performance/Y",
+        settings.local.floaties.performance.y);
+
+    storage.setValue(
+        "Local/Floaties/Performance/PositionValid",
+        settings.local.floaties.performance.positionValid);
+
+    storage.setValue(
+        "Local/Floaties/Settings/X",
+        settings.local.floaties.settings.x);
+
+    storage.setValue(
+        "Local/Floaties/Settings/Y",
+        settings.local.floaties.settings.y);
+
+    storage.setValue(
+        "Local/Floaties/Settings/PositionValid",
+        settings.local.floaties.settings.positionValid);
 
     storage.sync();
 }
