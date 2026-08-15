@@ -266,6 +266,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(
         workspace_,
+        &ScopeWorkspace::noiseReductionChanged,
+        videoEngine_,
+        &VideoEngine::setNoiseReductionEnabled);
+
+    connect(
+        workspace_,
         &ScopeWorkspace::videoMaximizedChanged,
         this,
         [this](bool maximized)

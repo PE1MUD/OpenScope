@@ -102,7 +102,7 @@ ControlWidget::ControlWidget(
 
     layout->addWidget(
         intensityRow);
- 
+
     performanceCheckBox_ =
         new QCheckBox(
             "Show performance",
@@ -119,6 +119,23 @@ ControlWidget::ControlWidget(
 
     layout->addWidget(
         performanceCheckBox_);
+
+    auto* noiseReductionCheckBox =
+        new QCheckBox(
+            "Enable noise reduction",
+            this);
+
+    noiseReductionCheckBox->setChecked(
+        false);
+
+    connect(
+        noiseReductionCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::noiseReductionChanged);
+
+    layout->addWidget(
+        noiseReductionCheckBox);
 
     layout->addStretch();
 }

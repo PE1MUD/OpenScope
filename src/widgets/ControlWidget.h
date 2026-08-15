@@ -25,6 +25,9 @@ signals:
     void performanceVisibilityChanged(
         bool visible);
 
+    void noiseReductionChanged(
+        bool enabled);
+
 private:
     QCheckBox* performanceCheckBox_ = nullptr;
 };

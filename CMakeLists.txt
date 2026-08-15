@@ -106,6 +106,8 @@ src/processing/SignalReconstructor.cpp
 src/processing/SignalReconstructorAvx2.cpp
 src/processing/VideoDeinterlacer.cpp
 src/processing/VideoDeinterlacer.h
+src/processing/NoiseReducer.h
+src/processing/NoiseReducer.cpp
 
 src/rendering/WaveformRenderer.h
 src/rendering/WaveformRenderer.cpp
@@ -167,6 +169,12 @@ endif()
 
 set_source_files_properties(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/SignalReconstructorAvx2.cpp"
+    PROPERTIES
+    COMPILE_OPTIONS "/arch:AVX2"
+)
+
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/NoiseReducer.cpp"
     PROPERTIES
     COMPILE_OPTIONS "/arch:AVX2"
 )

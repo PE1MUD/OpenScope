@@ -255,6 +255,15 @@ void VideoEngine::setVideoHighlightEnabled(
 }
 
 
+void VideoEngine::setNoiseReductionEnabled(
+    bool enabled)
+{
+    noiseReductionEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+
 void VideoEngine::setWaveformPersistence(int persistence)
 {
     waveformPersistence_.store(
@@ -633,6 +642,39 @@ void VideoEngine::displayWorkerLoop()
                 static_cast<std::size_t>(
                     captureSlotIndex)];
 
+        QElapsedTimer totalDisplayTimer;
+        totalDisplayTimer.start();
+
+        const bool noiseReductionEnabled =
+            noiseReductionEnabled_.load(
+                std::memory_order_acquire);
+
+        const Yuv444Frame* displayFrame =
+            &captureSlot.frame;
+
+        QElapsedTimer noiseReductionTimer;
+        noiseReductionTimer.start();
+
+        if (noiseReductionEnabled)
+        {
+            noiseReducer_.process(
+                captureSlot.frame,
+                noiseReducedFrame_);
+
+            displayFrame =
+                &noiseReducedFrame_;
+        }
+
+        const std::uint64_t noiseReductionUs =
+            noiseReductionEnabled
+            ? static_cast<std::uint64_t>(
+                noiseReductionTimer.nsecsElapsed() /
+                1000)
+            : 0u;
+
+        performanceStats_.noiseReduction.update(
+            noiseReductionUs);
+
         const int outputWidth =
             videoOutputWidth_.load(
                 std::memory_order_acquire);
@@ -663,10 +705,10 @@ void VideoEngine::displayWorkerLoop()
         if (waveformZoomed)
         {
             const int visibleWidth =
-                captureSlot.frame.width / 10;
+                displayFrame->width / 10;
 
             const int maximumStart =
-                captureSlot.frame.width -
+                displayFrame->width -
                 visibleWidth;
 
             highlightStartX =
@@ -703,23 +745,20 @@ void VideoEngine::displayWorkerLoop()
             }
         }
 
-        QElapsedTimer totalDisplayTimer;
-        totalDisplayTimer.start();
-
         QElapsedTimer phaseTimer;
         phaseTimer.start();
 
         if (!videoDeinterlacer_.beginFrame(
-            captureSlot.frame.y.data(),
-            captureSlot.frame.width,
-            captureSlot.frame.height,
+            displayFrame->y.data(),
+            displayFrame->width,
+            displayFrame->height,
             progressiveLuma_))
         {
             continue;
         }
 
         displayPhaseFrame_ =
-            &captureSlot.frame;
+            displayFrame;
 
         displayPhaseLuma_ =
             nullptr;
@@ -757,7 +796,7 @@ void VideoEngine::displayWorkerLoop()
         firstDisplayImage.detach();
 
         displayPhaseFrame_ =
-            &captureSlot.frame;
+            displayFrame;
 
         displayPhaseLuma_ =
             progressiveLuma_.first.y.data();

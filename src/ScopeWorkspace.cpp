@@ -130,6 +130,12 @@ ScopeWorkspace::ScopeWorkspace(
         &ControlWidget::performanceVisibilityChanged,
         this,
         &ScopeWorkspace::performanceVisibilityChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::noiseReductionChanged,
+        this,
+        &ScopeWorkspace::noiseReductionChanged);
 }
 
 void ScopeWorkspace::toggleMaximized(

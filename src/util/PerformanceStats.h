@@ -100,6 +100,7 @@ struct PerformanceMetric
 struct PerformanceSnapshot
 {
     PerformanceMetricSnapshot reconstruct;
+    PerformanceMetricSnapshot noiseReduction;
 
     PerformanceMetricSnapshot deinterlace;
     PerformanceMetricSnapshot deinterlaceWorker0;
@@ -132,6 +133,7 @@ struct PerformanceSnapshot
 struct PerformanceStats
 {
     PerformanceMetric reconstruct;
+    PerformanceMetric noiseReduction;
 
     PerformanceMetric deinterlace;
     PerformanceMetric deinterlaceWorker0;
@@ -165,6 +167,7 @@ struct PerformanceStats
         return
         {
             reconstruct.snapshot(),
+            noiseReduction.snapshot(),
 
             deinterlace.snapshot(),
             deinterlaceWorker0.snapshot(),

@@ -17,6 +17,7 @@
 #include "analysis/VectorscopeAnalyzer.h"
 #include "processing/SignalReconstructor.h"
 #include "processing/VideoDeinterlacer.h"
+#include "processing/NoiseReducer.h"
 #include "rendering/WaveformRenderer.h"
 #include "util/PerformanceStats.h"
 #include "video/DisplayConverter.h"
@@ -46,6 +47,9 @@ public:
         double gamma);
 
     void setVideoHighlightEnabled(
+        bool enabled);
+
+    void setNoiseReductionEnabled(
         bool enabled);
 
     void setWaveformOutputSize(
@@ -154,6 +158,10 @@ private:
 
     std::atomic<bool> videoHighlightEnabled_{
         true
+    };
+
+    std::atomic<bool> noiseReductionEnabled_{
+        false
     };
 
     // Output sizes
@@ -271,6 +279,9 @@ private:
         2> displayConverters_;
     WaveformRenderer waveformRenderer_;
     VectorscopeAnalyzer vectorscopeAnalyzer_;
+
+    NoiseReducer noiseReducer_;
+    Yuv444Frame noiseReducedFrame_;
 
     VideoDeinterlacer videoDeinterlacer_;
     ProgressiveLumaPair progressiveLuma_;

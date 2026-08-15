@@ -35,6 +35,9 @@ signals:
     void performanceVisibilityChanged(
         bool visible);
 
+    void noiseReductionChanged(
+        bool enabled);
+
     void videoMaximizedChanged(
         bool maximized);
 

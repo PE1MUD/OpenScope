@@ -21,6 +21,7 @@ auto makeBars(
 {
     return std::array
     {
+        Bar{ "Noise reduction", &snapshot.noiseReduction },
         Bar{ "Deinterlace total", &snapshot.deinterlace },
         Bar{ "Deint worker 0", &snapshot.deinterlaceWorker0 },
         Bar{ "Deint worker 1", &snapshot.deinterlaceWorker1 },
