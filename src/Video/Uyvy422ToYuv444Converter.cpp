@@ -1,7 +1,7 @@
 #include "Uyvy422ToYuv444Converter.h"
 
 #include <cstddef>
-
+#include <cstdlib>
 
 bool Uyvy422ToYuv444Converter::convert(
     const std::uint8_t* source,

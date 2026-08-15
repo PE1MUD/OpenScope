@@ -455,6 +455,9 @@ void VideoEngine::displayWorkerLoop()
         displayConverter_.setHighlightedLine(
             selectedLine);
 
+        QElapsedTimer totalDisplayTimer;
+        totalDisplayTimer.start();
+
         QElapsedTimer deinterlaceTimer;
         deinterlaceTimer.start();
 
@@ -469,8 +472,8 @@ void VideoEngine::displayWorkerLoop()
                 deinterlaceTimer.nsecsElapsed() /
                 1000));
 
-        QElapsedTimer displayTimer;
-        displayTimer.start();
+        QElapsedTimer fieldTimer;
+        fieldTimer.start();
 
         DisplayPerformance displayPerformance;
 
@@ -482,6 +485,13 @@ void VideoEngine::displayWorkerLoop()
                 outputHeight,
                 displayPerformance);
 
+        performanceStats_.displayFirst.update(
+            static_cast<std::uint64_t>(
+                fieldTimer.nsecsElapsed() /
+                1000));
+
+        fieldTimer.restart();
+
         DisplayPerformance secondDisplayPerformance;
 
         const QImage secondDisplayImage =
@@ -491,6 +501,11 @@ void VideoEngine::displayWorkerLoop()
                 outputWidth,
                 outputHeight,
                 secondDisplayPerformance);
+
+        performanceStats_.displaySecond.update(
+            static_cast<std::uint64_t>(
+                fieldTimer.nsecsElapsed() /
+                1000));
 
         {
             std::lock_guard<std::mutex> lock(
@@ -512,27 +527,54 @@ void VideoEngine::displayWorkerLoop()
         }
 
         performanceStats_.displayAllocation.update(
-            displayPerformance.allocationUs);
+            displayPerformance.allocationUs +
+            secondDisplayPerformance.allocationUs);
 
         performanceStats_.displaySetup.update(
-            displayPerformance.setupUs);
+            displayPerformance.setupUs +
+            secondDisplayPerformance.setupUs);
 
         performanceStats_.displayCompose.update(
-            displayPerformance.composeUs);
+            displayPerformance.composeUs +
+            secondDisplayPerformance.composeUs);
 
         performanceStats_.displayInterpolation.update(
-            displayPerformance.interpolationUs);
+            displayPerformance.interpolationUs +
+            secondDisplayPerformance.interpolationUs);
 
         performanceStats_.displayColorConversion.update(
-            displayPerformance.colorConversionUs);
+            displayPerformance.colorConversionUs +
+            secondDisplayPerformance.colorConversionUs);
 
         performanceStats_.displayOutput.update(
-            displayPerformance.outputUs);
+            displayPerformance.outputUs +
+            secondDisplayPerformance.outputUs);
 
-        performanceStats_.displayFirst.update(
+        const std::uint64_t displayTotalUs =
             static_cast<std::uint64_t>(
-                displayTimer.nsecsElapsed() /
-                1000));
+                totalDisplayTimer.nsecsElapsed() /
+                1000);
+
+        performanceStats_.displayTotal.update(
+            displayTotalUs);
+
+        constexpr std::uint64_t kRxFrameBudgetUs =
+            40000u;
+
+        const std::uint64_t rxMarginUs =
+            displayTotalUs < kRxFrameBudgetUs
+            ? kRxFrameBudgetUs - displayTotalUs
+            : 0u;
+
+        performanceStats_.rxMargin.update(
+            rxMarginUs);
+
+        if (displayTotalUs > kRxFrameBudgetUs)
+        {
+            performanceStats_.displayDeadlineMisses.fetch_add(
+                1u,
+                std::memory_order_relaxed);
+        }
 
         const bool captureValid =
             isCaptureSlotValid(

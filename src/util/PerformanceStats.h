@@ -105,6 +105,9 @@ struct PerformanceSnapshot
     PerformanceMetricSnapshot vectorscope;
     PerformanceMetricSnapshot displayFirst;
     PerformanceMetricSnapshot displaySecond;
+    PerformanceMetricSnapshot displayTotal;
+    PerformanceMetricSnapshot rxMargin;
+    std::uint64_t displayDeadlineMisses = 0;
     PerformanceMetricSnapshot displayAllocation;
     PerformanceMetricSnapshot displaySetup;
     PerformanceMetricSnapshot displayCompose;
@@ -121,6 +124,9 @@ struct PerformanceStats
     PerformanceMetric vectorscope;
     PerformanceMetric displayFirst;
     PerformanceMetric displaySecond;
+    PerformanceMetric displayTotal;
+    PerformanceMetric rxMargin;
+    std::atomic<std::uint64_t> displayDeadlineMisses{ 0 };
     PerformanceMetric displayAllocation;
     PerformanceMetric displaySetup;
     PerformanceMetric displayCompose;
@@ -138,6 +144,9 @@ struct PerformanceStats
             vectorscope.snapshot(),
             displayFirst.snapshot(),
             displaySecond.snapshot(),
+            displayTotal.snapshot(),
+            rxMargin.snapshot(),
+            displayDeadlineMisses.load(std::memory_order_relaxed),
             displayAllocation.snapshot(),
             displaySetup.snapshot(),
             displayCompose.snapshot(),

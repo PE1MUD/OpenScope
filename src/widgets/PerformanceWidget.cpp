@@ -21,15 +21,16 @@ auto makeBars(
 {
     return std::array
     {
-        Bar{ "Luma Upsampling", &snapshot.reconstruct },
         Bar{ "Deinterlace", &snapshot.deinterlace },
+        Bar{ "Field 1 convert", &snapshot.displayFirst },
+        Bar{ "Field 2 convert", &snapshot.displaySecond },
+        Bar{ "Display total", &snapshot.displayTotal },
+        Bar{ "RX margin", &snapshot.rxMargin },
         Bar{ "Waveform", &snapshot.waveform },
         Bar{ "Vectorscope", &snapshot.vectorscope },
-        Bar{ "Display 1", &snapshot.displayFirst },
         Bar{ "Display allocation", &snapshot.displayAllocation },
         Bar{ "Display setup", &snapshot.displaySetup },
         Bar{ "Display compose", &snapshot.displayCompose },
-        Bar{ "Display 2", &snapshot.displaySecond },
         Bar{ "Display interpolation", &snapshot.displayInterpolation },
         Bar{ "Display YUV-RGB", &snapshot.displayColorConversion },
         Bar{ "Display output", &snapshot.displayOutput },
@@ -61,7 +62,7 @@ void PerformanceWidget::paintEvent(
         Qt::black);
 
     constexpr double maximumUs =
-        120000.0;
+        60000.0;
 
     constexpr int barHeight =
         18;
@@ -127,7 +128,7 @@ void PerformanceWidget::paintEvent(
             40,
             barHeight),
         Qt::AlignCenter,
-        "40");
+        "20");
 
     painter.drawText(
         QRect(
@@ -138,7 +139,7 @@ void PerformanceWidget::paintEvent(
             40,
             barHeight),
         Qt::AlignCenter,
-        "80");
+        "40");
 
     painter.drawText(
         QRect(
@@ -150,7 +151,7 @@ void PerformanceWidget::paintEvent(
             barHeight),
         Qt::AlignRight |
         Qt::AlignVCenter,
-        "120 ms");
+        "60 ms");
 
     y +=
         barHeight +
@@ -179,10 +180,10 @@ void PerformanceWidget::paintEvent(
             barHeight);
 
         const int greenWidth =
-            barRect.width() / 3;
+            (barRect.width() * 2) / 3;
 
         const int yellowWidth =
-            barRect.width() / 3;
+            barRect.width() / 6;
 
         painter.fillRect(
             QRect(
@@ -243,6 +244,22 @@ void PerformanceWidget::paintEvent(
             barHeight +
             spacing;
     }
+
+    painter.setPen(
+        Qt::lightGray);
+
+    painter.drawText(
+        QRect(
+            margin,
+            y,
+            width() - margin * 2,
+            barHeight),
+        Qt::AlignLeft |
+        Qt::AlignVCenter,
+        QString(
+            "Deadline misses: %1")
+        .arg(
+            snapshot_.displayDeadlineMisses));
 }
 
 void PerformanceWidget::mouseMoveEvent(
@@ -333,6 +350,8 @@ QSize PerformanceWidget::sizeHint() const
         scaleHeight +
         barCount * barHeight +
         (barCount - 1) * spacing +
+        barHeight +
+        spacing +
         margin;
 
     return QSize(
