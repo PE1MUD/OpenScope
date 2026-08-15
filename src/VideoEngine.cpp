@@ -5,7 +5,14 @@
 #include <QElapsedTimer>
 #include <algorithm>
 #include <thread>
-#include <QTimer>
+#include <chrono>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <avrt.h>
+
+#pragma comment(lib, "Avrt.lib")
 
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
@@ -13,14 +20,31 @@ VideoEngine::VideoEngine(QObject* parent)
     vectorscopeAnalyzer_.setScale(
         VectorscopeSettings::scale);
 
-    displayConverter_.setImplementation(
-        DisplayConversionImplementation::Avx2);
+    for (DisplayConverter& converter :
+        displayConverters_)
+    {
+        converter.setImplementation(
+            DisplayConversionImplementation::Avx2);
+    }
 
     for (CapturedFrameSlot& slot : captureSlots_)
     {
         slot.frame.resize(
             kCaptureWidth,
             kCaptureHeight);
+    }
+
+    for (std::size_t workerIndex = 0;
+        workerIndex < displayPhaseWorkers_.size();
+        ++workerIndex)
+    {
+        displayPhaseWorkers_[workerIndex] =
+            std::jthread(
+                [this, workerIndex]()
+                {
+                    displayPhaseWorkerLoop(
+                        workerIndex);
+                });
     }
 
     vectorscopeAnalyzer_.moveToThread(
@@ -62,72 +86,32 @@ VideoEngine::VideoEngine(QObject* parent)
 
     displayThread_.start();
 
-    displayPresenterTimer_ =
-        new QTimer(this);
-
-    displayPresenterTimer_->setTimerType(
-        Qt::PreciseTimer);
-
-    displayPresenterTimer_->setInterval(
-        20);
-
-    connect(
-        displayPresenterTimer_,
-        &QTimer::timeout,
-        this,
-        [this]()
-        {
-            QImage imageToPresent;
-
+    displayPresenterThread_ =
+        std::thread(
+            [this]()
             {
-                std::lock_guard<std::mutex> lock(
-                    displayPresenterMutex_);
-
-                if (!displayPairReady_.load(
-                    std::memory_order_acquire))
-                {
-                    return;
-                }
-
-                const int fieldIndex =
-                    displayFieldIndex_.load(
-                        std::memory_order_acquire);
-
-                if (fieldIndex == 0)
-                {
-                    imageToPresent =
-                        pendingDisplayFirst_;
-
-                    displayFieldIndex_.store(
-                        1,
-                        std::memory_order_release);
-                }
-                else
-                {
-                    imageToPresent =
-                        pendingDisplaySecond_;
-
-                    displayFieldIndex_.store(
-                        0,
-                        std::memory_order_release);
-
-                    displayPairReady_.store(
-                        false,
-                        std::memory_order_release);
-                }
-            }
-
-            emit frameChanged(
-                imageToPresent);
-        });
-
-    displayPresenterTimer_->start();
+                displayPresenterLoop();
+            });
 
 }
 
 
 VideoEngine::~VideoEngine()
 {
+    {
+        std::lock_guard<std::mutex> lock(
+            displayPresenterMutex_);
+
+        displayPresenterStop_ = true;
+    }
+
+    displayPresenterCondition_.notify_one();
+
+    if (displayPresenterThread_.joinable())
+    {
+        displayPresenterThread_.join();
+    }
+
     {
         std::lock_guard<std::mutex> lock(
             displayMutex_);
@@ -139,6 +123,15 @@ VideoEngine::~VideoEngine()
 
     displayThread_.quit();
     displayThread_.wait();
+
+    {
+        std::lock_guard<std::mutex> lock(
+            displayPhaseMutex_);
+
+        displayPhaseStop_ = true;
+    }
+
+    displayPhaseCondition_.notify_all();
 
     {
         std::lock_guard<std::mutex> lock(
@@ -188,6 +181,9 @@ Yuv444Frame* VideoEngine::tryAcquireWriteFrame()
 
 void VideoEngine::submitWriteFrame()
 {
+    const auto captureTickTime =
+        std::chrono::steady_clock::now();
+
     const std::size_t slotIndex =
         activeCaptureWriteSlot_;
 
@@ -210,6 +206,19 @@ void VideoEngine::submitWriteFrame()
     latestCaptureSlot_.store(
         static_cast<int>(slotIndex),
         std::memory_order_release);
+
+    {
+        std::lock_guard<std::mutex> lock(
+            displayPresenterMutex_);
+
+        latestCaptureTickGeneration_ =
+            generation;
+
+        latestCaptureTickTime_ =
+            captureTickTime;
+    }
+
+    displayPresenterCondition_.notify_one();
 
     displayCondition_.notify_one();
     vectorscopeCondition_.notify_one();
@@ -250,11 +259,11 @@ void VideoEngine::setWaveformOutputSize(
     int height)
 {
     waveformOutputWidth_.store(
-        std::max(width, kMinimumOutputSize),
+        (std::max)(width, kMinimumOutputSize),
         std::memory_order_release);
 
     waveformOutputHeight_.store(
-        std::max(height, kMinimumOutputSize),
+        (std::max)(height, kMinimumOutputSize),
         std::memory_order_release);
 }
 
@@ -264,11 +273,11 @@ void VideoEngine::setVectorscopeOutputSize(
     int height)
 {
     vectorscopeOutputWidth_.store(
-        std::max(width, kMinimumOutputSize),
+        (std::max)(width, kMinimumOutputSize),
         std::memory_order_release);
 
     vectorscopeOutputHeight_.store(
-        std::max(height, kMinimumOutputSize),
+        (std::max)(height, kMinimumOutputSize),
         std::memory_order_release);
 }
 
@@ -278,11 +287,11 @@ void VideoEngine::setVideoOutputSize(
     int height)
 {
     videoOutputWidth_.store(
-        std::max(width, kMinimumOutputSize),
+        (std::max)(width, kMinimumOutputSize),
         std::memory_order_release);
 
     videoOutputHeight_.store(
-        std::max(height, kMinimumOutputSize),
+        (std::max)(height, kMinimumOutputSize),
         std::memory_order_release);
 }
 
@@ -308,6 +317,217 @@ void VideoEngine::setWaveformScrollPosition(
 
     waveformRenderer_.setScrollPosition(
         position);
+}
+
+void VideoEngine::displayPhaseWorkerLoop(
+    std::size_t workerIndex)
+{
+    std::uint64_t lastPhaseGeneration = 0;
+
+    for (;;)
+    {
+        DisplayPhase phase =
+            DisplayPhase::Idle;
+
+        const Yuv444Frame* frame =
+            nullptr;
+
+        const std::uint16_t* luma =
+            nullptr;
+
+        QRgb* outputPixels =
+            nullptr;
+
+        int outputStridePixels = 0;
+        int outputWidth = 0;
+        int outputHeight = 0;
+
+        {
+            std::unique_lock<std::mutex> lock(
+                displayPhaseMutex_);
+
+            displayPhaseCondition_.wait(
+                lock,
+                [this, lastPhaseGeneration]()
+                {
+                    return
+                        displayPhaseStop_ ||
+                        displayPhaseGeneration_ !=
+                        lastPhaseGeneration;
+                });
+
+            if (displayPhaseStop_)
+            {
+                return;
+            }
+
+            lastPhaseGeneration =
+                displayPhaseGeneration_;
+
+            phase =
+                displayPhase_;
+
+            frame =
+                displayPhaseFrame_;
+
+            luma =
+                displayPhaseLuma_;
+
+            outputPixels =
+                displayPhaseOutputPixels_;
+
+            outputStridePixels =
+                displayPhaseOutputStridePixels_;
+
+            outputWidth =
+                displayPhaseOutputWidth_;
+
+            outputHeight =
+                displayPhaseOutputHeight_;
+        }
+
+        if (phase ==
+            DisplayPhase::Deinterlace)
+        {
+            QElapsedTimer workerTimer;
+            workerTimer.start();
+
+            const int height =
+                frame != nullptr
+                ? frame->height
+                : 0;
+
+            for (;;)
+            {
+                const int firstLine =
+                    displayDeinterlaceNextLine_.fetch_add(
+                        kDeinterlaceChunkLines,
+                        std::memory_order_relaxed);
+
+                if (firstLine >= height)
+                {
+                    break;
+                }
+
+                const int lastLine =
+                    std::min(
+                        firstLine +
+                        kDeinterlaceChunkLines,
+                        height);
+
+                videoDeinterlacer_.processRange(
+                    firstLine,
+                    lastLine);
+            }
+
+            displayDeinterlaceWorkerUs_[
+                workerIndex].store(
+                    static_cast<std::uint64_t>(
+                        workerTimer.nsecsElapsed() /
+                        1000),
+                    std::memory_order_relaxed);
+        }
+        else if (
+            phase ==
+            DisplayPhase::ConvertFirst ||
+            phase ==
+            DisplayPhase::ConvertSecond)
+        {
+            const int firstOutputY =
+                static_cast<int>(
+                    workerIndex) *
+                outputHeight /
+                static_cast<int>(
+                    displayPhaseWorkers_.size());
+
+            const int lastOutputY =
+                static_cast<int>(
+                    workerIndex + 1) *
+                outputHeight /
+                static_cast<int>(
+                    displayPhaseWorkers_.size());
+
+            displayConverters_[workerIndex].
+                convertRange(
+                    *frame,
+                    luma,
+                    outputPixels,
+                    outputStridePixels,
+                    outputWidth,
+                    outputHeight,
+                    firstOutputY,
+                    lastOutputY,
+                    displayPhasePerformance_[
+                        workerIndex]);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(
+                displayPhaseMutex_);
+
+            if (displayPhaseWorkersRemaining_ > 0)
+            {
+                --displayPhaseWorkersRemaining_;
+            }
+        }
+
+        displayPhaseDoneCondition_.
+            notify_one();
+    }
+}
+
+void VideoEngine::runDisplayPhase(
+    DisplayPhase phase)
+{
+    {
+        std::lock_guard<std::mutex> lock(
+            displayPhaseMutex_);
+
+        displayPhase_ =
+            phase;
+
+        if (phase ==
+            DisplayPhase::Deinterlace)
+        {
+            displayDeinterlaceNextLine_.store(
+                0,
+                std::memory_order_relaxed);
+
+            for (auto& workerUs :
+                displayDeinterlaceWorkerUs_)
+            {
+                workerUs.store(
+                    0,
+                    std::memory_order_relaxed);
+            }
+        }
+
+        displayPhaseWorkersRemaining_ =
+            displayPhaseWorkers_.size();
+
+        for (DisplayPerformance& performance :
+            displayPhasePerformance_)
+        {
+            performance = {};
+        }
+
+        ++displayPhaseGeneration_;
+    }
+
+    displayPhaseCondition_.notify_all();
+
+    std::unique_lock<std::mutex> lock(
+        displayPhaseMutex_);
+
+    displayPhaseDoneCondition_.wait(
+        lock,
+        [this]()
+        {
+            return
+                displayPhaseWorkersRemaining_ ==
+                0 ||
+                displayPhaseStop_;
+        });
 }
 
 void VideoEngine::displayWorkerLoop()
@@ -336,7 +556,8 @@ void VideoEngine::displayWorkerLoop()
                         latestCaptureSlot_.load(
                             std::memory_order_acquire);
 
-                    if (latestSlot == kInvalidSlotIndex)
+                    if (latestSlot ==
+                        kInvalidSlotIndex)
                     {
                         return false;
                     }
@@ -346,7 +567,8 @@ void VideoEngine::displayWorkerLoop()
                             static_cast<std::size_t>(
                                 latestSlot)];
 
-                    const std::uint64_t latestGeneration =
+                    const std::uint64_t
+                        latestGeneration =
                         slot.generation.load(
                             std::memory_order_acquire);
 
@@ -371,14 +593,16 @@ void VideoEngine::displayWorkerLoop()
                 .generation.load(
                     std::memory_order_acquire);
 
-            const std::uint64_t previousGeneration =
+            const std::uint64_t
+                previousGeneration =
                 displayLastGeneration_;
 
             displayLastGeneration_ =
                 generation;
 
             if (previousGeneration != 0 &&
-                generation > previousGeneration + 1)
+                generation >
+                previousGeneration + 1)
             {
                 qDebug()
                     << "Display skipped"
@@ -389,7 +613,8 @@ void VideoEngine::displayWorkerLoop()
             }
         }
 
-        if (captureSlotIndex == kInvalidSlotIndex)
+        if (captureSlotIndex ==
+            kInvalidSlotIndex)
         {
             continue;
         }
@@ -419,6 +644,9 @@ void VideoEngine::displayWorkerLoop()
             waveformScrollPosition_.load(
                 std::memory_order_acquire);
 
+        int highlightStartX = 0;
+        int highlightEndX = -1;
+
         if (waveformZoomed)
         {
             const int visibleWidth =
@@ -428,152 +656,349 @@ void VideoEngine::displayWorkerLoop()
                 captureSlot.frame.width -
                 visibleWidth;
 
-            const int startX =
+            highlightStartX =
                 static_cast<int>(
                     waveformScrollPosition *
                     static_cast<double>(
                         maximumStart));
 
-            const int endX =
-                startX +
+            highlightEndX =
+                highlightStartX +
                 visibleWidth;
-
-            displayConverter_.setHighlightedRange(
-                startX,
-                endX);
         }
-        else
+
+        for (DisplayConverter& converter :
+            displayConverters_)
         {
-            displayConverter_.setHighlightedRange(
-                0,
-                -1);
+            converter.setHighlightedRange(
+                highlightStartX,
+                highlightEndX);
+
+            converter.setHighlightedLine(
+                selectedLine);
         }
-
-        displayConverter_.setHighlightedLine(
-            selectedLine);
-
-        displayConverter_.setHighlightedLine(
-            selectedLine);
 
         QElapsedTimer totalDisplayTimer;
         totalDisplayTimer.start();
 
-        QElapsedTimer deinterlaceTimer;
-        deinterlaceTimer.start();
+        QElapsedTimer phaseTimer;
+        phaseTimer.start();
 
-        videoDeinterlacer_.deinterlace(
+        if (!videoDeinterlacer_.beginFrame(
             captureSlot.frame.y.data(),
             captureSlot.frame.width,
             captureSlot.frame.height,
-            progressiveLuma_);
+            progressiveLuma_))
+        {
+            continue;
+        }
+
+        displayPhaseFrame_ =
+            &captureSlot.frame;
+
+        displayPhaseLuma_ =
+            nullptr;
+
+        displayPhaseOutputPixels_ =
+            nullptr;
+
+        displayPhaseOutputStridePixels_ = 0;
+        displayPhaseOutputWidth_ = 0;
+        displayPhaseOutputHeight_ = 0;
+
+        runDisplayPhase(
+            DisplayPhase::Deinterlace);
+
+        videoDeinterlacer_.endFrame();
 
         performanceStats_.deinterlace.update(
             static_cast<std::uint64_t>(
-                deinterlaceTimer.nsecsElapsed() /
+                phaseTimer.nsecsElapsed() /
                 1000));
 
-        QElapsedTimer fieldTimer;
-        fieldTimer.start();
+        performanceStats_.deinterlaceWorker0.update(
+            displayDeinterlaceWorkerUs_[0].load(
+                std::memory_order_relaxed));
 
-        DisplayPerformance displayPerformance;
+        performanceStats_.deinterlaceWorker1.update(
+            displayDeinterlaceWorkerUs_[1].load(
+                std::memory_order_relaxed));
 
-        const QImage firstDisplayImage =
-            displayConverter_.convert(
-                captureSlot.frame,
-                progressiveLuma_.first.y.data(),
-                outputWidth,
-                outputHeight,
-                displayPerformance);
+        QImage firstDisplayImage(
+            outputWidth,
+            outputHeight,
+            QImage::Format_RGB32);
+
+        firstDisplayImage.detach();
+
+        displayPhaseFrame_ =
+            &captureSlot.frame;
+
+        displayPhaseLuma_ =
+            progressiveLuma_.first.y.data();
+
+        displayPhaseOutputPixels_ =
+            reinterpret_cast<QRgb*>(
+                firstDisplayImage.bits());
+
+        displayPhaseOutputStridePixels_ =
+            firstDisplayImage.bytesPerLine() /
+            static_cast<int>(
+                sizeof(QRgb));
+
+        displayPhaseOutputWidth_ =
+            outputWidth;
+
+        displayPhaseOutputHeight_ =
+            outputHeight;
+
+        phaseTimer.restart();
+
+        runDisplayPhase(
+            DisplayPhase::ConvertFirst);
+
+        const std::uint64_t
+            firstConvertUs =
+            static_cast<std::uint64_t>(
+                phaseTimer.nsecsElapsed() /
+                1000);
 
         performanceStats_.displayFirst.update(
+            firstConvertUs);
+
+        const std::uint64_t
+            firstReadyUs =
             static_cast<std::uint64_t>(
-                fieldTimer.nsecsElapsed() /
-                1000));
-
-        fieldTimer.restart();
-
-        DisplayPerformance secondDisplayPerformance;
-
-        const QImage secondDisplayImage =
-            displayConverter_.convert(
-                captureSlot.frame,
-                progressiveLuma_.second.y.data(),
-                outputWidth,
-                outputHeight,
-                secondDisplayPerformance);
-
-        performanceStats_.displaySecond.update(
-            static_cast<std::uint64_t>(
-                fieldTimer.nsecsElapsed() /
-                1000));
+                totalDisplayTimer.nsecsElapsed() /
+                1000);
 
         {
             std::lock_guard<std::mutex> lock(
                 displayPresenterMutex_);
 
-            pendingDisplayFirst_ =
+            DisplayFrameSlot& slot =
+                displayFrameSlots_[
+                    static_cast<std::size_t>(
+                        generation %
+                        kFrameSlotCount)];
+
+            slot.first =
                 firstDisplayImage;
 
-            pendingDisplaySecond_ =
-                secondDisplayImage;
+            slot.second =
+                QImage{};
 
-            displayFieldIndex_.store(
-                0,
-                std::memory_order_release);
+            slot.generation =
+                generation;
 
-            displayPairReady_.store(
-                true,
-                std::memory_order_release);
+            slot.firstReady =
+                true;
+
+            slot.secondReady =
+                false;
         }
 
-        performanceStats_.displayAllocation.update(
-            displayPerformance.allocationUs +
-            secondDisplayPerformance.allocationUs);
+        displayPresenterCondition_.
+            notify_one();
 
-        performanceStats_.displaySetup.update(
-            displayPerformance.setupUs +
-            secondDisplayPerformance.setupUs);
+        const auto firstPerformance =
+            displayPhasePerformance_;
 
-        performanceStats_.displayCompose.update(
-            displayPerformance.composeUs +
-            secondDisplayPerformance.composeUs);
+        QImage secondDisplayImage(
+            outputWidth,
+            outputHeight,
+            QImage::Format_RGB32);
 
-        performanceStats_.displayInterpolation.update(
-            displayPerformance.interpolationUs +
-            secondDisplayPerformance.interpolationUs);
+        secondDisplayImage.detach();
 
-        performanceStats_.displayColorConversion.update(
-            displayPerformance.colorConversionUs +
-            secondDisplayPerformance.colorConversionUs);
+        displayPhaseLuma_ =
+            progressiveLuma_.second.y.data();
 
-        performanceStats_.displayOutput.update(
-            displayPerformance.outputUs +
-            secondDisplayPerformance.outputUs);
+        displayPhaseOutputPixels_ =
+            reinterpret_cast<QRgb*>(
+                secondDisplayImage.bits());
 
-        const std::uint64_t displayTotalUs =
+        displayPhaseOutputStridePixels_ =
+            secondDisplayImage.bytesPerLine() /
+            static_cast<int>(
+                sizeof(QRgb));
+
+        phaseTimer.restart();
+
+        runDisplayPhase(
+            DisplayPhase::ConvertSecond);
+
+        const std::uint64_t
+            secondConvertUs =
+            static_cast<std::uint64_t>(
+                phaseTimer.nsecsElapsed() /
+                1000);
+
+        performanceStats_.displaySecond.update(
+            secondConvertUs);
+
+        const std::uint64_t
+            secondReadyUs =
             static_cast<std::uint64_t>(
                 totalDisplayTimer.nsecsElapsed() /
                 1000);
 
-        performanceStats_.displayTotal.update(
-            displayTotalUs);
+        {
+            std::lock_guard<std::mutex> lock(
+                displayPresenterMutex_);
 
-        constexpr std::uint64_t kRxFrameBudgetUs =
+            DisplayFrameSlot& slot =
+                displayFrameSlots_[
+                    static_cast<std::size_t>(
+                        generation %
+                        kFrameSlotCount)];
+
+            if (slot.generation ==
+                generation)
+            {
+                slot.second =
+                    secondDisplayImage;
+
+                slot.secondReady =
+                    true;
+            }
+        }
+
+        displayPresenterCondition_.
+            notify_one();
+
+        const auto secondPerformance =
+            displayPhasePerformance_;
+
+        std::uint64_t allocationUs = 0;
+        std::uint64_t setupUs = 0;
+        std::uint64_t composeUs = 0;
+        std::uint64_t interpolationUs = 0;
+        std::uint64_t colorConversionUs = 0;
+        std::uint64_t outputUs = 0;
+
+        for (std::size_t workerIndex = 0;
+            workerIndex <
+            displayPhaseWorkers_.size();
+            ++workerIndex)
+        {
+            allocationUs +=
+                firstPerformance[
+                    workerIndex].
+                allocationUs +
+                        secondPerformance[
+                            workerIndex].
+                        allocationUs;
+
+                            setupUs +=
+                                firstPerformance[
+                                    workerIndex].
+                                setupUs +
+                                        secondPerformance[
+                                            workerIndex].
+                                        setupUs;
+
+                                            composeUs +=
+                                                firstPerformance[
+                                                    workerIndex].
+                                                composeUs +
+                                                        secondPerformance[
+                                                            workerIndex].
+                                                        composeUs;
+
+                                                            interpolationUs +=
+                                                                firstPerformance[
+                                                                    workerIndex].
+                                                                interpolationUs +
+                                                                        secondPerformance[
+                                                                            workerIndex].
+                                                                        interpolationUs;
+
+                                                                            colorConversionUs +=
+                                                                                firstPerformance[
+                                                                                    workerIndex].
+                                                                                colorConversionUs +
+                                                                                        secondPerformance[
+                                                                                            workerIndex].
+                                                                                        colorConversionUs;
+
+                                                                                            outputUs +=
+                                                                                                firstPerformance[
+                                                                                                    workerIndex].
+                                                                                                outputUs +
+                                                                                                        secondPerformance[
+                                                                                                            workerIndex].
+                                                                                                        outputUs;
+        }
+
+        performanceStats_.displayAllocation.update(
+            allocationUs);
+
+        performanceStats_.displaySetup.update(
+            setupUs);
+
+        performanceStats_.displayCompose.update(
+            composeUs);
+
+        performanceStats_.displayInterpolation.update(
+            interpolationUs);
+
+        performanceStats_.displayColorConversion.update(
+            colorConversionUs);
+
+        performanceStats_.displayOutput.update(
+            outputUs);
+
+        constexpr std::uint64_t
+            kFirstFieldDeadlineUs =
             40000u;
 
-        const std::uint64_t rxMarginUs =
-            displayTotalUs < kRxFrameBudgetUs
-            ? kRxFrameBudgetUs - displayTotalUs
+        constexpr std::uint64_t
+            kSecondFieldDeadlineUs =
+            60000u;
+
+        performanceStats_.field1Ready.update(
+            firstReadyUs);
+
+        performanceStats_.field2Ready.update(
+            secondReadyUs);
+
+        const std::uint64_t field1MarginUs =
+            firstReadyUs <
+            kFirstFieldDeadlineUs
+            ? kFirstFieldDeadlineUs -
+            firstReadyUs
             : 0u;
 
-        performanceStats_.rxMargin.update(
-            rxMarginUs);
+        const std::uint64_t field2MarginUs =
+            secondReadyUs <
+            kSecondFieldDeadlineUs
+            ? kSecondFieldDeadlineUs -
+            secondReadyUs
+            : 0u;
 
-        if (displayTotalUs > kRxFrameBudgetUs)
+        performanceStats_.field1Margin.update(
+            field1MarginUs);
+
+        performanceStats_.field2Margin.update(
+            field2MarginUs);
+
+        if (firstReadyUs >
+            kFirstFieldDeadlineUs)
         {
-            performanceStats_.displayDeadlineMisses.fetch_add(
-                1u,
-                std::memory_order_relaxed);
+            performanceStats_.
+                field1DeadlineMisses.fetch_add(
+                    1u,
+                    std::memory_order_relaxed);
+        }
+
+        if (secondReadyUs >
+            kSecondFieldDeadlineUs)
+        {
+            performanceStats_.
+                field2DeadlineMisses.fetch_add(
+                    1u,
+                    std::memory_order_relaxed);
         }
 
         const bool captureValid =
@@ -591,6 +1016,305 @@ void VideoEngine::displayWorkerLoop()
         }
     }
 }
+
+void VideoEngine::displayPresenterLoop()
+{
+    using Clock =
+        std::chrono::steady_clock;
+
+    constexpr auto fieldPeriod =
+        std::chrono::milliseconds(20);
+
+    DWORD mmcssTaskIndex = 0;
+
+    HANDLE mmcssHandle =
+        AvSetMmThreadCharacteristicsW(
+            L"Playback",
+            &mmcssTaskIndex);
+
+    if (mmcssHandle != nullptr)
+    {
+        AvSetMmThreadPriority(
+            mmcssHandle,
+            AVRT_PRIORITY_HIGH);
+    }
+
+    HANDLE waitableTimer =
+        CreateWaitableTimerExW(
+            nullptr,
+            nullptr,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            TIMER_ALL_ACCESS);
+
+    if (waitableTimer == nullptr)
+    {
+        waitableTimer =
+            CreateWaitableTimerW(
+                nullptr,
+                FALSE,
+                nullptr);
+    }
+
+    const auto waitUntil =
+        [waitableTimer](
+            Clock::time_point targetTime)
+        {
+            if (waitableTimer == nullptr)
+            {
+                std::this_thread::sleep_until(
+                    targetTime);
+
+                return;
+            }
+
+            for (;;)
+            {
+                const Clock::time_point now =
+                    Clock::now();
+
+                if (now >= targetTime)
+                {
+                    return;
+                }
+
+                const auto remaining =
+                    std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        targetTime - now);
+
+                LONGLONG due100ns =
+                    static_cast<LONGLONG>(
+                        (remaining.count() + 99) /
+                        100);
+
+                due100ns =
+                    std::max<LONGLONG>(
+                        due100ns,
+                        1);
+
+                LARGE_INTEGER dueTime;
+                dueTime.QuadPart =
+                    -due100ns;
+
+                if (!SetWaitableTimer(
+                    waitableTimer,
+                    &dueTime,
+                    0,
+                    nullptr,
+                    nullptr,
+                    FALSE))
+                {
+                    std::this_thread::sleep_until(
+                        targetTime);
+
+                    return;
+                }
+
+                WaitForSingleObject(
+                    waitableTimer,
+                    INFINITE);
+            }
+        };
+
+    Clock::time_point previousPresentTime{};
+
+    const auto recordPresentInterval =
+        [this, &previousPresentTime]()
+        {
+            const Clock::time_point now =
+                Clock::now();
+
+            if (previousPresentTime !=
+                Clock::time_point{})
+            {
+                const auto intervalUs =
+                    static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<
+                        std::chrono::microseconds>(
+                            now -
+                            previousPresentTime)
+                        .count());
+
+                performanceStats_.presentInterval.update(
+                    intervalUs);
+            }
+
+            previousPresentTime =
+                now;
+        };
+
+    for (;;)
+    {
+        std::uint64_t captureGeneration = 0;
+        Clock::time_point captureTickTime;
+
+        QImage firstImage;
+        QImage secondImage;
+
+        std::uint64_t presentedGeneration = 0;
+        bool presentingNewGeneration = false;
+        bool haveFirst = false;
+
+        {
+            std::unique_lock<std::mutex> lock(
+                displayPresenterMutex_);
+
+            displayPresenterCondition_.wait(
+                lock,
+                [this]()
+                {
+                    return
+                        displayPresenterStop_ ||
+                        latestCaptureTickGeneration_ !=
+                        presenterLastTickGeneration_;
+                });
+
+            if (displayPresenterStop_)
+            {
+                break;
+            }
+
+            captureGeneration =
+                latestCaptureTickGeneration_;
+
+            captureTickTime =
+                latestCaptureTickTime_;
+
+            presenterLastTickGeneration_ =
+                captureGeneration;
+
+            if (captureGeneration > 1)
+            {
+                const std::uint64_t
+                    expectedGeneration =
+                    captureGeneration - 1;
+
+                DisplayFrameSlot& slot =
+                    displayFrameSlots_[
+                        static_cast<std::size_t>(
+                            expectedGeneration %
+                            kFrameSlotCount)];
+
+                if (slot.generation ==
+                    expectedGeneration &&
+                    slot.firstReady)
+                {
+                    firstImage =
+                        slot.first;
+
+                    presentedGeneration =
+                        expectedGeneration;
+
+                    presentingNewGeneration =
+                        true;
+
+                    haveFirst =
+                        true;
+
+                    lastPresentedFirst_ =
+                        firstImage;
+                }
+                else if (
+                    lastPresentedPairValid_)
+                {
+                    firstImage =
+                        lastPresentedFirst_;
+
+                    secondImage =
+                        lastPresentedSecond_;
+
+                    haveFirst =
+                        true;
+                }
+            }
+        }
+
+        if (!haveFirst)
+        {
+            continue;
+        }
+
+        recordPresentInterval();
+
+        emit frameChanged(
+            firstImage);
+
+        const Clock::time_point secondFieldTime =
+            captureTickTime +
+            fieldPeriod;
+
+        waitUntil(
+            secondFieldTime);
+
+        {
+            std::lock_guard<std::mutex> lock(
+                displayPresenterMutex_);
+
+            if (displayPresenterStop_)
+            {
+                break;
+            }
+
+            if (presentingNewGeneration)
+            {
+                DisplayFrameSlot& slot =
+                    displayFrameSlots_[
+                        static_cast<std::size_t>(
+                            presentedGeneration %
+                            kFrameSlotCount)];
+
+                if (slot.generation ==
+                    presentedGeneration &&
+                    slot.secondReady)
+                {
+                    secondImage =
+                        slot.second;
+
+                    lastPresentedSecond_ =
+                        secondImage;
+
+                    lastPresentedPairValid_ =
+                        true;
+                }
+                else if (
+                    lastPresentedPairValid_)
+                {
+                    secondImage =
+                        lastPresentedSecond_;
+                }
+                else
+                {
+                    secondImage =
+                        firstImage;
+                }
+            }
+        }
+
+        if (!secondImage.isNull())
+        {
+            recordPresentInterval();
+
+            emit frameChanged(
+                secondImage);
+        }
+    }
+
+    if (waitableTimer != nullptr)
+    {
+        CancelWaitableTimer(
+            waitableTimer);
+
+        CloseHandle(
+            waitableTimer);
+    }
+
+    if (mmcssHandle != nullptr)
+    {
+        AvRevertMmThreadCharacteristics(
+            mmcssHandle);
+    }
+}
+
 
 void VideoEngine::waveformWorkerLoop()
 {
@@ -943,7 +1667,12 @@ void VideoEngine::setWaveformColor(bool enabled)
 
 void VideoEngine::setDisplayGamma(double gamma)
 {
-    displayConverter_.setGamma(gamma);
+    for (DisplayConverter& converter :
+        displayConverters_)
+    {
+        converter.setGamma(
+            gamma);
+    }
 }
 
 PerformanceSnapshot VideoEngine::performanceSnapshot() const

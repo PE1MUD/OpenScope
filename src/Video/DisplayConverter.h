@@ -25,6 +25,17 @@ public:
         int outputHeight,
         DisplayPerformance& performance) const;
 
+    void convertRange(
+        const Yuv444Frame& frame,
+        const std::uint16_t* luma,
+        QRgb* outputPixels,
+        int outputStridePixels,
+        int outputWidth,
+        int outputHeight,
+        int firstOutputY,
+        int lastOutputY,
+        DisplayPerformance& performance) const;
+
     void setHighlightedLine(int line);
     DisplayConverter();
     void setGamma(double gamma);
@@ -61,15 +72,23 @@ private:
     QImage convertScalar(
         const Yuv444Frame& frame,
         const std::uint16_t* luma,
+        QRgb* outputPixels,
+        int outputStridePixels,
         int outputWidth,
         int outputHeight,
+        int firstOutputY,
+        int lastOutputY,
         DisplayPerformance& performance) const;
 
     QImage convertAvx2(
         const Yuv444Frame& frame,
         const std::uint16_t* luma,
+        QRgb* outputPixels,
+        int outputStridePixels,
         int outputWidth,
         int outputHeight,
+        int firstOutputY,
+        int lastOutputY,
         DisplayPerformance& performance) const;
 
     int highlightedStartX_ = 0;

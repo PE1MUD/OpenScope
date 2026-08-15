@@ -84,7 +84,11 @@ QImage DisplayConverter::convert(
         return convertAvx2(
             frame,
             luma,
+            nullptr,
+            0,
             outputWidth,
+            outputHeight,
+            0,
             outputHeight,
             performance);
 
@@ -93,17 +97,74 @@ QImage DisplayConverter::convert(
         return convertScalar(
             frame,
             luma,
+            nullptr,
+            0,
             outputWidth,
             outputHeight,
+            0,
+            outputHeight,
             performance);
+    }
+}
+
+void DisplayConverter::convertRange(
+    const Yuv444Frame& frame,
+    const std::uint16_t* luma,
+    QRgb* outputPixels,
+    int outputStridePixels,
+    int outputWidth,
+    int outputHeight,
+    int firstOutputY,
+    int lastOutputY,
+    DisplayPerformance& performance) const
+{
+    if (outputPixels == nullptr ||
+        outputStridePixels < outputWidth)
+    {
+        performance = {};
+        return;
+    }
+
+    switch (implementation_)
+    {
+    case DisplayConversionImplementation::Avx2:
+        convertAvx2(
+            frame,
+            luma,
+            outputPixels,
+            outputStridePixels,
+            outputWidth,
+            outputHeight,
+            firstOutputY,
+            lastOutputY,
+            performance);
+        break;
+
+    case DisplayConversionImplementation::Scalar:
+    default:
+        convertScalar(
+            frame,
+            luma,
+            outputPixels,
+            outputStridePixels,
+            outputWidth,
+            outputHeight,
+            firstOutputY,
+            lastOutputY,
+            performance);
+        break;
     }
 }
 
 QImage DisplayConverter::convertScalar(
     const Yuv444Frame& frame,
     const std::uint16_t* luma,
+    QRgb* outputPixels,
+    int outputStridePixels,
     int outputWidth,
     int outputHeight,
+    int firstOutputY,
+    int lastOutputY,
     DisplayPerformance& performance) const
 {
     performance = {};
@@ -122,10 +183,37 @@ QImage DisplayConverter::convertScalar(
     QElapsedTimer timer;
     timer.start();
 
-    QImage image(
-        outputWidth,
-        outputHeight,
-        QImage::Format_RGB32);
+    QImage image;
+
+    if (outputPixels == nullptr)
+    {
+        image =
+            QImage(
+                outputWidth,
+                outputHeight,
+                QImage::Format_RGB32);
+
+        outputPixels =
+            reinterpret_cast<QRgb*>(
+                image.bits());
+
+        outputStridePixels =
+            image.bytesPerLine() /
+            static_cast<int>(
+                sizeof(QRgb));
+    }
+
+    firstOutputY =
+        std::clamp(
+            firstOutputY,
+            0,
+            outputHeight);
+
+    lastOutputY =
+        std::clamp(
+            lastOutputY,
+            firstOutputY,
+            outputHeight);
 
     performance.allocationUs =
         static_cast<std::uint64_t>(
@@ -230,13 +318,16 @@ QImage DisplayConverter::convertScalar(
 
     timer.restart();
 
-    for (int outputY = 0;
-        outputY < outputHeight;
+    for (int outputY = firstOutputY;
+        outputY < lastOutputY;
         ++outputY)
     {
         auto* dst =
-            reinterpret_cast<QRgb*>(
-                image.scanLine(outputY));
+            outputPixels +
+            static_cast<std::size_t>(
+                outputY) *
+            static_cast<std::size_t>(
+                outputStridePixels);
 
         const float sourceLinePosition =
             (static_cast<float>(outputY) + 0.5f) *
@@ -453,8 +544,12 @@ void DisplayConverter::setImplementation(
 QImage DisplayConverter::convertAvx2(
     const Yuv444Frame& frame,
     const std::uint16_t* luma,
+    QRgb* outputPixels,
+    int outputStridePixels,
     int outputWidth,
     int outputHeight,
+    int firstOutputY,
+    int lastOutputY,
     DisplayPerformance& performance) const
 {
     performance = {};
@@ -473,10 +568,37 @@ QImage DisplayConverter::convertAvx2(
     QElapsedTimer timer;
     timer.start();
 
-    QImage image(
-        outputWidth,
-        outputHeight,
-        QImage::Format_RGB32);
+    QImage image;
+
+    if (outputPixels == nullptr)
+    {
+        image =
+            QImage(
+                outputWidth,
+                outputHeight,
+                QImage::Format_RGB32);
+
+        outputPixels =
+            reinterpret_cast<QRgb*>(
+                image.bits());
+
+        outputStridePixels =
+            image.bytesPerLine() /
+            static_cast<int>(
+                sizeof(QRgb));
+    }
+
+    firstOutputY =
+        std::clamp(
+            firstOutputY,
+            0,
+            outputHeight);
+
+    lastOutputY =
+        std::clamp(
+            lastOutputY,
+            firstOutputY,
+            outputHeight);
 
     performance.allocationUs =
         static_cast<std::uint64_t>(
@@ -641,13 +763,16 @@ QImage DisplayConverter::convertAvx2(
     alignas(32) int vBottomLeft[8];
     alignas(32) int vBottomRight[8];
 
-    for (int outputY = 0;
-        outputY < outputHeight;
+    for (int outputY = firstOutputY;
+        outputY < lastOutputY;
         ++outputY)
     {
         auto* dst =
-            reinterpret_cast<QRgb*>(
-                image.scanLine(outputY));
+            outputPixels +
+            static_cast<std::size_t>(
+                outputY) *
+            static_cast<std::size_t>(
+                outputStridePixels);
 
         const float sourceLinePosition =
             (static_cast<float>(outputY) + 0.5f) *
@@ -936,7 +1061,7 @@ QImage DisplayConverter::convertAvx2(
                 _mm256_loadu_ps(
                     horizontalFraction_.data() +
                     outputX);
-            
+
             const __m256 yPrevious =
                 _mm256_add_ps(
                     yPreviousLeftFloat,

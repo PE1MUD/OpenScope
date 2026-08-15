@@ -21,11 +21,16 @@ auto makeBars(
 {
     return std::array
     {
-        Bar{ "Deinterlace", &snapshot.deinterlace },
+        Bar{ "Deinterlace total", &snapshot.deinterlace },
+        Bar{ "Deint worker 0", &snapshot.deinterlaceWorker0 },
+        Bar{ "Deint worker 1", &snapshot.deinterlaceWorker1 },
         Bar{ "Field 1 convert", &snapshot.displayFirst },
+        Bar{ "Field 1 ready / 40", &snapshot.field1Ready },
+        Bar{ "Field 1 margin", &snapshot.field1Margin },
         Bar{ "Field 2 convert", &snapshot.displaySecond },
-        Bar{ "Display total", &snapshot.displayTotal },
-        Bar{ "RX margin", &snapshot.rxMargin },
+        Bar{ "Field 2 ready / 60", &snapshot.field2Ready },
+        Bar{ "Field 2 margin", &snapshot.field2Margin },
+        Bar{ "Present interval", &snapshot.presentInterval },
         Bar{ "Waveform", &snapshot.waveform },
         Bar{ "Vectorscope", &snapshot.vectorscope },
         Bar{ "Display allocation", &snapshot.displayAllocation },
@@ -257,9 +262,11 @@ void PerformanceWidget::paintEvent(
         Qt::AlignLeft |
         Qt::AlignVCenter,
         QString(
-            "Deadline misses: %1")
+            "Deadline misses: F1 %1   F2 %2")
         .arg(
-            snapshot_.displayDeadlineMisses));
+            snapshot_.field1DeadlineMisses)
+        .arg(
+            snapshot_.field2DeadlineMisses));
 }
 
 void PerformanceWidget::mouseMoveEvent(

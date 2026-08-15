@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -104,6 +105,23 @@ private:
         std::atomic_bool writing{ false };
 
         Yuv444Frame frame;
+    };
+
+    struct DisplayFrameSlot
+    {
+        QImage first;
+        QImage second;
+        std::uint64_t generation = 0;
+        bool firstReady = false;
+        bool secondReady = false;
+    };
+
+    enum class DisplayPhase
+    {
+        Idle,
+        Deinterlace,
+        ConvertFirst,
+        ConvertSecond
     };
 
     //struct ReconstructedLumaFrameSlot
@@ -241,7 +259,9 @@ private:
 
     // Processing components
 
-    DisplayConverter displayConverter_;
+    std::array<
+        DisplayConverter,
+        2> displayConverters_;
     WaveformRenderer waveformRenderer_;
     VectorscopeAnalyzer vectorscopeAnalyzer_;
 
@@ -258,6 +278,11 @@ private:
     // Worker loops
 
     void displayWorkerLoop();
+    void displayPhaseWorkerLoop(
+        std::size_t workerIndex);
+    void runDisplayPhase(
+        DisplayPhase phase);
+    void displayPresenterLoop();
     void waveformWorkerLoop();
     void vectorscopeWorkerLoop();
     void lumaCoordinatorLoop();
@@ -289,15 +314,57 @@ private:
         const Yuv444Frame& frame,
         std::uint64_t generation);
 
+    std::array<
+        std::jthread,
+        2> displayPhaseWorkers_;
+
+    std::mutex displayPhaseMutex_;
+    std::condition_variable displayPhaseCondition_;
+    std::condition_variable displayPhaseDoneCondition_;
+
+    bool displayPhaseStop_ = false;
+    DisplayPhase displayPhase_ =
+        DisplayPhase::Idle;
+
+    std::uint64_t displayPhaseGeneration_ = 0;
+    std::size_t displayPhaseWorkersRemaining_ = 0;
+
+    const Yuv444Frame* displayPhaseFrame_ = nullptr;
+    const std::uint16_t* displayPhaseLuma_ = nullptr;
+
+    QRgb* displayPhaseOutputPixels_ = nullptr;
+    int displayPhaseOutputStridePixels_ = 0;
+    int displayPhaseOutputWidth_ = 0;
+    int displayPhaseOutputHeight_ = 0;
+
+    std::array<
+        DisplayPerformance,
+        2> displayPhasePerformance_;
+
+    static constexpr int kDeinterlaceChunkLines = 8;
+    std::atomic<int> displayDeinterlaceNextLine_{ 0 };
+
+    std::array<
+        std::atomic<std::uint64_t>,
+        2> displayDeinterlaceWorkerUs_{};
+
+    std::thread displayPresenterThread_;
     std::mutex displayPresenterMutex_;
+    std::condition_variable displayPresenterCondition_;
 
-    QImage pendingDisplayFirst_;
-    QImage pendingDisplaySecond_;
+    bool displayPresenterStop_ = false;
 
-    std::atomic<bool> displayPairReady_{ false };
-    std::atomic<int> displayFieldIndex_{ 0 };
+    std::uint64_t latestCaptureTickGeneration_ = 0;
+    std::uint64_t presenterLastTickGeneration_ = 0;
+    std::chrono::steady_clock::time_point latestCaptureTickTime_{};
 
-    QTimer* displayPresenterTimer_ = nullptr;
+    std::array<
+        DisplayFrameSlot,
+        kFrameSlotCount> displayFrameSlots_;
+
+    QImage lastPresentedFirst_;
+    QImage lastPresentedSecond_;
+    bool lastPresentedPairValid_ = false;
 
     std::atomic<bool> waveformZoomed_{ false };
 

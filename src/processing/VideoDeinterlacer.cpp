@@ -232,7 +232,8 @@ namespace
     }
 }
 
-void VideoDeinterlacer::deinterlace(
+
+bool VideoDeinterlacer::beginFrame(
     const std::uint16_t* source,
     int width,
     int height,
@@ -242,10 +243,14 @@ void VideoDeinterlacer::deinterlace(
         width <= 0 ||
         height <= 0)
     {
-        return;
+        return false;
     }
 
-    const std::size_t sampleCount =
+    currentSource_ = source;
+    currentDestination_ = &destination;
+    currentWidth_ = width;
+    currentHeight_ = height;
+    currentSampleCount_ =
         static_cast<std::size_t>(width) *
         static_cast<std::size_t>(height);
 
@@ -257,68 +262,117 @@ void VideoDeinterlacer::deinterlace(
         width,
         height);
 
-    //
-    // First frame:
-    // just establish history.
-    //
     if (!hasPreviousFrame_ ||
-        previousLuma_.size() != sampleCount)
+        previousLuma_.size() != currentSampleCount_)
     {
-        std::copy_n(
-            source,
-            sampleCount,
-            destination.first.y.data());
+        currentMode_ =
+            FrameMode::First;
+    }
+    else if (previousPreviousLuma_.size() !=
+        currentSampleCount_)
+    {
+        currentMode_ =
+            FrameMode::Second;
+    }
+    else
+    {
+        currentMode_ =
+            FrameMode::Normal;
+    }
 
-        std::copy_n(
-            source,
-            sampleCount,
-            destination.second.y.data());
+    return true;
+}
 
-        previousLuma_.assign(
-            source,
-            source + sampleCount);
+void VideoDeinterlacer::processRange(
+    int firstLine,
+    int lastLine)
+{
+    if (currentSource_ == nullptr ||
+        currentDestination_ == nullptr ||
+        currentWidth_ <= 0 ||
+        currentHeight_ <= 0)
+    {
+        return;
+    }
 
-        previousPreviousLuma_.clear();
+    firstLine =
+        std::clamp(
+            firstLine,
+            0,
+            currentHeight_);
 
-        hasPreviousFrame_ = true;
+    lastLine =
+        std::clamp(
+            lastLine,
+            firstLine,
+            currentHeight_);
+
+    const std::size_t width =
+        static_cast<std::size_t>(
+            currentWidth_);
+
+    if (currentMode_ ==
+        FrameMode::First)
+    {
+        for (int y = firstLine;
+            y < lastLine;
+            ++y)
+        {
+            const std::size_t lineOffset =
+                static_cast<std::size_t>(y) *
+                width;
+
+            std::copy_n(
+                currentSource_ +
+                lineOffset,
+                width,
+                currentDestination_->
+                first.y.data() +
+                lineOffset);
+
+            std::copy_n(
+                currentSource_ +
+                lineOffset,
+                width,
+                currentDestination_->
+                second.y.data() +
+                lineOffset);
+        }
 
         return;
     }
 
-    //
-    // Second frame:
-    // still no complete older / center / newer set.
-    //
-    if (previousPreviousLuma_.size() !=
-        sampleCount)
+    if (currentMode_ ==
+        FrameMode::Second)
     {
-        std::copy_n(
-            previousLuma_.data(),
-            sampleCount,
-            destination.first.y.data());
+        for (int y = firstLine;
+            y < lastLine;
+            ++y)
+        {
+            const std::size_t lineOffset =
+                static_cast<std::size_t>(y) *
+                width;
 
-        std::copy_n(
-            previousLuma_.data(),
-            sampleCount,
-            destination.second.y.data());
+            std::copy_n(
+                previousLuma_.data() +
+                lineOffset,
+                width,
+                currentDestination_->
+                first.y.data() +
+                lineOffset);
 
-        previousPreviousLuma_ =
-            previousLuma_;
-
-        previousLuma_.assign(
-            source,
-            source + sampleCount);
+            std::copy_n(
+                previousLuma_.data() +
+                lineOffset,
+                width,
+                currentDestination_->
+                second.y.data() +
+                lineOffset);
+        }
 
         return;
     }
 
-    //
-    // Temporal layout:
-    //
-    // older  = previousPreviousLuma_
-    // center = previousLuma_
-    // newer  = source
-    //
     const std::uint16_t* older =
         previousPreviousLuma_.data();
 
@@ -326,191 +380,151 @@ void VideoDeinterlacer::deinterlace(
         previousLuma_.data();
 
     const std::uint16_t* newer =
-        source;
+        currentSource_;
 
-    //
-    // ============================================================
-    // FIRST OUTPUT
-    //
-    // Native field 1:
-    //     center
-    //
-    // Opposite field baseline:
-    //     older field 2
-    //
-    // ============================================================
-    //
-
-    for (int y = 0;
-        y < height;
+    for (int y = firstLine;
+        y < lastLine;
         ++y)
     {
         const std::size_t lineOffset =
             static_cast<std::size_t>(y) *
-            static_cast<std::size_t>(width);
+            width;
 
-        std::uint16_t* destinationLine =
-            destination.first.y.data() +
+        std::uint16_t* firstDestinationLine =
+            currentDestination_->
+            first.y.data() +
             lineOffset;
 
         if ((y & 1) ==
             kFirstFieldParity)
         {
-            //
-            // Genuine field line.
-            // Never touch it.
-            //
             std::copy_n(
                 center +
                 lineOffset,
-                static_cast<std::size_t>(width),
-                destinationLine);
+                width,
+                firstDestinationLine);
+        }
+        else
+        {
+            const std::uint16_t* beforeLine =
+                older +
+                lineOffset;
 
-            continue;
+            std::copy_n(
+                beforeLine,
+                width,
+                firstDestinationLine);
+
+            if (y > 0 &&
+                y < currentHeight_ - 1)
+            {
+                const std::uint16_t* afterLine =
+                    center +
+                    lineOffset;
+
+                const std::uint16_t* upperLine =
+                    center +
+                    static_cast<std::size_t>(
+                        y - 1) *
+                    width;
+
+                const std::uint16_t* lowerLine =
+                    center +
+                    static_cast<std::size_t>(
+                        y + 1) *
+                    width;
+
+                for (int x = 0;
+                    x < currentWidth_;
+                    ++x)
+                {
+                    bool interpolate =
+                        false;
+
+                    const int firstTestX =
+                        std::max(
+                            0,
+                            x - kMaskExpansion);
+
+                    const int lastTestX =
+                        std::min(
+                            currentWidth_ - 1,
+                            x + kMaskExpansion);
+
+                    for (int testX = firstTestX;
+                        testX <= lastTestX;
+                        ++testX)
+                    {
+                        if (needsInterpolation(
+                            beforeLine,
+                            afterLine,
+                            upperLine,
+                            lowerLine,
+                            currentWidth_,
+                            testX,
+                            true))
+                        {
+                            interpolate =
+                                true;
+
+                            break;
+                        }
+                    }
+
+                    if (!interpolate)
+                    {
+                        continue;
+                    }
+
+                    const int spatial =
+                        spatialPredict(
+                            upperLine,
+                            lowerLine,
+                            currentWidth_,
+                            x);
+
+                    const int before =
+                        static_cast<int>(
+                            beforeLine[x]);
+
+                    const int after =
+                        static_cast<int>(
+                            afterLine[x]);
+
+                    const int output =
+                        temporalClamp(
+                            spatial,
+                            before,
+                            after);
+
+                    firstDestinationLine[x] =
+                        static_cast<std::uint16_t>(
+                            std::clamp(
+                                output,
+                                0,
+                                65535));
+                }
+            }
         }
 
-        //
-        // Default is pure temporal weave.
-        //
-        const std::uint16_t* beforeLine =
-            older +
+        std::uint16_t* secondDestinationLine =
+            currentDestination_->
+            second.y.data() +
             lineOffset;
 
         std::copy_n(
-            beforeLine,
-            static_cast<std::size_t>(width),
-            destinationLine);
-
-        if (y == 0 ||
-            y == height - 1)
-        {
-            continue;
-        }
-
-        const std::uint16_t* afterLine =
             center +
-            lineOffset;
+            lineOffset,
+            width,
+            secondDestinationLine);
 
-        const std::uint16_t* upperLine =
-            center +
-            static_cast<std::size_t>(y - 1) *
-            static_cast<std::size_t>(width);
-
-        const std::uint16_t* lowerLine =
-            center +
-            static_cast<std::size_t>(y + 1) *
-            static_cast<std::size_t>(width);
-
-        for (int x = 0;
-            x < width;
-            ++x)
-        {
-            bool interpolate =
-                false;
-
-            const int firstTestX =
-                std::max(
-                    0,
-                    x - kMaskExpansion);
-
-            const int lastTestX =
-                std::min(
-                    width - 1,
-                    x + kMaskExpansion);
-
-            for (int testX = firstTestX;
-                testX <= lastTestX;
-                ++testX)
-            {
-                if (needsInterpolation(
-                    beforeLine,
-                    afterLine,
-                    upperLine,
-                    lowerLine,
-                    width,
-                    testX,
-                    true))
-                {
-                    interpolate =
-                        true;
-
-                    break;
-                }
-            }
-
-            if (!interpolate)
-            {
-                continue;
-            }
-
-            const int spatial =
-                spatialPredict(
-                    upperLine,
-                    lowerLine,
-                    width,
-                    x);
-
-            const int before =
-                static_cast<int>(
-                    beforeLine[x]);
-
-            const int after =
-                static_cast<int>(
-                    afterLine[x]);
-
-            const int output =
-                temporalClamp(
-                    spatial,
-                    before,
-                    after);
-
-            destinationLine[x] =
-                static_cast<std::uint16_t>(
-                    std::clamp(
-                        output,
-                        0,
-                        65535));
-        }
-    }
-
-    //
-    // ============================================================
-    // SECOND OUTPUT
-    //
-    // Native field 2:
-    //     center
-    //
-    // Opposite field baseline:
-    //     center field 1
-    //
-    // Temporal neighbour:
-    //     newer field 1
-    //
-    // ============================================================
-    //
-
-    std::copy_n(
-        center,
-        sampleCount,
-        destination.second.y.data());
-
-    for (int y = 1;
-        y < height - 1;
-        ++y)
-    {
-        //
-        // Only the temporally older field-1 lines
-        // are candidates.
-        //
-        if ((y & 1) !=
+        if (y <= 0 ||
+            y >= currentHeight_ - 1 ||
+            (y & 1) !=
             kFirstFieldParity)
         {
             continue;
         }
-
-        const std::size_t lineOffset =
-            static_cast<std::size_t>(y) *
-            static_cast<std::size_t>(width);
 
         const std::uint16_t* beforeLine =
             center +
@@ -522,20 +536,18 @@ void VideoDeinterlacer::deinterlace(
 
         const std::uint16_t* upperLine =
             center +
-            static_cast<std::size_t>(y - 1) *
-            static_cast<std::size_t>(width);
+            static_cast<std::size_t>(
+                y - 1) *
+            width;
 
         const std::uint16_t* lowerLine =
             center +
-            static_cast<std::size_t>(y + 1) *
-            static_cast<std::size_t>(width);
-
-        std::uint16_t* destinationLine =
-            destination.second.y.data() +
-            lineOffset;
+            static_cast<std::size_t>(
+                y + 1) *
+            width;
 
         for (int x = 0;
-            x < width;
+            x < currentWidth_;
             ++x)
         {
             bool interpolate =
@@ -548,7 +560,7 @@ void VideoDeinterlacer::deinterlace(
 
             const int lastTestX =
                 std::min(
-                    width - 1,
+                    currentWidth_ - 1,
                     x + kMaskExpansion);
 
             for (int testX = firstTestX;
@@ -560,7 +572,7 @@ void VideoDeinterlacer::deinterlace(
                     afterLine,
                     upperLine,
                     lowerLine,
-                    width,
+                    currentWidth_,
                     testX,
                     true))
                 {
@@ -580,7 +592,7 @@ void VideoDeinterlacer::deinterlace(
                 spatialPredict(
                     upperLine,
                     lowerLine,
-                    width,
+                    currentWidth_,
                     x);
 
             const int before =
@@ -597,7 +609,7 @@ void VideoDeinterlacer::deinterlace(
                     before,
                     after);
 
-            destinationLine[x] =
+            secondDestinationLine[x] =
                 static_cast<std::uint16_t>(
                     std::clamp(
                         output,
@@ -605,14 +617,75 @@ void VideoDeinterlacer::deinterlace(
                         65535));
         }
     }
+}
 
-    //
-    // Advance history.
-    //
-    previousPreviousLuma_.swap(
-        previousLuma_);
+void VideoDeinterlacer::endFrame()
+{
+    if (currentSource_ == nullptr ||
+        currentSampleCount_ == 0)
+    {
+        return;
+    }
 
-    previousLuma_.assign(
+    if (currentMode_ ==
+        FrameMode::First)
+    {
+        previousLuma_.assign(
+            currentSource_,
+            currentSource_ +
+            currentSampleCount_);
+
+        previousPreviousLuma_.clear();
+
+        hasPreviousFrame_ = true;
+    }
+    else if (currentMode_ ==
+        FrameMode::Second)
+    {
+        previousPreviousLuma_ =
+            previousLuma_;
+
+        previousLuma_.assign(
+            currentSource_,
+            currentSource_ +
+            currentSampleCount_);
+    }
+    else
+    {
+        previousPreviousLuma_.swap(
+            previousLuma_);
+
+        previousLuma_.assign(
+            currentSource_,
+            currentSource_ +
+            currentSampleCount_);
+    }
+
+    currentSource_ = nullptr;
+    currentDestination_ = nullptr;
+    currentWidth_ = 0;
+    currentHeight_ = 0;
+    currentSampleCount_ = 0;
+}
+
+void VideoDeinterlacer::deinterlace(
+    const std::uint16_t* source,
+    int width,
+    int height,
+    ProgressiveLumaPair& destination)
+{
+    if (!beginFrame(
         source,
-        source + sampleCount);
+        width,
+        height,
+        destination))
+    {
+        return;
+    }
+
+    processRange(
+        0,
+        height);
+
+    endFrame();
 }

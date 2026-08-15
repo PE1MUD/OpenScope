@@ -100,14 +100,27 @@ struct PerformanceMetric
 struct PerformanceSnapshot
 {
     PerformanceMetricSnapshot reconstruct;
+
     PerformanceMetricSnapshot deinterlace;
+    PerformanceMetricSnapshot deinterlaceWorker0;
+    PerformanceMetricSnapshot deinterlaceWorker1;
+
     PerformanceMetricSnapshot waveform;
     PerformanceMetricSnapshot vectorscope;
+
     PerformanceMetricSnapshot displayFirst;
+    PerformanceMetricSnapshot field1Ready;
+    PerformanceMetricSnapshot field1Margin;
+
     PerformanceMetricSnapshot displaySecond;
-    PerformanceMetricSnapshot displayTotal;
-    PerformanceMetricSnapshot rxMargin;
-    std::uint64_t displayDeadlineMisses = 0;
+    PerformanceMetricSnapshot field2Ready;
+    PerformanceMetricSnapshot field2Margin;
+
+    PerformanceMetricSnapshot presentInterval;
+
+    std::uint64_t field1DeadlineMisses = 0;
+    std::uint64_t field2DeadlineMisses = 0;
+
     PerformanceMetricSnapshot displayAllocation;
     PerformanceMetricSnapshot displaySetup;
     PerformanceMetricSnapshot displayCompose;
@@ -119,14 +132,27 @@ struct PerformanceSnapshot
 struct PerformanceStats
 {
     PerformanceMetric reconstruct;
+
     PerformanceMetric deinterlace;
+    PerformanceMetric deinterlaceWorker0;
+    PerformanceMetric deinterlaceWorker1;
+
     PerformanceMetric waveform;
     PerformanceMetric vectorscope;
+
     PerformanceMetric displayFirst;
+    PerformanceMetric field1Ready;
+    PerformanceMetric field1Margin;
+
     PerformanceMetric displaySecond;
-    PerformanceMetric displayTotal;
-    PerformanceMetric rxMargin;
-    std::atomic<std::uint64_t> displayDeadlineMisses{ 0 };
+    PerformanceMetric field2Ready;
+    PerformanceMetric field2Margin;
+
+    PerformanceMetric presentInterval;
+
+    std::atomic<std::uint64_t> field1DeadlineMisses{ 0 };
+    std::atomic<std::uint64_t> field2DeadlineMisses{ 0 };
+
     PerformanceMetric displayAllocation;
     PerformanceMetric displaySetup;
     PerformanceMetric displayCompose;
@@ -139,14 +165,29 @@ struct PerformanceStats
         return
         {
             reconstruct.snapshot(),
+
             deinterlace.snapshot(),
+            deinterlaceWorker0.snapshot(),
+            deinterlaceWorker1.snapshot(),
+
             waveform.snapshot(),
             vectorscope.snapshot(),
+
             displayFirst.snapshot(),
+            field1Ready.snapshot(),
+            field1Margin.snapshot(),
+
             displaySecond.snapshot(),
-            displayTotal.snapshot(),
-            rxMargin.snapshot(),
-            displayDeadlineMisses.load(std::memory_order_relaxed),
+            field2Ready.snapshot(),
+            field2Margin.snapshot(),
+
+            presentInterval.snapshot(),
+
+            field1DeadlineMisses.load(
+                std::memory_order_relaxed),
+            field2DeadlineMisses.load(
+                std::memory_order_relaxed),
+
             displayAllocation.snapshot(),
             displaySetup.snapshot(),
             displayCompose.snapshot(),
