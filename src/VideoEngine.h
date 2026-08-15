@@ -302,4 +302,6 @@ private:
     std::atomic<bool> waveformZoomed_{ false };
 
     std::atomic<double> waveformScrollPosition_{ 0.0 };
+
+    std::atomic<int> waveformPersistence_{ 0 };
 };

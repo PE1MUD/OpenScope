@@ -12,7 +12,7 @@ VideoEngine::VideoEngine(QObject* parent)
 {
     vectorscopeAnalyzer_.setScale(
         VectorscopeSettings::scale);
-    
+
     displayConverter_.setImplementation(
         DisplayConversionImplementation::Avx2);
 
@@ -239,7 +239,9 @@ void VideoEngine::setSelectedLine(int line)
 
 void VideoEngine::setWaveformPersistence(int persistence)
 {
-    waveformRenderer_.setPersistence(persistence);
+    waveformPersistence_.store(
+        std::clamp(persistence, 0, 255),
+        std::memory_order_release);
 }
 
 
@@ -655,6 +657,13 @@ void VideoEngine::waveformWorkerLoop()
 
         waveformRenderer_.setSelectedLine(
             selectedLine);
+
+        const int waveformPersistence =
+            waveformPersistence_.load(
+                std::memory_order_acquire);
+
+        waveformRenderer_.setPersistence(
+            waveformPersistence);
 
         QElapsedTimer timer;
         timer.start();

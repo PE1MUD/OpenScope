@@ -230,7 +230,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* toolbar =
         addToolBar("Line selector");
-    
+
     const bool waveformZoomed =
         settingsService_->settings()
         .control
@@ -347,11 +347,27 @@ MainWindow::MainWindow(QWidget* parent)
     videoEngine_->setSelectedLine(
         lineNumber);
 
+    const bool waveformZoomEnabled =
+        lineNumber >= 0;
+
+    waveformZoomButton->setEnabled(
+        waveformZoomEnabled);
+
+    waveformWidget_->setZoomEnabled(
+        waveformZoomEnabled);
+
+    if (!waveformZoomEnabled &&
+        waveformZoomButton->isChecked())
+    {
+        waveformZoomButton->setChecked(
+            false);
+    }
+
     connect(
         lineSelector,
         &QSpinBox::valueChanged,
         this,
-        [this](int lineNumber)
+        [this, waveformZoomButton](int lineNumber)
         {
             settingsService_->update(
                 [lineNumber](OpenScopeSettings& settings)
@@ -364,6 +380,22 @@ MainWindow::MainWindow(QWidget* parent)
 
             videoEngine_->setSelectedLine(
                 lineNumber);
+
+            const bool waveformZoomEnabled =
+                lineNumber >= 0;
+
+            waveformZoomButton->setEnabled(
+                waveformZoomEnabled);
+
+            waveformWidget_->setZoomEnabled(
+                waveformZoomEnabled);
+
+            if (!waveformZoomEnabled &&
+                waveformZoomButton->isChecked())
+            {
+                waveformZoomButton->setChecked(
+                    false);
+            }
         });
 
     auto* persistenceLabel =

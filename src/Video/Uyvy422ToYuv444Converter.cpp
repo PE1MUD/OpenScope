@@ -2,6 +2,7 @@
 
 #include <cstddef>
 
+
 bool Uyvy422ToYuv444Converter::convert(
     const std::uint8_t* source,
     int sourceRowBytes,

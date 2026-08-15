@@ -67,8 +67,27 @@ void WaveformWidget::setScrollPosition(
     update();
 }
 
+void WaveformWidget::setZoomEnabled(bool enabled)
+{
+    if (zoomEnabled_ == enabled)
+    {
+        return;
+    }
+
+    zoomEnabled_ = enabled;
+
+    if (!zoomEnabled_ && zoomed_)
+    {
+        setZoomed(false);
+    }
+}
+
 void WaveformWidget::setZoomed(bool zoomed)
 {
+    if (zoomed && !zoomEnabled_)
+    {
+        return;
+    }
     if (zoomed_ == zoomed)
     {
         return;

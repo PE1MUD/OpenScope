@@ -21,6 +21,11 @@ namespace
     constexpr int kLuminanceBeamIntensity = 256;
     constexpr int kChromaBeamIntensity = 768;
     constexpr std::uint32_t kConnectorIntensity = 160u;
+
+    // Keep accumulated chroma energy below full scale.
+    // This prevents high Scopephor settings from driving
+    // the RGB chroma channels into long-term saturation.
+    constexpr std::uint32_t kMaximumChromaLevel = 16384u;
 }
 
 void WaveformRenderer::setChromaFillIntensity(
@@ -228,6 +233,9 @@ WaveformRenderer::WaveformRenderer()
     , hits_(
         720u * 576u,
         0u)
+    , allLinesPersistence_(
+        720u * 576u,
+        0.0f)
     , trace_(
         720u * 576u)
     , displayY_(720u)
@@ -284,7 +292,15 @@ void WaveformRenderer::setOutputSize(
         pixelCount,
         0u);
 
+    allLinesPersistence_.assign(
+        pixelCount,
+        0.0f);
+
     trace_.assign(
+        pixelCount,
+        TracePixel{});
+
+    chromaTrace_.assign(
         pixelCount,
         TracePixel{});
 
@@ -317,6 +333,25 @@ void WaveformRenderer::setZoomed(
         << zoomed;
 
     zoomed_ = zoomed;
+}
+
+
+void WaveformRenderer::setContentScale(
+    double scale)
+{
+    const double newScale =
+        std::clamp(
+            scale,
+            0.1,
+            1.0);
+
+    if (newScale == contentScale_)
+    {
+        return;
+    }
+
+    contentScale_ = newScale;
+    clearTrace();
 }
 
 void WaveformRenderer::setScrollPosition(
@@ -380,36 +415,62 @@ void WaveformRenderer::clearOrFadeTrace()
             trace_.end(),
             TracePixel{});
 
+        std::fill(
+            chromaTrace_.begin(),
+            chromaTrace_.end(),
+            TracePixel{});
+
         return;
     }
 
-    const std::uint32_t persistence =
+    const std::uint32_t lumaPersistence =
         static_cast<std::uint32_t>(
             persistence_);
 
-    for (TracePixel& pixel : trace_)
-    {
-        pixel.red =
-            static_cast<std::uint16_t>(
-                (static_cast<std::uint32_t>(
-                    pixel.red) *
-                    persistence) >>
-                8);
+    constexpr std::uint32_t kMaximumChromaPersistence =
+        204u;
 
-        pixel.green =
-            static_cast<std::uint16_t>(
-                (static_cast<std::uint32_t>(
-                    pixel.green) *
-                    persistence) >>
-                8);
+    const std::uint32_t chromaPersistence =
+        std::min(
+            lumaPersistence,
+            kMaximumChromaPersistence);
 
-        pixel.blue =
-            static_cast<std::uint16_t>(
-                (static_cast<std::uint32_t>(
-                    pixel.blue) *
-                    persistence) >>
-                8);
-    }
+    const auto fadeTrace =
+        [](std::vector<TracePixel>& pixels,
+            std::uint32_t persistence)
+        {
+            for (TracePixel& pixel : pixels)
+            {
+                pixel.red =
+                    static_cast<std::uint16_t>(
+                        (static_cast<std::uint32_t>(
+                            pixel.red) *
+                            persistence) >>
+                        8);
+
+                pixel.green =
+                    static_cast<std::uint16_t>(
+                        (static_cast<std::uint32_t>(
+                            pixel.green) *
+                            persistence) >>
+                        8);
+
+                pixel.blue =
+                    static_cast<std::uint16_t>(
+                        (static_cast<std::uint32_t>(
+                            pixel.blue) *
+                            persistence) >>
+                        8);
+            }
+        };
+
+    fadeTrace(
+        trace_,
+        lumaPersistence);
+
+    fadeTrace(
+        chromaTrace_,
+        chromaPersistence);
 }
 
 QRectF WaveformRenderer::viewportRect() const
@@ -441,6 +502,9 @@ QRectF WaveformRenderer::viewportRect() const
             height *
             aspectRatio;
     }
+
+    width *= contentScale_;
+    height *= contentScale_;
 
     const double left =
         (widgetWidth - width) *
@@ -721,7 +785,7 @@ void WaveformRenderer::renderSingleLine(
     resampleLinear(
         sourceV_,
         displayV_);
-    
+
     const int displayWidth =
         image_.width();
 
@@ -759,7 +823,7 @@ void WaveformRenderer::renderSingleLine(
         const std::size_t index =
             static_cast<std::size_t>(
                 x);
-        
+
         const double plotX =
             scope.left() +
             static_cast<double>(x) *
@@ -1064,12 +1128,12 @@ void WaveformRenderer::plotLuminanceTrace()
             int intensity)
         {
             constexpr double targetStepPixels = 0.5;
-            
+
             const double curveXScale =
                 scope.width() /
                 static_cast<double>(
                     sampleCount - 1);
-            
+
             for (int x = 0;
                 x < sampleCount - 1;
                 ++x)
@@ -1323,28 +1387,70 @@ void WaveformRenderer::composeTraceImage()
                 static_cast<std::size_t>(width) +
                 static_cast<std::size_t>(x);
 
-            const TracePixel& pixel =
+            const TracePixel& lumaPixel =
                 trace_[index];
+
+            const TracePixel& chromaPixel =
+                chromaTrace_[index];
 
             if (settings_.color)
             {
+                const auto combinedChannel =
+                    [this](
+                        std::uint16_t luma,
+                        std::uint16_t chroma)
+                    {
+                        const std::uint32_t combined =
+                            std::min<std::uint32_t>(
+                                65535u,
+                                static_cast<std::uint32_t>(luma) +
+                                static_cast<std::uint32_t>(chroma));
+
+                        return
+                            displayLut_[combined];
+                    };
+
                 destination[x] =
                     qRgb(
-                        displayLut_[pixel.red],
-                        displayLut_[pixel.green],
-                        displayLut_[pixel.blue]);
+                        combinedChannel(
+                            lumaPixel.red,
+                            chromaPixel.red),
+                        combinedChannel(
+                            lumaPixel.green,
+                            chromaPixel.green),
+                        combinedChannel(
+                            lumaPixel.blue,
+                            chromaPixel.blue));
             }
             else
             {
-                const std::uint16_t mono =
-                    std::max(
-                        pixel.red,
-                        std::max(
-                            pixel.green,
-                            pixel.blue));
+                const std::uint32_t luma =
+                    std::max({
+                        static_cast<std::uint32_t>(
+                            lumaPixel.red),
+                        static_cast<std::uint32_t>(
+                            lumaPixel.green),
+                        static_cast<std::uint32_t>(
+                            lumaPixel.blue)
+                        });
+
+                const std::uint32_t chroma =
+                    std::max({
+                        static_cast<std::uint32_t>(
+                            chromaPixel.red),
+                        static_cast<std::uint32_t>(
+                            chromaPixel.green),
+                        static_cast<std::uint32_t>(
+                            chromaPixel.blue)
+                        });
+
+                const std::uint32_t combined =
+                    std::min<std::uint32_t>(
+                        65535u,
+                        luma + chroma);
 
                 const int value =
-                    displayLut_[mono];
+                    displayLut_[combined];
 
                 destination[x] =
                     qRgb(
@@ -1370,6 +1476,40 @@ void WaveformRenderer::renderAllLines(
     const int displayHeight =
         image_.height();
 
+    const QRectF scope =
+        scaledScopeRect();
+
+    const int firstScopeX =
+        std::clamp(
+            static_cast<int>(
+                std::ceil(scope.left())),
+            0,
+            displayWidth - 1);
+
+    const int lastScopeX =
+        std::clamp(
+            static_cast<int>(
+                std::floor(scope.right())),
+            0,
+            displayWidth - 1);
+
+    const auto digitalLevels =
+        levels(VideoStandard::pal625());
+
+    const auto analog =
+        analogLevels(
+            VideoColorStandard::Rec601_625);
+
+    const double voltsPerCode =
+        (analog.whiteVolts - analog.blackVolts) /
+        static_cast<double>(
+            digitalLevels.yWhite -
+            digitalLevels.yBlack);
+
+    const double voltsToPixels =
+        scope.height() /
+        analog.graticuleMaxVolts;
+
     for (int line = 0;
         line < frame.height;
         ++line)
@@ -1385,13 +1525,22 @@ void WaveformRenderer::renderAllLines(
             sourceX < frame.width;
             ++sourceX)
         {
+            const double normalisedX =
+                frame.width > 1
+                ? static_cast<double>(sourceX) /
+                static_cast<double>(
+                    frame.width - 1)
+                : 0.0;
+
             const int displayX =
                 std::clamp(
-                    sourceX *
-                    displayWidth /
-                    frame.width,
-                    0,
-                    displayWidth - 1);
+                    static_cast<int>(
+                        std::lround(
+                            scope.left() +
+                            normalisedX *
+                            scope.width())),
+                    firstScopeX,
+                    lastScopeX);
 
             const std::uint16_t y16 =
                 frame.y[
@@ -1399,25 +1548,41 @@ void WaveformRenderer::renderAllLines(
                         static_cast<std::size_t>(
                             sourceX)];
 
-            const std::uint32_t scaledY =
-                static_cast<std::uint32_t>(
-                    static_cast<std::uint64_t>(
-                        y16) *
-                    static_cast<std::uint64_t>(
-                        (displayHeight - 1) << 8) /
-                    65535u);
+            const double y10 =
+                static_cast<double>(y16) /
+                64.0;
+
+            const double volts =
+                analog.blackVolts +
+                (y10 - digitalLevels.yBlack) *
+                voltsPerCode;
+
+            const double plotYFloat =
+                scope.bottom() -
+                volts *
+                voltsToPixels;
 
             const int plotY =
-                displayHeight - 1 -
-                static_cast<int>(
-                    scaledY >> 8);
+                std::clamp(
+                    static_cast<int>(
+                        std::lround(
+                            plotYFloat)),
+                    0,
+                    displayHeight - 1);
+
+            const double fractionalY =
+                plotYFloat -
+                std::floor(plotYFloat);
 
             const std::uint32_t fraction =
-                scaledY & 0xffu;
+                static_cast<std::uint32_t>(
+                    std::clamp(
+                        fractionalY * 256.0,
+                        0.0,
+                        255.0));
 
             const std::size_t currentIndex =
-                static_cast<std::size_t>(
-                    plotY) *
+                static_cast<std::size_t>(plotY) *
                 static_cast<std::size_t>(
                     displayWidth) +
                 static_cast<std::size_t>(
@@ -1457,8 +1622,7 @@ void WaveformRenderer::renderAllLines(
                     ++y)
                 {
                     const std::size_t segmentIndex =
-                        static_cast<std::size_t>(
-                            y) *
+                        static_cast<std::size_t>(y) *
                         static_cast<std::size_t>(
                             displayWidth) +
                         static_cast<std::size_t>(
@@ -1477,36 +1641,64 @@ void WaveformRenderer::renderAllLines(
         y < displayHeight;
         ++y)
     {
-        auto* destination =
-            reinterpret_cast<QRgb*>(
-                image_.scanLine(y));
-
         for (int x = 0;
             x < displayWidth;
             ++x)
         {
-            const std::uint32_t hit =
-                hits_[
-                    static_cast<std::size_t>(
-                        y) *
-                        static_cast<std::size_t>(
-                            displayWidth) +
-                        static_cast<std::size_t>(
-                            x)];
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(
+                    displayWidth) +
+                static_cast<std::size_t>(x);
 
-            const int green =
-                std::min(
-                    255,
-                    static_cast<int>(
-                        hit >> 8) * 8);
+            const float persistence =
+                static_cast<float>(persistence_) /
+                255.0f;
+
+            const float currentDensity =
+                static_cast<float>(
+                    hits_[index]);
+
+            float& temporalDensity =
+                allLinesPersistence_[index];
+
+            if (persistence_ == 0)
+            {
+                temporalDensity =
+                    currentDensity;
+            }
+            else
+            {
+                temporalDensity =
+                    temporalDensity * persistence +
+                    currentDensity;
+            }
+
+            const std::uint32_t intensity =
+                std::min<std::uint32_t>(
+                    255u,
+                    static_cast<std::uint32_t>(
+                        temporalDensity / 256.0f) *
+                    8u);
+
+            auto* destination =
+                reinterpret_cast<QRgb*>(
+                    image_.scanLine(y));
 
             destination[x] =
                 qRgb(
-                    green,
-                    green,
-                    green);
+                    static_cast<int>(intensity),
+                    static_cast<int>(intensity),
+                    static_cast<int>(intensity));
         }
     }
+
+    QPainter painter(&image_);
+
+    graticule_.draw(
+        painter,
+        scope,
+        VideoStandard::pal625());
 }
 
 void WaveformRenderer::addChromaFillPixel(
@@ -1532,7 +1724,7 @@ void WaveformRenderer::addChromaFillPixel(
         static_cast<std::size_t>(x);
 
     TracePixel& pixel =
-        trace_[index];
+        chromaTrace_[index];
 
     const auto addChannel =
         [intensity](
@@ -1552,15 +1744,23 @@ void WaveformRenderer::addChromaFillPixel(
             destination =
                 static_cast<std::uint16_t>(
                     std::min<std::uint32_t>(
-                        65535u,
+                        kMaximumChromaLevel,
                         static_cast<std::uint32_t>(
                             destination) +
                         contribution));
         };
 
-    addChannel(pixel.red, red);
-    addChannel(pixel.green, green);
-    addChannel(pixel.blue, blue);
+    addChannel(
+        pixel.red,
+        red);
+
+    addChannel(
+        pixel.green,
+        green);
+
+    addChannel(
+        pixel.blue,
+        blue);
 }
 
 void WaveformRenderer::plotSegment(
@@ -1888,5 +2088,10 @@ void WaveformRenderer::clearTrace()
     std::fill(
         trace_.begin(),
         trace_.end(),
+        TracePixel{});
+
+    std::fill(
+        chromaTrace_.begin(),
+        chromaTrace_.end(),
         TracePixel{});
 }

@@ -37,6 +37,7 @@ public:
 
     void setZoomed(bool zoomed);
     void setScrollPosition(double position);
+    void setContentScale(double scale);
 
     [[nodiscard]] double traceBandwidthMHz() const;
     [[nodiscard]] const QImage& image() const;
@@ -102,11 +103,13 @@ private:
     WaveformGraticule graticule_;
     QRectF scopeRect() const;
     QRectF viewportRect() const;
-    
-//    LineResampler singleLineReconstructor_;
+
+    //    LineResampler singleLineReconstructor_;
 
     std::vector<std::uint32_t> hits_;
+    std::vector<float> allLinesPersistence_;
     std::vector<TracePixel> trace_;
+    std::vector<TracePixel> chromaTrace_;
 
     std::vector<float> sourceY_;
     std::vector<float> sourceU_;
@@ -116,12 +119,12 @@ private:
     std::vector<float> displayYMax_;
     std::vector<float> displayU_;
     std::vector<float> displayV_;
-    
+
     std::vector<float> singleLineSource_;
     std::vector<float> singleLineReconstructed_;
 
     std::array<std::uint8_t, 65536> displayLut_{};
-    
+
     static constexpr int kLumaReconstructionRadius = 24;
     static constexpr float kLumaReconstructionCutoff = 1.00f;
 
@@ -130,6 +133,7 @@ private:
 
     bool zoomed_ = false;
     double scrollPosition_ = 0.0;
+    double contentScale_ = 1.0;
     int chromaFillIntensity_ = 64;
 
     WaveformSettings settings_;

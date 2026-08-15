@@ -15,6 +15,7 @@ public:
 
     bool isZoomed() const;
     void setZoomed(bool zoomed);
+    void setZoomEnabled(bool enabled);
     void setScrollPosition(double position);
 
 signals:
@@ -28,5 +29,6 @@ protected:
 private:
     QSlider* scrollSlider_ = nullptr;
     bool zoomed_ = false;
+    bool zoomEnabled_ = true;
     double scrollPosition_ = 0.0;
 };
