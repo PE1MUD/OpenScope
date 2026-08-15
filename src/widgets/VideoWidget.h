@@ -2,6 +2,7 @@
 
 #include <QImage>
 #include <QWidget>
+#include "settings/OpenScopeSettings.h"
 
 class VideoWidget : public QWidget
 {
@@ -10,6 +11,8 @@ class VideoWidget : public QWidget
 public:
     explicit VideoWidget(QWidget* parent = nullptr);
     void setImage(const QImage& image);
+    void setAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio);
 
 signals:
     void outputSizeChanged(
@@ -27,4 +30,6 @@ protected:
 
 private:
     QImage image_;
+    OpenScopeSettings::AspectRatio aspectRatio_ =
+        OpenScopeSettings::AspectRatio::Ratio4x3;
 };

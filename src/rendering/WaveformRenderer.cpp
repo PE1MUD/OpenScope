@@ -483,8 +483,11 @@ QRectF WaveformRenderer::viewportRect() const
         static_cast<double>(
             image_.height() - 1);
 
-    constexpr double aspectRatio =
-        4.0 / 3.0;
+    const double aspectRatio =
+        aspectRatio_ ==
+        OpenScopeSettings::AspectRatio::Ratio16x9
+        ? 16.0 / 9.0
+        : 4.0 / 3.0;
 
     double width =
         widgetWidth;
@@ -2094,4 +2097,18 @@ void WaveformRenderer::clearTrace()
         chromaTrace_.begin(),
         chromaTrace_.end(),
         TracePixel{});
+}
+
+
+void WaveformRenderer::setAspectRatio(
+    OpenScopeSettings::AspectRatio aspectRatio)
+{
+    if (aspectRatio_ == aspectRatio)
+    {
+        return;
+    }
+
+    aspectRatio_ = aspectRatio;
+
+    clearTrace();
 }

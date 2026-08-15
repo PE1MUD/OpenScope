@@ -30,8 +30,11 @@ void VideoWidget::paintEvent(QPaintEvent* event)
         return;
     }
 
-    constexpr double displayAspectRatio =
-        4.0 / 3.0;
+    const double displayAspectRatio =
+        aspectRatio_ ==
+        OpenScopeSettings::AspectRatio::Ratio16x9
+        ? 16.0 / 9.0
+        : 4.0 / 3.0;
 
     int targetWidth =
         width();
@@ -102,4 +105,17 @@ void VideoWidget::resizeEvent(
     emit outputSizeChanged(
         outputWidth,
         outputHeight);
+}
+
+void VideoWidget::setAspectRatio(
+    OpenScopeSettings::AspectRatio aspectRatio)
+{
+    if (aspectRatio_ == aspectRatio)
+    {
+        return;
+    }
+
+    aspectRatio_ = aspectRatio;
+
+    update();
 }

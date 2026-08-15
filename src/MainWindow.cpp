@@ -55,6 +55,18 @@ MainWindow::MainWindow(QWidget* parent)
     const auto& windowSettings =
         settingsService_->settings().local.window;
 
+    const auto displayAspectRatio =
+        settingsService_->settings()
+        .local
+        .display
+        .aspectRatio;
+
+    videoWidget_->setAspectRatio(
+        displayAspectRatio);
+
+    videoEngine_->setWaveformAspectRatio(
+        displayAspectRatio);
+
     resize(
         windowSettings.width,
         windowSettings.height);
@@ -269,6 +281,14 @@ MainWindow::MainWindow(QWidget* parent)
         &ScopeWorkspace::noiseReductionChanged,
         videoEngine_,
         &VideoEngine::setNoiseReductionEnabled);
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::
+        noiseReductionIntensityChanged,
+        videoEngine_,
+        &VideoEngine::
+        setNoiseReductionIntensity);
 
     connect(
         workspace_,

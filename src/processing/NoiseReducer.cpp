@@ -123,7 +123,8 @@ namespace
 
 void NoiseReducer::process(
     const Yuv444Frame& source,
-    Yuv444Frame& destination)
+    Yuv444Frame& destination,
+    int intensity)
 {
     if (source.width <= 0 ||
         source.height <= 0 ||
@@ -142,26 +143,99 @@ void NoiseReducer::process(
             source.height);
     }
 
+    const int clampedIntensity =
+        std::clamp(
+            intensity,
+            kMinimumIntensity,
+            kMaximumIntensity);
+
+    if (clampedIntensity == 0)
+    {
+        destination.y = source.y;
+        destination.u = source.u;
+        destination.v = source.v;
+        return;
+    }
+
+    // Preserve the earlier behaviour around intensity 50, while
+    // allowing the upper half of the slider to become substantially
+    // more aggressive.
+    const int thresholdPosition =
+        std::clamp(
+            clampedIntensity * 2 - 100,
+            0,
+            100);
+
+    const auto interpolateThreshold =
+        [thresholdPosition](
+            std::uint16_t minimumThreshold,
+            std::uint16_t maximumThreshold)
+        {
+            const std::uint32_t minimum =
+                minimumThreshold;
+
+            const std::uint32_t range =
+                static_cast<std::uint32_t>(
+                    maximumThreshold) -
+                minimum;
+
+            return static_cast<std::uint16_t>(
+                minimum +
+                (range *
+                    static_cast<std::uint32_t>(
+                        thresholdPosition) +
+                    50u) /
+                100u);
+        };
+
+    const std::uint16_t lumaThreshold =
+        interpolateThreshold(
+            kMinimumLumaThreshold,
+            kMaximumLumaThreshold);
+
+    const std::uint16_t chromaThreshold =
+        interpolateThreshold(
+            kMinimumChromaThreshold,
+            kMaximumChromaThreshold);
+
     filterPlane(
         source.y,
         destination.y,
         source.width,
         source.height,
-        kLumaThreshold);
+        lumaThreshold);
 
     filterPlane(
         source.u,
         destination.u,
         source.width,
         source.height,
-        kChromaThreshold);
+        chromaThreshold);
 
     filterPlane(
         source.v,
         destination.v,
         source.width,
         source.height,
-        kChromaThreshold);
+        chromaThreshold);
+
+    if (clampedIntensity < kMaximumIntensity)
+    {
+        blendPlane(
+            source.y,
+            destination.y,
+            clampedIntensity);
+
+        blendPlane(
+            source.u,
+            destination.u,
+            clampedIntensity);
+
+        blendPlane(
+            source.v,
+            destination.v,
+            clampedIntensity);
+    }
 }
 
 void NoiseReducer::filterPlane(
@@ -181,8 +255,8 @@ void NoiseReducer::filterPlane(
         return;
     }
 
-    if (width < 3 ||
-        height < 3)
+    if (width < 5 ||
+        height < 5)
     {
         std::copy_n(
             source.begin(),
@@ -191,24 +265,41 @@ void NoiseReducer::filterPlane(
         return;
     }
 
-    std::copy_n(
-        source.begin(),
-        static_cast<std::size_t>(width),
-        destination.begin());
+    // Copy the two-pixel border unchanged.
+    for (int borderY = 0;
+        borderY < kFilterRadius;
+        ++borderY)
+    {
+        const std::size_t topOffset =
+            static_cast<std::size_t>(
+                borderY) *
+            static_cast<std::size_t>(
+                width);
 
-    const std::size_t lastLineOffset =
-        static_cast<std::size_t>(
-            height - 1) *
-        static_cast<std::size_t>(width);
+        const std::size_t bottomOffset =
+            static_cast<std::size_t>(
+                height - 1 - borderY) *
+            static_cast<std::size_t>(
+                width);
 
-    std::copy_n(
-        source.begin() +
-        static_cast<std::ptrdiff_t>(
-            lastLineOffset),
-        static_cast<std::size_t>(width),
-        destination.begin() +
-        static_cast<std::ptrdiff_t>(
-            lastLineOffset));
+        std::copy_n(
+            source.begin() +
+            static_cast<std::ptrdiff_t>(
+                topOffset),
+            static_cast<std::size_t>(width),
+            destination.begin() +
+            static_cast<std::ptrdiff_t>(
+                topOffset));
+
+        std::copy_n(
+            source.begin() +
+            static_cast<std::ptrdiff_t>(
+                bottomOffset),
+            static_cast<std::size_t>(width),
+            destination.begin() +
+            static_cast<std::ptrdiff_t>(
+                bottomOffset));
+    }
 
     const __m256i thresholdVector =
         _mm256_set1_epi32(
@@ -219,139 +310,296 @@ void NoiseReducer::filterPlane(
         _mm256_set1_epi32(
             1);
 
-    for (int y = 1;
-        y < height - 1;
+    for (int y = kFilterRadius;
+        y < height - kFilterRadius;
         ++y)
     {
         const std::size_t lineOffset =
             static_cast<std::size_t>(y) *
             static_cast<std::size_t>(width);
 
-        destination[lineOffset] =
-            source[lineOffset];
-
-        destination[
-            lineOffset +
-                static_cast<std::size_t>(
-                    width - 1)] =
-            source[
+        for (int borderX = 0;
+            borderX < kFilterRadius;
+            ++borderX)
+        {
+            destination[
                 lineOffset +
                     static_cast<std::size_t>(
-                        width - 1)];
-
-            int x = 1;
-
-            const int vectorEnd =
-                width - 1 - 7;
-
-            for (;
-                x < vectorEnd;
-                x += 8)
-            {
-                const std::size_t centerIndex =
+                        borderX)] =
+                source[
                     lineOffset +
-                    static_cast<std::size_t>(x);
-
-                const __m256i center =
-                    load8Unsigned16As32(
-                        source.data() +
-                        centerIndex);
-
-                __m256i sum =
-                    _mm256_setzero_si256();
-
-                __m256i count =
-                    _mm256_setzero_si256();
-
-                for (int offsetY = -1;
-                    offsetY <= 1;
-                    ++offsetY)
-                {
-                    const std::size_t neighbourLine =
                         static_cast<std::size_t>(
-                            y + offsetY) *
-                        static_cast<std::size_t>(
-                            width);
+                            borderX)];
 
-                    for (int offsetX = -1;
-                        offsetX <= 1;
-                        ++offsetX)
-                    {
-                        const std::size_t neighbourIndex =
-                            neighbourLine +
+                destination[
+                    lineOffset +
+                        static_cast<std::size_t>(
+                            width - 1 - borderX)] =
+                    source[
+                        lineOffset +
                             static_cast<std::size_t>(
-                                x + offsetX);
+                                width - 1 - borderX)];
+        }
 
-                        const __m256i neighbour =
-                            load8Unsigned16As32(
-                                source.data() +
-                                neighbourIndex);
+        int x =
+            kFilterRadius;
 
-                        accumulateNeighbour(
-                            neighbour,
-                            center,
-                            thresholdVector,
-                            one,
-                            sum,
-                            count);
-                    }
-                }
+        const int vectorEnd =
+            width -
+            kFilterRadius -
+            7;
 
-                storeRoundedAverage(
-                    sum,
-                    count,
-                    destination.data() +
+        for (;
+            x < vectorEnd;
+            x += 8)
+        {
+            const std::size_t centerIndex =
+                lineOffset +
+                static_cast<std::size_t>(x);
+
+            const __m256i center =
+                load8Unsigned16As32(
+                    source.data() +
                     centerIndex);
+
+            __m256i sum =
+                _mm256_setzero_si256();
+
+            __m256i count =
+                _mm256_setzero_si256();
+
+            for (int offsetY = -kFilterRadius;
+                offsetY <= kFilterRadius;
+                ++offsetY)
+            {
+                const std::size_t neighbourLine =
+                    static_cast<std::size_t>(
+                        y + offsetY) *
+                    static_cast<std::size_t>(
+                        width);
+
+                for (int offsetX = -kFilterRadius;
+                    offsetX <= kFilterRadius;
+                    ++offsetX)
+                {
+                    const std::size_t neighbourIndex =
+                        neighbourLine +
+                        static_cast<std::size_t>(
+                            x + offsetX);
+
+                    const __m256i neighbour =
+                        load8Unsigned16As32(
+                            source.data() +
+                            neighbourIndex);
+
+                    accumulateNeighbour(
+                        neighbour,
+                        center,
+                        thresholdVector,
+                        one,
+                        sum,
+                        count);
+                }
             }
 
-            for (;
-                x < width - 1;
-                ++x)
+            storeRoundedAverage(
+                sum,
+                count,
+                destination.data() +
+                centerIndex);
+        }
+
+        for (;
+            x < width - kFilterRadius;
+            ++x)
+        {
+            const std::size_t centerIndex =
+                lineOffset +
+                static_cast<std::size_t>(x);
+
+            const std::uint16_t center =
+                source[centerIndex];
+
+            std::uint32_t sum = 0;
+            std::uint32_t count = 0;
+
+            for (int offsetY = -kFilterRadius;
+                offsetY <= kFilterRadius;
+                ++offsetY)
             {
-                const std::size_t centerIndex =
-                    lineOffset +
-                    static_cast<std::size_t>(x);
+                const std::size_t neighbourLine =
+                    static_cast<std::size_t>(
+                        y + offsetY) *
+                    static_cast<std::size_t>(
+                        width);
 
-                const std::uint16_t center =
-                    source[centerIndex];
-
-                std::uint32_t sum = 0;
-                std::uint32_t count = 0;
-
-                for (int offsetY = -1;
-                    offsetY <= 1;
-                    ++offsetY)
+                for (int offsetX = -kFilterRadius;
+                    offsetX <= kFilterRadius;
+                    ++offsetX)
                 {
-                    const std::size_t neighbourLine =
-                        static_cast<std::size_t>(
-                            y + offsetY) *
-                        static_cast<std::size_t>(
-                            width);
+                    const std::uint16_t neighbour =
+                        source[
+                            neighbourLine +
+                                static_cast<std::size_t>(
+                                    x + offsetX)];
 
-                    for (int offsetX = -1;
-                        offsetX <= 1;
-                        ++offsetX)
+                    if (absoluteDifference(
+                        neighbour,
+                        center) <= threshold)
                     {
-                        const std::uint16_t neighbour =
-                            source[
-                                neighbourLine +
-                                    static_cast<std::size_t>(
-                                        x + offsetX)];
-
-                        if (absoluteDifference(
-                            neighbour,
-                            center) <= threshold)
-                        {
-                            sum += neighbour;
-                            ++count;
-                        }
+                        sum += neighbour;
+                        ++count;
                     }
                 }
-
-                destination[centerIndex] =
-                    static_cast<std::uint16_t>(
-                        (sum + count / 2u) /
-                        count);
             }
+
+            destination[centerIndex] =
+                static_cast<std::uint16_t>(
+                    (sum + count / 2u) /
+                    count);
+        }
+    }
+}
+
+void NoiseReducer::blendPlane(
+    const std::vector<std::uint16_t>& source,
+    std::vector<std::uint16_t>& filtered,
+    int intensity)
+{
+    const std::size_t sampleCount =
+        std::min(
+            source.size(),
+            filtered.size());
+
+    if (sampleCount == 0)
+    {
+        return;
+    }
+
+    const int clampedIntensity =
+        std::clamp(
+            intensity,
+            kMinimumIntensity,
+            kMaximumIntensity);
+
+    if (clampedIntensity <= 0)
+    {
+        std::copy_n(
+            source.begin(),
+            sampleCount,
+            filtered.begin());
+        return;
+    }
+
+    if (clampedIntensity >= kMaximumIntensity)
+    {
+        return;
+    }
+
+    const __m256i strength =
+        _mm256_set1_epi32(
+            clampedIntensity);
+
+    const __m256i inverseStrength =
+        _mm256_set1_epi32(
+            kMaximumIntensity -
+            clampedIntensity);
+
+    const __m256i rounding =
+        _mm256_set1_epi32(
+            50);
+
+    const __m256 scale =
+        _mm256_set1_ps(
+            0.01f);
+
+    std::size_t index = 0;
+
+    const std::size_t vectorEnd =
+        sampleCount -
+        sampleCount % 8u;
+
+    for (;
+        index < vectorEnd;
+        index += 8u)
+    {
+        const __m256i source32 =
+            load8Unsigned16As32(
+                source.data() +
+                index);
+
+        const __m256i filtered32 =
+            load8Unsigned16As32(
+                filtered.data() +
+                index);
+
+        __m256i weighted =
+            _mm256_add_epi32(
+                _mm256_mullo_epi32(
+                    source32,
+                    inverseStrength),
+                _mm256_mullo_epi32(
+                    filtered32,
+                    strength));
+
+        weighted =
+            _mm256_add_epi32(
+                weighted,
+                rounding);
+
+        // Integer division by 100 is not directly available in AVX2.
+        // Values are <= 6.6 million, exactly representable as float.
+        const __m256 blendedFloat =
+            _mm256_mul_ps(
+                _mm256_cvtepi32_ps(
+                    weighted),
+                scale);
+
+        const __m256i blended32 =
+            _mm256_cvttps_epi32(
+                blendedFloat);
+
+        const __m128i low =
+            _mm256_castsi256_si128(
+                blended32);
+
+        const __m128i high =
+            _mm256_extracti128_si256(
+                blended32,
+                1);
+
+        const __m128i packed =
+            _mm_packus_epi32(
+                low,
+                high);
+
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(
+                filtered.data() +
+                index),
+            packed);
+    }
+
+    for (;
+        index < sampleCount;
+        ++index)
+    {
+        const std::uint32_t original =
+            source[index];
+
+        const std::uint32_t reduced =
+            filtered[index];
+
+        filtered[index] =
+            static_cast<std::uint16_t>(
+                (original *
+                    static_cast<std::uint32_t>(
+                        kMaximumIntensity -
+                        clampedIntensity) +
+                    reduced *
+                    static_cast<std::uint32_t>(
+                        clampedIntensity) +
+                    50u) /
+                100u);
     }
 }

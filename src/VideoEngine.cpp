@@ -264,6 +264,18 @@ void VideoEngine::setNoiseReductionEnabled(
 }
 
 
+void VideoEngine::setNoiseReductionIntensity(
+    int intensity)
+{
+    noiseReductionIntensity_.store(
+        std::clamp(
+            intensity,
+            0,
+            100),
+        std::memory_order_release);
+}
+
+
 void VideoEngine::setWaveformPersistence(int persistence)
 {
     waveformPersistence_.store(
@@ -649,6 +661,10 @@ void VideoEngine::displayWorkerLoop()
             noiseReductionEnabled_.load(
                 std::memory_order_acquire);
 
+        const int noiseReductionIntensity =
+            noiseReductionIntensity_.load(
+                std::memory_order_acquire);
+
         const Yuv444Frame* displayFrame =
             &captureSlot.frame;
 
@@ -659,7 +675,8 @@ void VideoEngine::displayWorkerLoop()
         {
             noiseReducer_.process(
                 captureSlot.frame,
-                noiseReducedFrame_);
+                noiseReducedFrame_,
+                noiseReductionIntensity);
 
             displayFrame =
                 &noiseReducedFrame_;
@@ -1742,4 +1759,11 @@ void VideoEngine::setDisplayGamma(double gamma)
 PerformanceSnapshot VideoEngine::performanceSnapshot() const
 {
     return performanceStats_.snapshot();
+}
+
+void VideoEngine::setWaveformAspectRatio(
+    OpenScopeSettings::AspectRatio aspectRatio)
+{
+    waveformRenderer_.setAspectRatio(
+        aspectRatio);
 }

@@ -136,6 +136,14 @@ ScopeWorkspace::ScopeWorkspace(
         &ControlWidget::noiseReductionChanged,
         this,
         &ScopeWorkspace::noiseReductionChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::
+        noiseReductionIntensityChanged,
+        this,
+        &ScopeWorkspace::
+        noiseReductionIntensityChanged);
 }
 
 void ScopeWorkspace::toggleMaximized(

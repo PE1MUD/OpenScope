@@ -38,6 +38,9 @@ signals:
     void noiseReductionChanged(
         bool enabled);
 
+    void noiseReductionIntensityChanged(
+        int intensity);
+
     void videoMaximizedChanged(
         bool maximized);
 

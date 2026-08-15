@@ -137,6 +137,67 @@ ControlWidget::ControlWidget(
     layout->addWidget(
         noiseReductionCheckBox);
 
+    auto* noiseReductionRow =
+        new QWidget(this);
+
+    auto* noiseReductionLayout =
+        new QHBoxLayout(
+            noiseReductionRow);
+
+    noiseReductionLayout->setContentsMargins(
+        0,
+        0,
+        0,
+        0);
+
+    noiseReductionLayout->setSpacing(
+        12);
+
+    auto* noiseReductionLabel =
+        new QLabel(
+            "Noise reduction intensity",
+            noiseReductionRow);
+
+    auto* noiseReductionSlider =
+        new QSlider(
+            Qt::Horizontal,
+            noiseReductionRow);
+
+    noiseReductionSlider->setRange(
+        0,
+        100);
+
+    // 50 reproduces the thresholds used by the first
+    // fixed-strength noise-reduction implementation.
+    noiseReductionSlider->setValue(
+        50);
+
+    noiseReductionSlider->setEnabled(
+        false);
+
+    noiseReductionLayout->addWidget(
+        noiseReductionLabel);
+
+    noiseReductionLayout->addWidget(
+        noiseReductionSlider,
+        1);
+
+    connect(
+        noiseReductionCheckBox,
+        &QCheckBox::toggled,
+        noiseReductionSlider,
+        &QSlider::setEnabled);
+
+    connect(
+        noiseReductionSlider,
+        &QSlider::valueChanged,
+        this,
+        &ControlWidget::
+        noiseReductionIntensityChanged);
+
+    layout->addWidget(
+        noiseReductionRow);
+
     layout->addStretch();
 }
 

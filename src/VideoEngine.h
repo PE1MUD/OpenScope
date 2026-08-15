@@ -24,6 +24,7 @@
 #include "video/ProgressiveLumaPair.h"
 #include "video/ReconstructedLumaFrame.h"
 #include "video/Yuv444Frame.h"
+#include "settings/OpenScopeSettings.h"
 
 class VideoEngine : public QObject
 {
@@ -52,6 +53,9 @@ public:
     void setNoiseReductionEnabled(
         bool enabled);
 
+    void setNoiseReductionIntensity(
+        int intensity);
+
     void setWaveformOutputSize(
         int width,
         int height);
@@ -74,6 +78,9 @@ public:
     void setVectorscopeOutputSize(
         int width,
         int height);
+
+    void setWaveformAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio);
 
     PerformanceSnapshot performanceSnapshot() const;
 
@@ -162,6 +169,10 @@ private:
 
     std::atomic<bool> noiseReductionEnabled_{
         false
+    };
+
+    std::atomic<int> noiseReductionIntensity_{
+        50
     };
 
     // Output sizes

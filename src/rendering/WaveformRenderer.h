@@ -4,6 +4,7 @@
 #include "video/ReconstructedLumaFrame.h"
 #include "rendering/WaveformGraticule.h"
 #include "processing/SignalReconstructor.h"
+#include "settings/OpenScopeSettings.h"
 
 #include <QImage>
 #include <QRectF>
@@ -46,6 +47,9 @@ public:
         int intensity);
 
     void setColor(bool enabled);
+
+    void setAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio);
 
 private:
     struct TracePixel
@@ -137,4 +141,7 @@ private:
     int chromaFillIntensity_ = 64;
 
     WaveformSettings settings_;
+
+    OpenScopeSettings::AspectRatio aspectRatio_ =
+        OpenScopeSettings::AspectRatio::Ratio4x3;
 };

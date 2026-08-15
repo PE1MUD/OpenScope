@@ -28,6 +28,9 @@ signals:
     void noiseReductionChanged(
         bool enabled);
 
+    void noiseReductionIntensityChanged(
+        int intensity);
+
 private:
     QCheckBox* performanceCheckBox_ = nullptr;
 };
