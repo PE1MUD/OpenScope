@@ -23,6 +23,8 @@ public:
     void setPerformanceVisible(
         bool visible);
 
+    bool isVideoMaximized() const;
+
 signals:
     void waveformChromaFillIntensityChanged(
         int intensity);
@@ -32,6 +34,9 @@ signals:
         OpenScopeSettings::WorkspaceView view);
     void performanceVisibilityChanged(
         bool visible);
+
+    void videoMaximizedChanged(
+        bool maximized);
 
 private:
     void showGrid();

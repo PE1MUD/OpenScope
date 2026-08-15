@@ -246,6 +246,15 @@ void VideoEngine::setSelectedLine(int line)
 }
 
 
+void VideoEngine::setVideoHighlightEnabled(
+    bool enabled)
+{
+    videoHighlightEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+
 void VideoEngine::setWaveformPersistence(int persistence)
 {
     waveformPersistence_.store(
@@ -636,6 +645,10 @@ void VideoEngine::displayWorkerLoop()
             selectedLine_.load(
                 std::memory_order_acquire);
 
+        const bool videoHighlightEnabled =
+            videoHighlightEnabled_.load(
+                std::memory_order_acquire);
+
         const bool waveformZoomed =
             waveformZoomed_.load(
                 std::memory_order_acquire);
@@ -670,12 +683,24 @@ void VideoEngine::displayWorkerLoop()
         for (DisplayConverter& converter :
             displayConverters_)
         {
-            converter.setHighlightedRange(
-                highlightStartX,
-                highlightEndX);
+            if (videoHighlightEnabled)
+            {
+                converter.setHighlightedRange(
+                    highlightStartX,
+                    highlightEndX);
 
-            converter.setHighlightedLine(
-                selectedLine);
+                converter.setHighlightedLine(
+                    selectedLine);
+            }
+            else
+            {
+                converter.setHighlightedRange(
+                    0,
+                    -1);
+
+                converter.setHighlightedLine(
+                    -1);
+            }
         }
 
         QElapsedTimer totalDisplayTimer;

@@ -87,11 +87,40 @@ MainWindow::MainWindow(QWidget* parent)
             .chromaRenderIntensity,
             this);
 
-    workspace_->setWorkspaceView(
+    const OpenScopeSettings::WorkspaceView
+        initialWorkspaceView =
         settingsService_->settings()
         .local
         .workspace
-        .view);
+        .view;
+
+    workspace_->setWorkspaceView(
+        initialWorkspaceView);
+
+    switch (initialWorkspaceView)
+    {
+    case OpenScopeSettings::WorkspaceView::Video:
+        activeRenderView_ =
+            RenderView::Video;
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Waveform:
+        activeRenderView_ =
+            RenderView::Waveform;
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Vectorscope:
+        activeRenderView_ =
+            RenderView::Vectorscope;
+        break;
+
+    case OpenScopeSettings::WorkspaceView::Matrix:
+    case OpenScopeSettings::WorkspaceView::Headless:
+    default:
+        activeRenderView_ =
+            RenderView::Matrix;
+        break;
+    }
 
     performanceWidget_ =
         new PerformanceWidget(this);
@@ -196,6 +225,33 @@ MainWindow::MainWindow(QWidget* parent)
                     settings.local.workspace.view =
                         view;
                 });
+
+            switch (view)
+            {
+            case OpenScopeSettings::WorkspaceView::Video:
+                activeRenderView_ =
+                    RenderView::Video;
+                break;
+
+            case OpenScopeSettings::WorkspaceView::Waveform:
+                activeRenderView_ =
+                    RenderView::Waveform;
+                break;
+
+            case OpenScopeSettings::WorkspaceView::Vectorscope:
+                activeRenderView_ =
+                    RenderView::Vectorscope;
+                break;
+
+            case OpenScopeSettings::WorkspaceView::Matrix:
+            case OpenScopeSettings::WorkspaceView::Headless:
+            default:
+                activeRenderView_ =
+                    RenderView::Matrix;
+                break;
+            }
+
+            updateRenderResolutionTitle();
         });
 
     connect(
@@ -206,6 +262,16 @@ MainWindow::MainWindow(QWidget* parent)
         {
             performanceWidget_->setVisible(
                 visible);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::videoMaximizedChanged,
+        this,
+        [this](bool maximized)
+        {
+            updateVideoFullscreenUi(
+                maximized);
         });
 
     setCentralWidget(workspace_);
@@ -228,8 +294,11 @@ MainWindow::MainWindow(QWidget* parent)
 
     performanceTimer_->start();
 
-    auto* toolbar =
+    instrumentToolBar_ =
         addToolBar("Line selector");
+
+    QToolBar* const toolbar =
+        instrumentToolBar_;
 
     const bool waveformZoomed =
         settingsService_->settings()
@@ -467,10 +536,44 @@ MainWindow::MainWindow(QWidget* parent)
         &VideoEngine::setVectorscopeOutputSize);
 
     connect(
+        vectorscopeWidget_,
+        &VectorscopeWidget::renderSizeChanged,
+        this,
+        [this](int width, int height)
+        {
+            vectorscopeRenderSize_ =
+                QSize(width, height);
+
+            if (activeRenderView_ ==
+                RenderView::Vectorscope)
+            {
+                updateRenderResolutionTitle();
+            }
+        });
+
+    connect(
         videoWidget_,
         &VideoWidget::outputSizeChanged,
         videoEngine_,
         &VideoEngine::setVideoOutputSize);
+
+    connect(
+        videoWidget_,
+        &VideoWidget::outputSizeChanged,
+        this,
+        [this](int width, int height)
+        {
+            videoRenderSize_ =
+                QSize(width, height);
+
+            if (activeRenderView_ ==
+                RenderView::Video ||
+                activeRenderView_ ==
+                RenderView::Matrix)
+            {
+                updateRenderResolutionTitle();
+            }
+        });
 
     connect(
         videoEngine_,
@@ -489,6 +592,85 @@ MainWindow::MainWindow(QWidget* parent)
         &WaveformWidget::outputSizeChanged,
         videoEngine_,
         &VideoEngine::setWaveformOutputSize);
+
+    connect(
+        waveformWidget_,
+        &WaveformWidget::outputSizeChanged,
+        this,
+        [this](int width, int height)
+        {
+            waveformRenderSize_ =
+                QSize(width, height);
+
+            if (activeRenderView_ ==
+                RenderView::Waveform)
+            {
+                updateRenderResolutionTitle();
+            }
+        });
+
+    updateVideoFullscreenUi(
+        workspace_->isVideoMaximized());
+
+    updateRenderResolutionTitle();
+}
+
+void MainWindow::updateVideoFullscreenUi(
+    bool fullscreen)
+{
+    if (instrumentToolBar_ != nullptr)
+    {
+        instrumentToolBar_->setVisible(
+            !fullscreen);
+    }
+
+    videoEngine_->setVideoHighlightEnabled(
+        !fullscreen);
+}
+
+void MainWindow::updateRenderResolutionTitle()
+{
+    QSize renderSize;
+
+    switch (activeRenderView_)
+    {
+    case RenderView::Video:
+        renderSize =
+            videoRenderSize_;
+        break;
+
+    case RenderView::Waveform:
+        renderSize =
+            waveformRenderSize_;
+        break;
+
+    case RenderView::Vectorscope:
+        renderSize =
+            vectorscopeRenderSize_;
+        break;
+
+    case RenderView::Matrix:
+    default:
+        // In matrix mode the video viewport is our
+        // render-resolution reference.
+        renderSize =
+            videoRenderSize_;
+        break;
+    }
+
+    if (renderSize.isValid())
+    {
+        setWindowTitle(
+            QString(
+                "OpenScope V0.31 - %1x%2")
+            .arg(renderSize.width())
+            .arg(renderSize.height()));
+    }
+    else
+    {
+        setWindowTitle(
+            "OpenScope V0.31");
+    }
 }
 
 VideoWidget* MainWindow::videoWidget() const

@@ -2,8 +2,10 @@
 
 #include <QMainWindow>
 #include <QRect>
+#include <QSize>
 #include <QCloseEvent>
 class QTimer;
+class QToolBar;
 
 class VectorscopeWidget;
 class VideoEngine;
@@ -32,6 +34,14 @@ protected:
         qintptr* result) override;
 
 private:
+    enum class RenderView
+    {
+        Matrix,
+        Video,
+        Waveform,
+        Vectorscope
+    };
+
     VideoWidget* videoWidget_ = nullptr;
     VideoEngine* videoEngine_ = nullptr;
     WaveformWidget* waveformWidget_ = nullptr;
@@ -42,4 +52,17 @@ private:
     SettingsService* settingsService_ = nullptr;
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
+    QToolBar* instrumentToolBar_ = nullptr;
+
+    QSize videoRenderSize_;
+    QSize waveformRenderSize_;
+    QSize vectorscopeRenderSize_;
+
+    RenderView activeRenderView_ =
+        RenderView::Matrix;
+
+    void updateVideoFullscreenUi(
+        bool fullscreen);
+
+    void updateRenderResolutionTitle();
 };

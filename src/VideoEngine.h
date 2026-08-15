@@ -45,6 +45,9 @@ public:
     void setDisplayGamma(
         double gamma);
 
+    void setVideoHighlightEnabled(
+        bool enabled);
+
     void setWaveformOutputSize(
         int width,
         int height);
@@ -147,6 +150,10 @@ private:
 
     std::atomic<int> selectedLine_{
         kDefaultSelectedLine
+    };
+
+    std::atomic<bool> videoHighlightEnabled_{
+        true
     };
 
     // Output sizes
@@ -316,7 +323,7 @@ private:
 
     std::array<
         std::jthread,
-        2> displayPhaseWorkers_;
+        1> displayPhaseWorkers_;
 
     std::mutex displayPhaseMutex_;
     std::condition_variable displayPhaseCondition_;

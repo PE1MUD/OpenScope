@@ -137,7 +137,16 @@ void ScopeWorkspace::toggleMaximized(
 {
     if (maximizedViewport_ == viewport)
     {
+        const bool leavingVideo =
+            viewport == videoViewport_;
+
         showGrid();
+
+        if (leavingVideo)
+        {
+            emit videoMaximizedChanged(
+                false);
+        }
 
         emit workspaceViewChanged(
             OpenScopeSettings::WorkspaceView::Matrix);
@@ -145,7 +154,19 @@ void ScopeWorkspace::toggleMaximized(
         return;
     }
 
+    const bool videoWasMaximized =
+        maximizedViewport_ == videoViewport_;
+
     showMaximized(viewport);
+
+    const bool videoIsMaximized =
+        viewport == videoViewport_;
+
+    if (videoWasMaximized != videoIsMaximized)
+    {
+        emit videoMaximizedChanged(
+            videoIsMaximized);
+    }
 
     if (viewport == videoViewport_)
     {
@@ -234,6 +255,9 @@ void ScopeWorkspace::showGrid()
 void ScopeWorkspace::setWorkspaceView(
     OpenScopeSettings::WorkspaceView view)
 {
+    const bool videoWasMaximized =
+        maximizedViewport_ == videoViewport_;
+
     switch (view)
     {
     case OpenScopeSettings::WorkspaceView::Video:
@@ -259,6 +283,22 @@ void ScopeWorkspace::setWorkspaceView(
         showGrid();
         break;
     }
+
+    const bool videoIsMaximized =
+        maximizedViewport_ == videoViewport_;
+
+    if (videoWasMaximized != videoIsMaximized)
+    {
+        emit videoMaximizedChanged(
+            videoIsMaximized);
+    }
+}
+
+bool ScopeWorkspace::isVideoMaximized() const
+{
+    return
+        maximizedViewport_ ==
+        videoViewport_;
 }
 
 void ScopeWorkspace::setPerformanceVisible(
