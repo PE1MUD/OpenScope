@@ -16,6 +16,7 @@
 #include <QStyleOptionSlider>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTextBrowser>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -281,10 +282,13 @@ ControlWidget::ControlWidget(
 
     outerLayout->setSpacing(0);
 
-    auto* tabs =
+    tabs_ =
         new QTabWidget(this);
 
-    outerLayout->addWidget(tabs);
+    auto* tabs =
+        tabs_;
+
+    outerLayout->addWidget(tabs_);
 
     // ------------------------------------------------------------
     // Display
@@ -875,7 +879,105 @@ ControlWidget::ControlWidget(
     tabs->addTab(
         miscTab,
         "Misc");
+
+    // ------------------------------------------------------------
+    // Help - only shown while the workspace is in quad view.
+    // ------------------------------------------------------------
+    auto* helpTab =
+        new QWidget(tabs);
+
+    auto* helpLayout =
+        new QVBoxLayout(helpTab);
+
+    helpLayout->setContentsMargins(
+        6,
+        4,
+        6,
+        4);
+
+    auto* waveformHelp =
+        new QTextBrowser(helpTab);
+
+    waveformHelp->setOpenExternalLinks(false);
+    waveformHelp->setFrameShape(QFrame::NoFrame);
+    waveformHelp->setHtml(
+        QStringLiteral(
+            R"HTML(
+<h3>Waveform</h3>
+<p><b>Line selector</b><br>
+Selects one video line. <b>All</b> shows all lines and disables X5/X10.</p>
+
+<p><b>X1 / X5 / X10</b><br>
+Horizontal waveform zoom only. In X5/X10, drag with the <b>right mouse button</b> to pan left/right.</p>
+
+<p><b>Color carrier intensity</b><br>
+Sets the strength of the chroma-envelope rendering.</p>
+
+<p><b>Scopephor</b><br>
+Controls trace persistence.</p>
+
+<p><b>Vintage look</b><br>
+Enables the more analogue scope appearance.</p>
+
+<h3>Waveform measurement</h3>
+<p><b>D — Details</b><br>
+Hold D to show &micro;s from line start and source pixel (0–719) in the blue probe.</p>
+
+<p><b>Left mouse drag</b><br>
+Manual point-to-point measurement of voltage difference and frequency.</p>
+
+<p><b>R + left mouse drag</b><br>
+Defines a reference area. The result is averaged over up to four frames.
+Magenta reference level lines can be dragged vertically for manual correction.</p>
+
+<p><b>A + left mouse drag</b><br>
+Measures a sinusoidal area. Frequency is shown with amplitude in mV, or in dB when a reference exists.
+Green measurement level lines can be dragged vertically and the result follows the correction.</p>
+
+<p><b>M</b><br>
+Automatic multiburst measurement. Periodic zones around 50% video level are detected,
+the lowest-frequency signal becomes the reference, and the remaining valid bursts are measured.
+Partial results are shown when at least four bursts are found.</p>
+
+<p><b>C</b><br>
+Clears all waveform measurements and references.</p>
+
+<p><b>Double click</b><br>
+Clears measurements and toggles the waveform viewport between quad and maximized view.</p>
+
+<p><i>Measurements are also cleared when the selected line changes or the waveform view is resized.</i></p>
+)HTML"));
+
+    helpLayout->addWidget(
+        waveformHelp);
+
+    helpTabIndex_ =
+        tabs->addTab(
+            helpTab,
+            "Help");
 }
+
+void ControlWidget::setHelpTabVisible(
+    bool visible)
+{
+    if (tabs_ == nullptr ||
+        helpTabIndex_ < 0)
+    {
+        return;
+    }
+
+    if (!visible &&
+        tabs_->currentIndex() == helpTabIndex_)
+    {
+        tabs_->setCurrentIndex(
+            1);
+    }
+
+    tabs_->setTabVisible(
+        helpTabIndex_,
+        visible);
+}
+
 
 void ControlWidget::setLineNumber(
     int lineNumber)

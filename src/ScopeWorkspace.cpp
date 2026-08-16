@@ -267,6 +267,9 @@ void ScopeWorkspace::toggleMaximized(
 void ScopeWorkspace::showMaximized(
     ScopeViewport* viewport)
 {
+    controlWidget_->setHelpTabVisible(
+        false);
+
     videoViewport_->hide();
     waveformViewport_->hide();
     vectorscopeViewport_->hide();
@@ -292,6 +295,9 @@ void ScopeWorkspace::showMaximized(
 
 void ScopeWorkspace::showGrid()
 {
+    controlWidget_->setHelpTabVisible(
+        true);
+
     dockSettings();
 
     layout_->removeWidget(

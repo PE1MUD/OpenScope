@@ -8,6 +8,7 @@ class QCheckBox;
 class QButtonGroup;
 class QToolButton;
 class QSpinBox;
+class QTabWidget;
 
 class ControlWidget : public QWidget
 {
@@ -29,6 +30,9 @@ public:
 
     void setAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
+
+    void setHelpTabVisible(
+        bool visible);
 
 signals:
     void lineNumberChanged(int lineNumber);
@@ -55,4 +59,6 @@ private:
     QToolButton* waveformZoom5Button_ = nullptr;
     QToolButton* waveformZoom10Button_ = nullptr;
     QSpinBox* lineSelector_ = nullptr;
+    QTabWidget* tabs_ = nullptr;
+    int helpTabIndex_ = -1;
 };
