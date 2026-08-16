@@ -403,6 +403,12 @@ OpenScopeSettings SettingsStorage::load() const
             result.local.floaties.performanceVisible)
         .toBool();
 
+    result.local.floaties.waveformVideoVisible =
+        settings.value(
+            "Local/Floaties/WaveformVideo/Visible",
+            result.local.floaties.waveformVideoVisible)
+        .toBool();
+
     result.local.floaties.settings.x =
         settings.value(
             "Local/Floaties/Settings/X",
@@ -607,6 +613,10 @@ void SettingsStorage::save(
     storage.setValue(
         "Local/Floaties/Performance/Visible",
         settings.local.floaties.performanceVisible);
+
+    storage.setValue(
+        "Local/Floaties/WaveformVideo/Visible",
+        settings.local.floaties.waveformVideoVisible);
 
     storage.setValue(
         "Local/Floaties/Settings/X",

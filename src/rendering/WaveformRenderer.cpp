@@ -1532,6 +1532,8 @@ void WaveformRenderer::composeTraceImage()
 void WaveformRenderer::renderAllLines(
     const Yuv444Frame& frame)
 {
+    sourceY_.clear();
+
     std::fill(
         hits_.begin(),
         hits_.end(),
@@ -2343,6 +2345,11 @@ void WaveformRenderer::setGlow(
 const QImage& WaveformRenderer::image() const
 {
     return image_;
+}
+
+const std::vector<float>& WaveformRenderer::visibleLumaVolts() const noexcept
+{
+    return sourceY_;
 }
 
 double WaveformRenderer::traceBandwidthMHz() const

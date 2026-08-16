@@ -6,36 +6,94 @@
 #include <QApplication>
 #include <QEvent>
 #include <QFontMetricsF>
+#include <QImage>
+#include <QKeyEvent>
 #include <QLineF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QVector>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 
 namespace
 {
 constexpr double kBlackLevelVolts = 0.3;
 constexpr double kWhiteLevelVolts = 1.0;
+constexpr double kMinimumPeakVolts = 0.1;
+constexpr double kMaximumVariation = 0.10;
+constexpr int kMinimumStableCycles = 2;
+constexpr int kTemporalMeasurementFrames = 4;
+constexpr int kMinimumTemporalValidFrames = 2;
+
+struct WaveformGeometry
+{
+    QRect displayRect;
+    QRectF scopeRect;
+    double zeroVoltY = 0.0;
+    double oneVoltY = 0.0;
+    double voltsPerDisplayPixel = 0.0;
+    VideoStandard standard = VideoStandard::pal625();
+};
+
+struct SamplePoint
+{
+    double displayX = 0.0;
+    double displayY = 0.0;
+    double volts = 0.0;
+    double sourceSamples = 0.0;
+    bool valid = false;
+};
+
+struct CandidateCycle
+{
+    int startIndex = 0;
+    int endIndex = 0;
+    int troughIndex = 0;
+    double periodSamples = 0.0;
+    double vppVolts = 0.0;
+};
 
 QPointF clampPointToRect(
     const QPointF& point,
-    const QRect& rect)
+    const QRectF& rect)
 {
     return
     {
         std::clamp(
             point.x(),
-            static_cast<double>(rect.left()),
-            static_cast<double>(rect.right())),
+            rect.left(),
+            rect.right()),
         std::clamp(
             point.y(),
-            static_cast<double>(rect.top()),
-            static_cast<double>(rect.bottom()))
+            rect.top(),
+            rect.bottom())
     };
+}
+
+QRectF normalizedRect(
+    const QPointF& a,
+    const QPointF& b)
+{
+    return QRectF(a, b).normalized();
+}
+
+double sampleClockHz(
+    const VideoStandard& standard)
+{
+    switch (standard.colorStandard)
+    {
+    case VideoColorStandard::Rec601_625:
+    case VideoColorStandard::Rec601_525:
+        return 13.5e6;
+
+    default:
+        return 13.5e6;
+    }
 }
 
 QString formatPercent(
@@ -72,12 +130,270 @@ void drawArrowHead(
     painter.drawLine(tip, sideA);
     painter.drawLine(tip, sideB);
 }
+
+WaveformGeometry makeGeometry(
+    const QImage& image,
+    const QRect& displayRect,
+    const QWidget* widget)
+{
+    WaveformGeometry geometry;
+    geometry.displayRect = displayRect;
+    geometry.standard = VideoStandard::pal625();
+
+    const WaveformGraticule graticule;
+    const double leftInset =
+        graticule.leftInset(
+            QApplication::font(),
+            widget,
+            static_cast<double>(displayRect.height()));
+
+    const QRectF scopeRect(
+        static_cast<double>(displayRect.left()) + leftInset,
+        static_cast<double>(displayRect.top()),
+        static_cast<double>(displayRect.width()) - leftInset,
+        static_cast<double>(displayRect.height()));
+
+    const QFont font =
+        graticule.labelFont(
+            QApplication::font(),
+            scopeRect.height());
+
+    const QFontMetricsF metrics(font, widget);
+    const double labelHeight = metrics.height();
+
+    geometry.scopeRect = QRectF(
+        scopeRect.left(),
+        scopeRect.top() + labelHeight * 0.5,
+        scopeRect.width(),
+        scopeRect.height() - labelHeight);
+
+    const AnalogVideoLevels analog =
+        analogLevels(geometry.standard.colorStandard);
+
+    const auto voltsToDisplayY =
+        [&](double volts)
+        {
+            return
+                geometry.scopeRect.bottom() -
+                volts * geometry.scopeRect.height() /
+                analog.graticuleMaxVolts;
+        };
+
+    geometry.zeroVoltY = voltsToDisplayY(0.0);
+    geometry.oneVoltY = voltsToDisplayY(1.0);
+    geometry.voltsPerDisplayPixel =
+        1.0 / (geometry.zeroVoltY - geometry.oneVoltY);
+
+    Q_UNUSED(image);
+    return geometry;
+}
+
+int whitenessScore(QRgb pixel)
+{
+    const int red = qRed(pixel);
+    const int green = qGreen(pixel);
+    const int blue = qBlue(pixel);
+    const int maximum = (std::max)({ red, green, blue });
+    const int minimum = (std::min)({ red, green, blue });
+    const int delta = maximum - minimum;
+    return minimum - delta / 2;
+}
+
+double relativeVariation(
+    double value,
+    double reference)
+{
+    if (std::abs(reference) < 1.0e-12)
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    return std::abs(value - reference) / std::abs(reference);
+}
+
+
+struct SineFitResult
+{
+    bool valid = false;
+    double dc = 0.0;
+    double sine = 0.0;
+    double cosine = 0.0;
+    double peak = 0.0;
+    double vpp = 0.0;
+};
+
+bool solve3x3(
+    double matrix[3][4])
+{
+    for (int pivot = 0; pivot < 3; ++pivot)
+    {
+        int bestRow = pivot;
+        double bestMagnitude = std::abs(matrix[pivot][pivot]);
+
+        for (int row = pivot + 1; row < 3; ++row)
+        {
+            const double magnitude = std::abs(matrix[row][pivot]);
+            if (magnitude > bestMagnitude)
+            {
+                bestMagnitude = magnitude;
+                bestRow = row;
+            }
+        }
+
+        if (bestMagnitude < 1.0e-12)
+        {
+            return false;
+        }
+
+        if (bestRow != pivot)
+        {
+            for (int column = pivot; column < 4; ++column)
+            {
+                std::swap(matrix[pivot][column], matrix[bestRow][column]);
+            }
+        }
+
+        const double divisor = matrix[pivot][pivot];
+        for (int column = pivot; column < 4; ++column)
+        {
+            matrix[pivot][column] /= divisor;
+        }
+
+        for (int row = 0; row < 3; ++row)
+        {
+            if (row == pivot)
+            {
+                continue;
+            }
+
+            const double factor = matrix[row][pivot];
+            for (int column = pivot; column < 4; ++column)
+            {
+                matrix[row][column] -= factor * matrix[pivot][column];
+            }
+        }
+    }
+
+    return true;
+}
+
+SineFitResult fitSineAtMeasuredPeriod(
+    const QVector<double>& samples,
+    int firstIndex,
+    int lastIndex,
+    double periodSamples)
+{
+    SineFitResult result;
+
+    if (periodSamples <= 0.0 ||
+        firstIndex < 0 ||
+        lastIndex < firstIndex ||
+        lastIndex >= static_cast<int>(samples.size()))
+    {
+        return result;
+    }
+
+    const double omega =
+        2.0 * std::acos(-1.0) /
+        periodSamples;
+
+    double sumOne = 0.0;
+    double sumSin = 0.0;
+    double sumCos = 0.0;
+    double sumSinSin = 0.0;
+    double sumCosCos = 0.0;
+    double sumSinCos = 0.0;
+    double sumY = 0.0;
+    double sumYSin = 0.0;
+    double sumYCos = 0.0;
+
+    for (int index = firstIndex; index <= lastIndex; ++index)
+    {
+        const double phase =
+            omega *
+            static_cast<double>(index - firstIndex);
+        const double sine = std::sin(phase);
+        const double cosine = std::cos(phase);
+        const double value = samples[index];
+
+        sumOne += 1.0;
+        sumSin += sine;
+        sumCos += cosine;
+        sumSinSin += sine * sine;
+        sumCosCos += cosine * cosine;
+        sumSinCos += sine * cosine;
+        sumY += value;
+        sumYSin += value * sine;
+        sumYCos += value * cosine;
+    }
+
+    double matrix[3][4]
+    {
+        { sumOne, sumSin,    sumCos,    sumY    },
+        { sumSin, sumSinSin, sumSinCos, sumYSin },
+        { sumCos, sumSinCos, sumCosCos, sumYCos }
+    };
+
+    if (!solve3x3(matrix))
+    {
+        return result;
+    }
+
+    result.dc = matrix[0][3];
+    result.sine = matrix[1][3];
+    result.cosine = matrix[2][3];
+    result.peak = std::hypot(result.sine, result.cosine);
+    result.vpp = 2.0 * result.peak;
+    result.valid = std::isfinite(result.vpp) && result.vpp > 0.0;
+    return result;
+}
+
+
+double rms(const QVector<double>& values)
+{
+    if (values.isEmpty())
+    {
+        return 0.0;
+    }
+
+    double sumSquares = 0.0;
+    for (double value : values)
+    {
+        sumSquares += value * value;
+    }
+
+    return std::sqrt(
+        sumSquares /
+        static_cast<double>(values.size()));
+}
+
+double standardDeviation(
+    const QVector<double>& values,
+    double mean)
+{
+    if (values.isEmpty())
+    {
+        return 0.0;
+    }
+
+    double sumSquares = 0.0;
+    for (double value : values)
+    {
+        const double difference = value - mean;
+        sumSquares += difference * difference;
+    }
+
+    return std::sqrt(
+        sumSquares /
+        static_cast<double>(values.size()));
+}
 }
 
 WaveformWidget::WaveformWidget(QWidget* parent)
     : VideoWidget(parent)
 {
     setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
 }
 
 bool WaveformWidget::isZoomed() const
@@ -90,14 +406,9 @@ int WaveformWidget::zoomFactor() const
     return zoomFactor_;
 }
 
-void WaveformWidget::setScrollPosition(
-    double position)
+void WaveformWidget::setScrollPosition(double position)
 {
-    const double newPosition =
-        std::clamp(
-            position,
-            0.0,
-            1.0);
+    const double newPosition = std::clamp(position, 0.0, 1.0);
 
     if (newPosition == scrollPosition_)
     {
@@ -105,10 +416,11 @@ void WaveformWidget::setScrollPosition(
     }
 
     scrollPosition_ = newPosition;
-
-    emit scrollPositionChanged(
-        scrollPosition_);
-
+    clearAreaAnalysis();
+    temporalArea_ = {};
+    temporalReference_ = {};
+    referenceAnalysis_.selectionRect = {};
+    emit scrollPositionChanged(scrollPosition_);
     update();
 }
 
@@ -120,7 +432,6 @@ void WaveformWidget::setZoomEnabled(bool enabled)
     }
 
     zoomEnabled_ = enabled;
-
     if (!zoomEnabled_ && zoomFactor_ != 1)
     {
         setZoomFactor(1);
@@ -129,17 +440,12 @@ void WaveformWidget::setZoomEnabled(bool enabled)
 
 void WaveformWidget::setZoomed(bool zoomed)
 {
-    setZoomFactor(
-        zoomed
-        ? 10
-        : 1);
+    setZoomFactor(zoomed ? 10 : 1);
 }
 
 void WaveformWidget::setZoomFactor(int factor)
 {
-    if (factor != 1 &&
-        factor != 5 &&
-        factor != 10)
+    if (factor != 1 && factor != 5 && factor != 10)
     {
         factor = 1;
     }
@@ -155,19 +461,19 @@ void WaveformWidget::setZoomFactor(int factor)
     }
 
     zoomFactor_ = factor;
-
     if (zoomFactor_ <= 1)
     {
         panActive_ = false;
     }
 
-    unsetCursor();
+    updateInteractionCursor();
+    clearAreaAnalysis();
+    temporalArea_ = {};
+    temporalReference_ = {};
+    referenceAnalysis_.selectionRect = {};
 
-    emit zoomFactorChanged(
-        zoomFactor_);
-
-    emit zoomChanged(
-        zoomFactor_ > 1);
+    emit zoomFactorChanged(zoomFactor_);
+    emit zoomChanged(zoomFactor_ > 1);
 
     emitOutputSize();
     update();
@@ -175,11 +481,7 @@ void WaveformWidget::setZoomFactor(int factor)
 
 QRect WaveformWidget::imageRect() const
 {
-    const QSize outputSize =
-        fitAspectSize(
-            width(),
-            height());
-
+    const QSize outputSize = fitAspectSize(width(), height());
     return QRect(
         (width() - outputSize.width()) / 2,
         (height() - outputSize.height()) / 2,
@@ -187,21 +489,29 @@ QRect WaveformWidget::imageRect() const
         outputSize.height());
 }
 
-void WaveformWidget::updateHover(
-    const QPointF& position)
+QRectF WaveformWidget::scopeRect(const QRect& displayRect) const
 {
-    const QRect displayRect =
-        imageRect();
+    return makeGeometry(image(), displayRect, this).scopeRect;
+}
 
-    if (!displayRect.contains(
-            position.toPoint()))
+void WaveformWidget::updateHover(const QPointF& position)
+{
+    if (areaMode_ || referenceMode_)
+    {
+        hoverPosition_ = position;
+        hoverActive_ = false;
+        update();
+        return;
+    }
+
+    const QRect displayRect = imageRect();
+    if (!displayRect.contains(position.toPoint()))
     {
         if (hoverActive_)
         {
             hoverActive_ = false;
             update();
         }
-
         return;
     }
 
@@ -210,34 +520,506 @@ void WaveformWidget::updateHover(
     update();
 }
 
+void WaveformWidget::updateInteractionCursor()
+{
+    if (referenceLevelDragging_ || areaLevelDragging_)
+    {
+        setCursor(Qt::SizeVerCursor);
+        return;
+    }
+
+    if (panActive_)
+    {
+        setCursor(Qt::ClosedHandCursor);
+        return;
+    }
+
+    if (areaMode_ || referenceMode_)
+    {
+        setCursor(Qt::CrossCursor);
+        return;
+    }
+
+    unsetCursor();
+}
+
+int WaveformWidget::referenceLevelHit(const QPointF& position) const
+{
+    if (!referenceAnalysis_.valid ||
+        referenceAnalysis_.selectionRect.isEmpty())
+    {
+        return -1;
+    }
+
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+
+    if (position.x() < referenceAnalysis_.selectionRect.left() ||
+        position.x() > referenceAnalysis_.selectionRect.right())
+    {
+        return -1;
+    }
+
+    const AnalogVideoLevels analog =
+        analogLevels(geometry.standard.colorStandard);
+
+    const auto voltsToDisplayY =
+        [&](double volts)
+        {
+            return
+                geometry.scopeRect.bottom() -
+                volts * geometry.scopeRect.height() /
+                analog.graticuleMaxVolts;
+        };
+
+    const double lowY = voltsToDisplayY(referenceAnalysis_.lowVolts);
+    const double highY = voltsToDisplayY(referenceAnalysis_.highVolts);
+    const double hitDistance =
+        (std::max)(6.0, geometry.scopeRect.height() * 0.006);
+
+    const double lowDistance = std::abs(position.y() - lowY);
+    const double highDistance = std::abs(position.y() - highY);
+
+    if (lowDistance <= hitDistance && lowDistance <= highDistance)
+    {
+        return 0;
+    }
+
+    if (highDistance <= hitDistance)
+    {
+        return 1;
+    }
+
+    return -1;
+}
+
+int WaveformWidget::areaLevelHit(const QPointF& position) const
+{
+    if (!areaAnalysis_.valid ||
+        areaAnalysis_.selectionRect.isEmpty())
+    {
+        return -1;
+    }
+
+    if (position.x() < areaAnalysis_.selectionRect.left() ||
+        position.x() > areaAnalysis_.selectionRect.right())
+    {
+        return -1;
+    }
+
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+
+    const double lowY = voltsToDisplayY(areaAnalysis_.lowVolts);
+    const double highY = voltsToDisplayY(areaAnalysis_.highVolts);
+    const double hitDistance =
+        (std::max)(6.0, geometry.scopeRect.height() * 0.006);
+
+    const double lowDistance = std::abs(position.y() - lowY);
+    const double highDistance = std::abs(position.y() - highY);
+
+    if (lowDistance <= hitDistance && lowDistance <= highDistance)
+    {
+        return 0;
+    }
+
+    if (highDistance <= hitDistance)
+    {
+        return 1;
+    }
+
+    return -1;
+}
+
+double WaveformWidget::displayYToVolts(double displayY) const
+{
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+    const AnalogVideoLevels analog =
+        analogLevels(geometry.standard.colorStandard);
+
+    const double clampedY =
+        std::clamp(
+            displayY,
+            geometry.scopeRect.top(),
+            geometry.scopeRect.bottom());
+
+    return
+        (geometry.scopeRect.bottom() - clampedY) *
+        analog.graticuleMaxVolts /
+        geometry.scopeRect.height();
+}
+
+double WaveformWidget::voltsToDisplayY(double volts) const
+{
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+    const AnalogVideoLevels analog =
+        analogLevels(geometry.standard.colorStandard);
+
+    const double clampedVolts =
+        std::clamp(volts, 0.0, analog.graticuleMaxVolts);
+
+    return
+        geometry.scopeRect.bottom() -
+        clampedVolts * geometry.scopeRect.height() /
+        analog.graticuleMaxVolts;
+}
+
+void WaveformWidget::clearAreaAnalysis()
+{
+    areaSelecting_ = false;
+    areaAnalysis_ = {};
+}
+
+void WaveformWidget::clearMeasurements()
+{
+    areaSelecting_ = false;
+    referenceSelecting_ = false;
+    referenceLevelDragging_ = false;
+    referenceLevelDragIndex_ = -1;
+    areaLevelDragging_ = false;
+    areaLevelDragIndex_ = -1;
+    measureActive_ = false;
+    areaAnalysis_ = {};
+    referenceAnalysis_ = {};
+    temporalArea_ = {};
+    temporalReference_ = {};
+    update();
+}
+
+void WaveformWidget::processTemporalMeasurements()
+{
+    if (temporalArea_.active)
+    {
+        ++temporalArea_.framesSeen;
+
+        const AreaAnalysisResult result =
+            analyzeSelection(temporalArea_.selectionRect);
+
+        if (result.valid)
+        {
+            ++temporalArea_.validFrames;
+            temporalArea_.sumFrequencyMHz += result.frequencyMHz;
+            temporalArea_.sumVppVolts +=
+                static_cast<double>(result.vppMillivolts) / 1000.0;
+            temporalArea_.sumLowVolts += result.lowVolts;
+            temporalArea_.sumHighVolts += result.highVolts;
+            temporalArea_.sumVppTopY += result.vppTop.y();
+            temporalArea_.sumVppBottomY += result.vppBottom.y();
+            temporalArea_.representative = result;
+        }
+
+        if (temporalArea_.framesSeen >= kTemporalMeasurementFrames)
+        {
+            if (temporalArea_.validFrames >= kMinimumTemporalValidFrames)
+            {
+                const double divisor =
+                    static_cast<double>(temporalArea_.validFrames);
+
+                AreaAnalysisResult averaged =
+                    temporalArea_.representative;
+
+                averaged.attempted = true;
+                averaged.valid = true;
+                averaged.selectionRect = temporalArea_.selectionRect;
+                averaged.frequencyMHz =
+                    temporalArea_.sumFrequencyMHz / divisor;
+
+                const double averagedVppVolts =
+                    temporalArea_.sumVppVolts / divisor;
+
+                averaged.vppMillivolts =
+                    static_cast<int>(
+                        std::lround(
+                            averagedVppVolts * 1000.0));
+
+                averaged.lowVolts =
+                    temporalArea_.sumLowVolts / divisor;
+                averaged.highVolts =
+                    temporalArea_.sumHighVolts / divisor;
+                averaged.vppTop.setY(
+                    temporalArea_.sumVppTopY / divisor);
+                averaged.vppBottom.setY(
+                    temporalArea_.sumVppBottomY / divisor);
+                averaged.message =
+                    QStringLiteral("Temporal average %1/%2")
+                        .arg(temporalArea_.validFrames)
+                        .arg(kTemporalMeasurementFrames);
+
+                areaAnalysis_ = averaged;
+            }
+            else
+            {
+                AreaAnalysisResult failed;
+                failed.attempted = true;
+                failed.valid = false;
+                failed.selectionRect = temporalArea_.selectionRect;
+                failed.message =
+                    QStringLiteral("Unstable measurement (%1/%2 valid)")
+                        .arg(temporalArea_.validFrames)
+                        .arg(kTemporalMeasurementFrames);
+                areaAnalysis_ = failed;
+            }
+
+            temporalArea_ = {};
+            update();
+        }
+    }
+
+    if (temporalReference_.active)
+    {
+        ++temporalReference_.framesSeen;
+
+        ReferenceAnalysisResult result =
+            analyzeReferenceSelection(temporalReference_.selectionRect);
+
+        if (!result.valid)
+        {
+            const AreaAnalysisResult sinusResult =
+                analyzeSelection(temporalReference_.selectionRect);
+
+            if (sinusResult.valid &&
+                sinusResult.vppMillivolts > 0)
+            {
+                result.valid = true;
+                result.vppMillivolts = sinusResult.vppMillivolts;
+                result.vppVolts =
+                    static_cast<double>(sinusResult.vppMillivolts) /
+                    1000.0;
+                result.selectionRect = sinusResult.selectionRect;
+                result.lowVolts = sinusResult.lowVolts;
+                result.highVolts = sinusResult.highVolts;
+                result.message =
+                    QStringLiteral("Reference set from sinus");
+            }
+        }
+
+        if (result.valid)
+        {
+            ++temporalReference_.validFrames;
+            temporalReference_.sumVppVolts += result.vppVolts;
+            temporalReference_.sumLowVolts += result.lowVolts;
+            temporalReference_.sumHighVolts += result.highVolts;
+            temporalReference_.representative = result;
+        }
+
+        if (temporalReference_.framesSeen >= kTemporalMeasurementFrames)
+        {
+            if (temporalReference_.validFrames >= kMinimumTemporalValidFrames)
+            {
+                const double divisor =
+                    static_cast<double>(temporalReference_.validFrames);
+
+                ReferenceAnalysisResult averaged =
+                    temporalReference_.representative;
+
+                averaged.valid = true;
+                averaged.selectionRect = temporalReference_.selectionRect;
+                averaged.vppVolts =
+                    temporalReference_.sumVppVolts / divisor;
+                averaged.vppMillivolts =
+                    static_cast<int>(
+                        std::lround(
+                            averaged.vppVolts * 1000.0));
+                averaged.lowVolts =
+                    temporalReference_.sumLowVolts / divisor;
+                averaged.highVolts =
+                    temporalReference_.sumHighVolts / divisor;
+                averaged.message =
+                    QStringLiteral("Reference temporal average %1/%2")
+                        .arg(temporalReference_.validFrames)
+                        .arg(kTemporalMeasurementFrames);
+
+                referenceAnalysis_ = averaged;
+            }
+
+            temporalReference_ = {};
+            update();
+        }
+    }
+}
+
+void WaveformWidget::setMeasurementLuma(
+    const QVector<float>& samples)
+{
+    measurementLuma_ = samples;
+    processTemporalMeasurements();
+}
+
+void WaveformWidget::keyPressEvent(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_A && !event->isAutoRepeat())
+    {
+        areaMode_ = true;
+        areaModeLabelMuted_ = false;
+        clearAreaAnalysis();
+        temporalArea_ = {};
+        hoverActive_ = false;
+        measureActive_ = false;
+        updateInteractionCursor();
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_R && !event->isAutoRepeat())
+    {
+        referenceMode_ = true;
+        referenceModeLabelMuted_ = false;
+        referenceSelecting_ = false;
+        temporalReference_ = {};
+        hoverActive_ = false;
+        measureActive_ = false;
+        areaSelecting_ = false;
+        updateInteractionCursor();
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_C && !event->isAutoRepeat())
+    {
+        clearMeasurements();
+        areaMode_ = false;
+        referenceMode_ = false;
+        updateInteractionCursor();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape)
+    {
+        clearAreaAnalysis();
+        areaMode_ = false;
+        referenceMode_ = false;
+        referenceSelecting_ = false;
+        referenceAnalysis_ = {};
+        updateInteractionCursor();
+        update();
+        event->accept();
+        return;
+    }
+
+    VideoWidget::keyPressEvent(event);
+}
+
+void WaveformWidget::keyReleaseEvent(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_A && !event->isAutoRepeat())
+    {
+        areaMode_ = false;
+        areaSelecting_ = false;
+        updateInteractionCursor();
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_R && !event->isAutoRepeat())
+    {
+        referenceMode_ = false;
+        referenceSelecting_ = false;
+        updateInteractionCursor();
+        update();
+        event->accept();
+        return;
+    }
+
+    VideoWidget::keyReleaseEvent(event);
+}
+
 void WaveformWidget::leaveEvent(QEvent* event)
 {
     hoverActive_ = false;
     measureActive_ = false;
+    areaSelecting_ = false;
+    referenceSelecting_ = false;
+    referenceLevelDragging_ = false;
+    referenceLevelDragIndex_ = -1;
+    areaLevelDragging_ = false;
+    areaLevelDragIndex_ = -1;
+    updateInteractionCursor();
     update();
-
     QWidget::leaveEvent(event);
 }
 
-void WaveformWidget::mousePressEvent(
-    QMouseEvent* event)
+void WaveformWidget::mousePressEvent(QMouseEvent* event)
 {
-    const QRect displayRect =
-        imageRect();
+    setFocus(Qt::MouseFocusReason);
 
-    if (event->button() == Qt::LeftButton &&
-        displayRect.contains(
-            event->position().toPoint()))
+    const QRect displayRect = imageRect();
+    const QRectF scope = scopeRect(displayRect);
+
+    if (!areaMode_ && !referenceMode_ &&
+        event->button() == Qt::LeftButton)
+    {
+        const int referenceLevel =
+            referenceLevelHit(event->position());
+
+        if (referenceLevel >= 0)
+        {
+            referenceLevelDragging_ = true;
+            referenceLevelDragIndex_ = referenceLevel;
+            hoverActive_ = false;
+            updateInteractionCursor();
+            event->accept();
+            return;
+        }
+
+        const int areaLevel =
+            areaLevelHit(event->position());
+
+        if (areaLevel >= 0)
+        {
+            areaLevelDragging_ = true;
+            areaLevelDragIndex_ = areaLevel;
+            hoverActive_ = false;
+            updateInteractionCursor();
+            event->accept();
+            return;
+        }
+    }
+
+    if (referenceMode_ &&
+        event->button() == Qt::LeftButton &&
+        scope.contains(event->position()))
+    {
+        referenceSelecting_ = true;
+        referenceStartPosition_ = clampPointToRect(event->position(), scope);
+        referenceCurrentPosition_ = referenceStartPosition_;
+        hoverActive_ = false;
+        event->accept();
+        update();
+        return;
+    }
+
+    if (areaMode_ &&
+        event->button() == Qt::LeftButton &&
+        scope.contains(event->position()))
+    {
+        areaSelecting_ = true;
+        areaStartPosition_ = clampPointToRect(event->position(), scope);
+        areaCurrentPosition_ = areaStartPosition_;
+        areaAnalysis_ = {};
+        hoverActive_ = false;
+        event->accept();
+        update();
+        return;
+    }
+
+    if (!areaMode_ && !referenceMode_ &&
+        event->button() == Qt::LeftButton &&
+        displayRect.contains(event->position().toPoint()))
     {
         measureActive_ = true;
-        measureStartPosition_ =
-            clampPointToRect(
-                event->position(),
-                displayRect);
-        measureCurrentPosition_ =
-            measureStartPosition_;
+        measureStartPosition_ = clampPointToRect(event->position(), scope);
+        measureCurrentPosition_ = measureStartPosition_;
         hoverActive_ = false;
-
         event->accept();
         update();
         return;
@@ -245,16 +1027,13 @@ void WaveformWidget::mousePressEvent(
 
     if (zoomFactor_ > 1 &&
         event->button() == Qt::RightButton &&
-        displayRect.contains(
-            event->position().toPoint()))
+        scope.contains(event->position()))
     {
         panActive_ = true;
         panStartX_ = event->position().x();
         panStartScrollPosition_ = scrollPosition_;
         hoverActive_ = false;
-
-        setCursor(Qt::ClosedHandCursor);
-
+        updateInteractionCursor();
         event->accept();
         return;
     }
@@ -262,72 +1041,185 @@ void WaveformWidget::mousePressEvent(
     VideoWidget::mousePressEvent(event);
 }
 
-void WaveformWidget::mouseMoveEvent(
-    QMouseEvent* event)
+void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 {
-    const QRect displayRect =
-        imageRect();
+    const QRect displayRect = imageRect();
+    const QRectF scope = scopeRect(displayRect);
 
-    if (measureActive_ &&
+    if (referenceLevelDragging_ &&
         (event->buttons() & Qt::LeftButton) != 0)
     {
-        measureCurrentPosition_ =
-            clampPointToRect(
-                event->position(),
-                displayRect);
+        const double volts = displayYToVolts(event->position().y());
+
+        if (referenceLevelDragIndex_ == 0)
+        {
+            referenceAnalysis_.lowVolts =
+                (std::min)(volts, referenceAnalysis_.highVolts);
+        }
+        else if (referenceLevelDragIndex_ == 1)
+        {
+            referenceAnalysis_.highVolts =
+                (std::max)(volts, referenceAnalysis_.lowVolts);
+        }
+
+        referenceAnalysis_.vppVolts =
+            referenceAnalysis_.highVolts -
+            referenceAnalysis_.lowVolts;
+        referenceAnalysis_.vppMillivolts =
+            static_cast<int>(
+                std::lround(referenceAnalysis_.vppVolts * 1000.0));
 
         event->accept();
         update();
         return;
     }
 
-    if (panActive_ &&
-        (event->buttons() & Qt::RightButton) != 0 &&
-        zoomFactor_ > 1)
+    if (areaLevelDragging_ &&
+        (event->buttons() & Qt::LeftButton) != 0)
     {
-        const QSize outputSize =
-            fitAspectSize(
-                width(),
-                height());
+        const double volts = displayYToVolts(event->position().y());
 
-        const double displayWidth =
-            static_cast<double>(
-                (std::max)(
-                    outputSize.width(),
-                    1));
+        if (areaLevelDragIndex_ == 0)
+        {
+            areaAnalysis_.lowVolts =
+                (std::min)(volts, areaAnalysis_.highVolts);
+        }
+        else if (areaLevelDragIndex_ == 1)
+        {
+            areaAnalysis_.highVolts =
+                (std::max)(volts, areaAnalysis_.lowVolts);
+        }
 
-        const double dragPixels =
-            event->position().x() -
-            panStartX_;
+        const double vppVolts =
+            areaAnalysis_.highVolts -
+            areaAnalysis_.lowVolts;
 
+        areaAnalysis_.vppMillivolts =
+            static_cast<int>(
+                std::lround(vppVolts * 1000.0));
+
+        areaAnalysis_.vppTop.setY(
+            voltsToDisplayY(areaAnalysis_.highVolts));
+        areaAnalysis_.vppBottom.setY(
+            voltsToDisplayY(areaAnalysis_.lowVolts));
+
+        event->accept();
+        update();
+        return;
+    }
+
+    if (referenceSelecting_ && (event->buttons() & Qt::LeftButton) != 0)
+    {
+        referenceCurrentPosition_ = clampPointToRect(event->position(), scope);
+        event->accept();
+        update();
+        return;
+    }
+
+    if (areaSelecting_ && (event->buttons() & Qt::LeftButton) != 0)
+    {
+        areaCurrentPosition_ = clampPointToRect(event->position(), scope);
+        event->accept();
+        update();
+        return;
+    }
+
+    if (measureActive_ && (event->buttons() & Qt::LeftButton) != 0)
+    {
+        measureCurrentPosition_ = clampPointToRect(event->position(), scope);
+        event->accept();
+        update();
+        return;
+    }
+
+    if (panActive_ && (event->buttons() & Qt::RightButton) != 0 && zoomFactor_ > 1)
+    {
+        const double displayWidth = static_cast<double>((std::max)(displayRect.width(), 1));
+        const double dragPixels = event->position().x() - panStartX_;
         const double normalizedDelta =
             dragPixels /
-            (displayWidth *
-                static_cast<double>(
-                    zoomFactor_ - 1));
+            (displayWidth * static_cast<double>(zoomFactor_ - 1));
 
-        setScrollPosition(
-            panStartScrollPosition_ -
-            normalizedDelta);
-
+        setScrollPosition(panStartScrollPosition_ - normalizedDelta);
         event->accept();
         return;
     }
 
     if (event->buttons() == Qt::NoButton)
     {
-        updateHover(
-            event->position());
+        if (!areaMode_ && !referenceMode_ &&
+            (referenceLevelHit(event->position()) >= 0 ||
+                areaLevelHit(event->position()) >= 0))
+        {
+            setCursor(Qt::SizeVerCursor);
+        }
+        else
+        {
+            updateInteractionCursor();
+        }
+
+        updateHover(event->position());
     }
 
     VideoWidget::mouseMoveEvent(event);
 }
 
-void WaveformWidget::mouseReleaseEvent(
-    QMouseEvent* event)
+void WaveformWidget::mouseReleaseEvent(QMouseEvent* event)
 {
-    if (measureActive_ &&
-        event->button() == Qt::LeftButton)
+    if (referenceLevelDragging_ && event->button() == Qt::LeftButton)
+    {
+        referenceLevelDragging_ = false;
+        referenceLevelDragIndex_ = -1;
+        updateInteractionCursor();
+        event->accept();
+        update();
+        return;
+    }
+
+    if (areaLevelDragging_ && event->button() == Qt::LeftButton)
+    {
+        areaLevelDragging_ = false;
+        areaLevelDragIndex_ = -1;
+        updateInteractionCursor();
+        event->accept();
+        update();
+        return;
+    }
+
+    if (referenceSelecting_ && event->button() == Qt::LeftButton)
+    {
+        referenceSelecting_ = false;
+        referenceModeLabelMuted_ = true;
+        const QRectF selectionRect =
+            normalizedRect(referenceStartPosition_, referenceCurrentPosition_);
+
+        temporalReference_ = {};
+        temporalReference_.active = true;
+        temporalReference_.selectionRect = selectionRect;
+
+        event->accept();
+        update();
+        return;
+    }
+
+    if (areaSelecting_ && event->button() == Qt::LeftButton)
+    {
+        areaSelecting_ = false;
+        areaModeLabelMuted_ = true;
+        const QRectF selectionRect =
+            normalizedRect(areaStartPosition_, areaCurrentPosition_);
+
+        temporalArea_ = {};
+        temporalArea_.active = true;
+        temporalArea_.selectionRect = selectionRect;
+        areaAnalysis_ = {};
+
+        event->accept();
+        update();
+        return;
+    }
+
+    if (measureActive_ && event->button() == Qt::LeftButton)
     {
         measureActive_ = false;
         updateHover(event->position());
@@ -336,16 +1228,11 @@ void WaveformWidget::mouseReleaseEvent(
         return;
     }
 
-    if (panActive_ &&
-        event->button() == Qt::RightButton)
+    if (panActive_ && event->button() == Qt::RightButton)
     {
         panActive_ = false;
-
-        unsetCursor();
-
-        updateHover(
-            event->position());
-
+        updateInteractionCursor();
+        updateHover(event->position());
         event->accept();
         return;
     }
@@ -353,248 +1240,1305 @@ void WaveformWidget::mouseReleaseEvent(
     QWidget::mouseReleaseEvent(event);
 }
 
-void WaveformWidget::paintEvent(
-    QPaintEvent* event)
+void WaveformWidget::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton)
+    {
+        clearMeasurements();
+        areaMode_ = false;
+        referenceMode_ = false;
+        areaModeLabelMuted_ = false;
+        referenceModeLabelMuted_ = false;
+        hoverActive_ = false;
+        updateInteractionCursor();
+    }
+
+    // Preserve the normal waveform-view double-click behavior.
+    VideoWidget::mouseDoubleClickEvent(event);
+}
+
+WaveformWidget::AreaAnalysisResult WaveformWidget::analyzeSelection(
+    const QRectF& selectionRect) const
+{
+    AreaAnalysisResult result;
+    result.attempted = true;
+    result.selectionRect = selectionRect;
+
+    if (measurementLuma_.size() < 16)
+    {
+        result.message = QStringLiteral("No reconstructed waveform data");
+        return result;
+    }
+
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+
+    const QRectF analysisRect =
+        selectionRect.intersected(geometry.scopeRect);
+
+    result.selectionRect = analysisRect;
+
+    if (analysisRect.width() < 12.0)
+    {
+        result.message = QStringLiteral("Selection too small");
+        return result;
+    }
+
+    const auto displayXToIndex =
+        [&](double displayX)
+        {
+            const double normalized =
+                std::clamp(
+                    (displayX - geometry.scopeRect.left()) /
+                        (std::max)(geometry.scopeRect.width(), 1.0),
+                    0.0,
+                    1.0);
+
+            return static_cast<int>(
+                std::lround(
+                    normalized *
+                    static_cast<double>(measurementLuma_.size() - 1)));
+        };
+
+    const int measurementSampleCount =
+        static_cast<int>(measurementLuma_.size());
+
+    int firstIndex = displayXToIndex(analysisRect.left());
+    int lastIndex = displayXToIndex(analysisRect.right());
+
+    if (lastIndex < firstIndex)
+    {
+        std::swap(firstIndex, lastIndex);
+    }
+
+    firstIndex = std::clamp(
+        firstIndex,
+        0,
+        measurementSampleCount - 1);
+
+    lastIndex = std::clamp(
+        lastIndex,
+        0,
+        measurementSampleCount - 1);
+
+    if (lastIndex - firstIndex < 12)
+    {
+        result.message = QStringLiteral("Selection too small");
+        return result;
+    }
+
+    QVector<double> selected;
+    selected.reserve(lastIndex - firstIndex + 1);
+
+    for (int index = firstIndex; index <= lastIndex; ++index)
+    {
+        selected.append(
+            static_cast<double>(measurementLuma_[index]));
+    }
+
+    const double mean =
+        std::accumulate(
+            selected.begin(),
+            selected.end(),
+            0.0) /
+        static_cast<double>(selected.size());
+
+    QVector<double> crossings;
+    for (int i = 0; i + 1 < selected.size(); ++i)
+    {
+        const double a = selected[i] - mean;
+        const double b = selected[i + 1] - mean;
+
+        if (a <= 0.0 && b > 0.0)
+        {
+            const double denominator = b - a;
+            const double fraction =
+                std::abs(denominator) > 1.0e-12
+                ? -a / denominator
+                : 0.0;
+
+            crossings.append(
+                static_cast<double>(i) +
+                std::clamp(fraction, 0.0, 1.0));
+        }
+    }
+
+    if (crossings.size() < kMinimumStableCycles + 1)
+    {
+        result.message = QStringLiteral("No stable sinus found");
+        return result;
+    }
+
+    QVector<CandidateCycle> cycles;
+
+    const int selectedSampleCount =
+        static_cast<int>(selected.size());
+
+    for (int crossing = 0;
+        crossing + 1 < crossings.size();
+        ++crossing)
+    {
+        const double startCrossing = crossings[crossing];
+        const double endCrossing = crossings[crossing + 1];
+
+        const int cycleStart =
+            std::clamp(
+                static_cast<int>(std::floor(startCrossing)),
+                0,
+                selectedSampleCount - 1);
+
+        const int cycleEnd =
+            std::clamp(
+                static_cast<int>(std::ceil(endCrossing)),
+                0,
+                selectedSampleCount - 1);
+
+        if (cycleEnd - cycleStart < 4)
+        {
+            continue;
+        }
+
+        double minimum = selected[cycleStart];
+        int minimumIndex = cycleStart;
+
+        double cycleSum = 0.0;
+        int cycleSampleCount = 0;
+
+        for (int i = cycleStart; i <= cycleEnd; ++i)
+        {
+            minimum = (std::min)(minimum, selected[i]);
+
+            if (selected[i] <= minimum)
+            {
+                minimumIndex = i;
+            }
+
+            cycleSum += selected[i];
+            ++cycleSampleCount;
+        }
+
+        if (cycleSampleCount <= 0)
+        {
+            continue;
+        }
+
+        const double cycleMean =
+            cycleSum /
+            static_cast<double>(cycleSampleCount);
+
+        double cycleSquaredAcSum = 0.0;
+
+        for (int i = cycleStart; i <= cycleEnd; ++i)
+        {
+            const double ac =
+                selected[i] - cycleMean;
+
+            cycleSquaredAcSum +=
+                ac * ac;
+        }
+
+        const double cycleRms =
+            std::sqrt(
+                cycleSquaredAcSum /
+                static_cast<double>(cycleSampleCount));
+
+        // For a sine wave:
+        //   Vrms = Vpeak / sqrt(2)
+        //   Vpp  = 2 * Vpeak
+        // therefore:
+        //   Vpp = 2 * sqrt(2) * Vrms
+        //
+        // This is much less sensitive than max-min to the reconstructed
+        // sample phase landing between the true peaks at high frequencies.
+        const double vppVolts =
+            2.0 *
+            std::sqrt(2.0) *
+            cycleRms;
+
+        const double peakVolts =
+            vppVolts * 0.5;
+
+        if (peakVolts < kMinimumPeakVolts)
+        {
+            continue;
+        }
+
+        CandidateCycle cycle;
+        cycle.startIndex = cycleStart;
+        cycle.endIndex = cycleEnd;
+        cycle.troughIndex = minimumIndex;
+        cycle.periodSamples = endCrossing - startCrossing;
+        cycle.vppVolts = vppVolts;
+        cycles.push_back(cycle);
+    }
+
+    if (cycles.size() < kMinimumStableCycles)
+    {
+        result.message = QStringLiteral("No stable sinus found");
+        return result;
+    }
+
+    int bestRunStart = -1;
+    int bestRunLength = 0;
+    double bestMeanPeriod = 0.0;
+    double bestMeanVpp = 0.0;
+
+    for (int start = 0; start < cycles.size(); ++start)
+    {
+        double meanPeriod = cycles[start].periodSamples;
+        double meanVpp = cycles[start].vppVolts;
+        int count = 1;
+
+        for (int i = start + 1; i < cycles.size(); ++i)
+        {
+            if (relativeVariation(
+                    cycles[i].periodSamples,
+                    meanPeriod) > kMaximumVariation ||
+                relativeVariation(
+                    cycles[i].vppVolts,
+                    meanVpp) > kMaximumVariation)
+            {
+                break;
+            }
+
+            meanPeriod =
+                (meanPeriod * count + cycles[i].periodSamples) /
+                static_cast<double>(count + 1);
+
+            meanVpp =
+                (meanVpp * count + cycles[i].vppVolts) /
+                static_cast<double>(count + 1);
+
+            ++count;
+        }
+
+        if (count > bestRunLength)
+        {
+            bestRunStart = start;
+            bestRunLength = count;
+            bestMeanPeriod = meanPeriod;
+            bestMeanVpp = meanVpp;
+        }
+    }
+
+    if (bestRunStart < 0 ||
+        bestRunLength < kMinimumStableCycles)
+    {
+        result.message = QStringLiteral("No stable sinus found");
+        return result;
+    }
+
+    const int representativeCycleIndex =
+        bestRunStart + bestRunLength / 2;
+
+    const CandidateCycle& representative =
+        cycles[representativeCycleIndex];
+
+    const double reconstructedSampleClockHz =
+        geometry.standard.sampleClockHz * 4.0;
+
+    result.valid = true;
+    result.frequencyMHz =
+        reconstructedSampleClockHz /
+        bestMeanPeriod /
+        1.0e6;
+
+    // Measure frequency first from the stable zero-crossing periods.
+    // Then fit DC + sin + cos at that measured frequency over the complete
+    // stable run.  This does not rely on a reconstructed sample landing on
+    // the actual sine peak, and does not assume a nominal multiburst value.
+    const CandidateCycle& firstStableCycle =
+        cycles[bestRunStart];
+
+    const CandidateCycle& lastStableCycle =
+        cycles[bestRunStart + bestRunLength - 1];
+
+    const int stableStartIndex =
+        firstStableCycle.startIndex;
+
+    const int stableEndIndex =
+        lastStableCycle.endIndex;
+
+    const SineFitResult sineFit =
+        fitSineAtMeasuredPeriod(
+            selected,
+            stableStartIndex,
+            stableEndIndex,
+            bestMeanPeriod);
+
+    if (!sineFit.valid ||
+        sineFit.peak < kMinimumPeakVolts)
+    {
+        result.valid = false;
+        result.message = QStringLiteral("Sine fit failed");
+        return result;
+    }
+
+    result.vppMillivolts =
+        static_cast<int>(
+            std::lround(
+                sineFit.vpp * 1000.0));
+
+    const auto localIndexToDisplayX =
+        [&](double localIndex)
+        {
+            const double absoluteIndex =
+                static_cast<double>(firstIndex) +
+                localIndex;
+
+            const double normalized =
+                absoluteIndex /
+                static_cast<double>(measurementLuma_.size() - 1);
+
+            return
+                geometry.scopeRect.left() +
+                normalized * geometry.scopeRect.width();
+        };
+
+    const double representativeStartLocal =
+        static_cast<double>(representative.startIndex);
+
+    const double representativeEndLocal =
+        static_cast<double>(representative.endIndex);
+
+    result.periodStart = QPointF(
+        localIndexToDisplayX(representativeStartLocal),
+        geometry.scopeRect.center().y());
+
+    result.periodEnd = QPointF(
+        localIndexToDisplayX(representativeEndLocal),
+        geometry.scopeRect.center().y());
+
+    const double fittedMaximum =
+        sineFit.dc + sineFit.peak;
+
+    const double fittedMinimum =
+        sineFit.dc - sineFit.peak;
+
+    const auto voltsToDisplayY =
+        [&](double volts)
+        {
+            return
+                geometry.zeroVoltY -
+                volts /
+                geometry.voltsPerDisplayPixel;
+        };
+
+    const double verticalArrowX =
+        0.5 *
+        (result.periodStart.x() +
+            result.periodEnd.x());
+
+    result.vppTop = QPointF(
+        verticalArrowX,
+        voltsToDisplayY(fittedMaximum));
+
+    result.vppBottom = QPointF(
+        verticalArrowX,
+        voltsToDisplayY(fittedMinimum));
+
+    result.lowVolts = fittedMinimum;
+    result.highVolts = fittedMaximum;
+
+    result.message = QStringLiteral("Stable sinus found");
+    return result;
+}
+
+WaveformWidget::ReferenceAnalysisResult WaveformWidget::analyzeReferenceSelection(
+    const QRectF& selectionRect) const
+{
+    ReferenceAnalysisResult result;
+
+    if (measurementLuma_.size() < 16)
+    {
+        result.message = QStringLiteral("No reconstructed waveform data");
+        return result;
+    }
+
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+
+    const QRectF analysisRect =
+        selectionRect.intersected(geometry.scopeRect);
+
+    if (analysisRect.width() < 12.0)
+    {
+        result.message = QStringLiteral("Reference selection too small");
+        return result;
+    }
+
+    const int sampleCount =
+        static_cast<int>(measurementLuma_.size());
+
+    const auto displayXToIndex =
+        [&](double displayX)
+        {
+            const double normalized =
+                std::clamp(
+                    (displayX - geometry.scopeRect.left()) /
+                        (std::max)(geometry.scopeRect.width(), 1.0),
+                    0.0,
+                    1.0);
+
+            return static_cast<int>(
+                std::lround(
+                    normalized *
+                    static_cast<double>(sampleCount - 1)));
+        };
+
+    int firstIndex = displayXToIndex(analysisRect.left());
+    int lastIndex = displayXToIndex(analysisRect.right());
+    if (lastIndex < firstIndex)
+    {
+        std::swap(firstIndex, lastIndex);
+    }
+
+    firstIndex = std::clamp(firstIndex, 0, sampleCount - 1);
+    lastIndex = std::clamp(lastIndex, 0, sampleCount - 1);
+
+    if (lastIndex - firstIndex < 12)
+    {
+        result.message = QStringLiteral("Reference selection too small");
+        return result;
+    }
+
+    // Find stable horizontal runs first, then choose the two dominant
+    // plateau levels by total horizontal occupancy. This prevents a short
+    // third level (for example black before/after the actual reference)
+    // from stealing LOW/HIGH merely because it is more extreme.
+    QVector<double> referenceSamples;
+    referenceSamples.reserve(lastIndex - firstIndex + 1);
+
+    for (int index = firstIndex; index <= lastIndex; ++index)
+    {
+        referenceSamples.append(
+            static_cast<double>(measurementLuma_[index]));
+    }
+
+    const auto [minimumIt, maximumIt] =
+        std::minmax_element(
+            referenceSamples.begin(),
+            referenceSamples.end());
+
+    const double selectionSpan =
+        *maximumIt - *minimumIt;
+
+    if (selectionSpan >= 0.1)
+    {
+        struct PlateauRun
+        {
+            double mean = 0.0;
+            int sampleCount = 0;
+        };
+
+        struct PlateauCluster
+        {
+            double weightedSum = 0.0;
+            int sampleCount = 0;
+
+            [[nodiscard]] double mean() const
+            {
+                return sampleCount > 0
+                    ? weightedSum / static_cast<double>(sampleCount)
+                    : 0.0;
+            }
+        };
+
+        // A stable sample may still contain normal video/noise ripple. The
+        // slope threshold is relative to the complete selected excursion,
+        // with a small absolute floor for quiet sources.
+        const double stableSlopeThreshold =
+            (std::max)(
+                0.0025,
+                selectionSpan * 0.018);
+
+        constexpr int kMinimumStableRunSamples = 8;
+
+        QVector<PlateauRun> runs;
+
+        int runStart = -1;
+
+        const auto finishRun =
+            [&](int runEnd)
+            {
+                if (runStart < 0 || runEnd < runStart)
+                {
+                    return;
+                }
+
+                const int count =
+                    runEnd - runStart + 1;
+
+                if (count < kMinimumStableRunSamples)
+                {
+                    return;
+                }
+
+                double sum = 0.0;
+                for (int index = runStart; index <= runEnd; ++index)
+                {
+                    sum += referenceSamples[index];
+                }
+
+                PlateauRun run;
+                run.mean = sum / static_cast<double>(count);
+                run.sampleCount = count;
+                runs.append(run);
+            };
+
+        for (int index = 1;
+            index + 1 < static_cast<int>(referenceSamples.size());
+            ++index)
+        {
+            const double leftSlope =
+                std::abs(
+                    referenceSamples[index] -
+                    referenceSamples[index - 1]);
+
+            const double rightSlope =
+                std::abs(
+                    referenceSamples[index + 1] -
+                    referenceSamples[index]);
+
+            const bool stable =
+                leftSlope <= stableSlopeThreshold &&
+                rightSlope <= stableSlopeThreshold;
+
+            if (stable)
+            {
+                if (runStart < 0)
+                {
+                    runStart = index;
+                }
+            }
+            else if (runStart >= 0)
+            {
+                finishRun(index - 1);
+                runStart = -1;
+            }
+        }
+
+        if (runStart >= 0)
+        {
+            finishRun(
+                static_cast<int>(referenceSamples.size()) - 2);
+        }
+
+        if (runs.size() >= 2)
+        {
+            std::sort(
+                runs.begin(),
+                runs.end(),
+                [](const PlateauRun& a, const PlateauRun& b)
+                {
+                    return a.mean < b.mean;
+                });
+
+            // Merge stable runs that belong to the same physical plateau.
+            // Keep this considerably tighter than the minimum useful REF
+            // excursion so separate reference levels cannot collapse.
+            const double mergeTolerance =
+                (std::max)(
+                    0.008,
+                    selectionSpan * 0.045);
+
+            QVector<PlateauCluster> clusters;
+
+            for (const PlateauRun& run : runs)
+            {
+                if (clusters.isEmpty() ||
+                    std::abs(
+                        run.mean -
+                        clusters.last().mean()) > mergeTolerance)
+                {
+                    PlateauCluster cluster;
+                    cluster.weightedSum =
+                        run.mean * static_cast<double>(run.sampleCount);
+                    cluster.sampleCount = run.sampleCount;
+                    clusters.append(cluster);
+                }
+                else
+                {
+                    PlateauCluster& cluster = clusters.last();
+                    cluster.weightedSum +=
+                        run.mean * static_cast<double>(run.sampleCount);
+                    cluster.sampleCount += run.sampleCount;
+                }
+            }
+
+            int bestFirst = -1;
+            int bestSecond = -1;
+            int bestCombinedSamples = -1;
+            int bestSmallerPlateau = -1;
+
+            constexpr double kMinimumReferenceSpanVolts = 0.1;
+
+            for (int first = 0;
+                first < static_cast<int>(clusters.size());
+                ++first)
+            {
+                for (int second = first + 1;
+                    second < static_cast<int>(clusters.size());
+                    ++second)
+                {
+                    const double span =
+                        clusters[second].mean() -
+                        clusters[first].mean();
+
+                    if (span < kMinimumReferenceSpanVolts)
+                    {
+                        continue;
+                    }
+
+                    const int combinedSamples =
+                        clusters[first].sampleCount +
+                        clusters[second].sampleCount;
+
+                    const int smallerPlateau =
+                        (std::min)(
+                            clusters[first].sampleCount,
+                            clusters[second].sampleCount);
+
+                    // Primary score: how much of the selected X-range is
+                    // explained by the pair. Tie-breaker: prefer a pair in
+                    // which BOTH plateaus have substantial occupancy.
+                    if (combinedSamples > bestCombinedSamples ||
+                        (combinedSamples == bestCombinedSamples &&
+                            smallerPlateau > bestSmallerPlateau))
+                    {
+                        bestCombinedSamples = combinedSamples;
+                        bestSmallerPlateau = smallerPlateau;
+                        bestFirst = first;
+                        bestSecond = second;
+                    }
+                }
+            }
+
+            if (bestFirst >= 0 && bestSecond >= 0)
+            {
+                const double lowCenter =
+                    clusters[bestFirst].mean();
+                const double highCenter =
+                    clusters[bestSecond].mean();
+                const double dominantSpan =
+                    highCenter - lowCenter;
+
+                // Recollect actual samples near the two winning plateau
+                // centres so RMS is still calculated from source samples,
+                // not from run means.
+                const double plateauBand =
+                    (std::max)(
+                        mergeTolerance,
+                        dominantSpan * 0.06);
+
+                QVector<double> lowCluster;
+                QVector<double> highCluster;
+
+                for (double sample : referenceSamples)
+                {
+                    if (std::abs(sample - lowCenter) <= plateauBand)
+                    {
+                        lowCluster.append(sample);
+                    }
+                    else if (std::abs(sample - highCenter) <= plateauBand)
+                    {
+                        highCluster.append(sample);
+                    }
+                }
+
+                if (lowCluster.size() >= 8 &&
+                    highCluster.size() >= 8)
+                {
+                    const double refinedLowCenter =
+                        std::accumulate(
+                            lowCluster.begin(),
+                            lowCluster.end(),
+                            0.0) /
+                        static_cast<double>(lowCluster.size());
+
+                    const double refinedHighCenter =
+                        std::accumulate(
+                            highCluster.begin(),
+                            highCluster.end(),
+                            0.0) /
+                        static_cast<double>(highCluster.size());
+
+                    const double refinedSpan =
+                        refinedHighCenter - refinedLowCenter;
+                    const double lowSigma =
+                        standardDeviation(lowCluster, refinedLowCenter);
+                    const double highSigma =
+                        standardDeviation(highCluster, refinedHighCenter);
+
+                    if (refinedSpan >= kMinimumReferenceSpanVolts &&
+                        lowSigma <= refinedSpan * 0.10 &&
+                        highSigma <= refinedSpan * 0.10)
+                    {
+                        const double lowRms = rms(lowCluster);
+                        const double highRms = rms(highCluster);
+                        const double referenceVpp =
+                            std::abs(highRms - lowRms);
+
+                        if (referenceVpp >= kMinimumReferenceSpanVolts)
+                        {
+                            result.valid = true;
+                            result.selectionRect = analysisRect;
+                            result.lowVolts =
+                                (std::min)(lowRms, highRms);
+                            result.highVolts =
+                                (std::max)(lowRms, highRms);
+                            result.vppVolts = referenceVpp;
+                            result.vppMillivolts =
+                                static_cast<int>(
+                                    std::lround(
+                                        referenceVpp * 1000.0));
+                            result.message =
+                                QStringLiteral(
+                                    "Reference set from dominant plateaus");
+                            return result;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result.message = QStringLiteral("Reference plateaus not found");
+    return result;
+
+
+
+}
+
+void WaveformWidget::paintEvent(QPaintEvent* event)
 {
     Q_UNUSED(event);
 
     QPainter painter(this);
-
-    painter.fillRect(
-        rect(),
-        Qt::black);
+    painter.fillRect(rect(), Qt::black);
 
     if (image().isNull())
     {
         return;
     }
 
-    const QRect displayRect =
-        imageRect();
+    const QRect displayRect = imageRect();
+    painter.drawImage(displayRect, image());
 
-    painter.drawImage(
-        displayRect,
-        image());
+    const WaveformGeometry geometry = makeGeometry(image(), displayRect, this);
 
-    const VideoStandard standard =
-        VideoStandard::pal625();
-
-    const WaveformGraticule graticule;
-
-    const double renderedScopeHeight =
-        static_cast<double>(
-            (std::max)(image().height() - 1, 1));
-
-    const QFont graticuleFont =
-        graticule.labelFont(
-            QApplication::font(),
-            renderedScopeHeight);
-
-    const QFontMetricsF graticuleMetrics(
-        graticuleFont,
-        &image());
-
-    const double labelHeight =
-        graticuleMetrics.height();
-
-    const double renderedScopeTop =
-        labelHeight * 0.5;
-
-    const double renderedScopeUsableHeight =
-        renderedScopeHeight -
-        labelHeight;
-
-    const AnalogVideoLevels analog =
-        analogLevels(
-            standard.colorStandard);
-
-    const auto voltsToRenderedY =
-        [&](double volts)
-        {
-            return
-                renderedScopeTop +
-                renderedScopeUsableHeight -
-                volts *
-                renderedScopeUsableHeight /
-                analog.graticuleMaxVolts;
-        };
-
-    const double imageToDisplayScaleY =
-        static_cast<double>(displayRect.height()) /
-        static_cast<double>(
-            (std::max)(image().height(), 1));
-
-    const auto renderedYToDisplayY =
-        [&](double renderedY)
-        {
-            return
-                static_cast<double>(displayRect.top()) +
-                renderedY * imageToDisplayScaleY;
-        };
-
-    const double zeroVoltY =
-        renderedYToDisplayY(
-            voltsToRenderedY(0.0));
-
-    const double oneVoltY =
-        renderedYToDisplayY(
-            voltsToRenderedY(1.0));
-
-    const double voltsPerDisplayPixel =
-        1.0 /
-        (zeroVoltY - oneVoltY);
+    const double measurementLabelLineGap =
+        std::max(
+            16.0,
+            geometry.scopeRect.height() * 0.018);
 
     const auto displayYToVolts =
         [&](double displayY)
         {
-            return
-                (zeroVoltY - displayY) *
-                voltsPerDisplayPixel;
+            return (geometry.zeroVoltY - displayY) * geometry.voltsPerDisplayPixel;
         };
 
-    // Mirror the renderer's horizontal scope geometry. The trace does not
-    // start at image x=0: the graticule reserves a left inset for labels.
-    // Frequency measurements must therefore use the actual scope width,
-    // not the complete widget/image width.
-    const double renderedViewportHeight =
-        static_cast<double>(
-            (std::max)(image().height() - 1, 1));
+    const auto voltsToDisplayY =
+        [&](double volts)
+        {
+            return geometry.zeroVoltY - volts / geometry.voltsPerDisplayPixel;
+        };
 
-    const double renderedScopeLeft =
-        graticule.leftInset(
+    const double infoBandTop =
+        std::min(
+            voltsToDisplayY(0.2) + 8.0,
+            geometry.scopeRect.bottom() - 32.0);
+
+    WaveformGraticule measurementGraticule;
+    QFont measurementLabelFont =
+        measurementGraticule.labelFont(
             QApplication::font(),
-            &image(),
-            renderedViewportHeight);
+            geometry.scopeRect.height());
+    measurementLabelFont.setBold(false);
+    measurementLabelFont.setPixelSize(
+        (std::max)(
+            1,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(measurementLabelFont.pixelSize()) *
+                    0.80))));
 
-    const double renderedScopeRight =
-        static_cast<double>(
-            (std::max)(image().width() - 1, 1));
+    const bool showAreaModeLabel =
+        areaMode_ && !areaModeLabelMuted_;
+    const bool showReferenceModeLabel =
+        referenceMode_ && !referenceModeLabelMuted_;
 
-    const double imageToDisplayScaleX =
-        static_cast<double>(displayRect.width()) /
-        static_cast<double>(
-            (std::max)(image().width(), 1));
+    if (showAreaModeLabel || showReferenceModeLabel)
+    {
+        const QString modeText =
+            showAreaModeLabel
+            ? QStringLiteral("AREA")
+            : QStringLiteral("REF");
 
-    const double displayScopeLeft =
-        static_cast<double>(displayRect.left()) +
-        renderedScopeLeft * imageToDisplayScaleX;
+        const QColor modeColor =
+            showAreaModeLabel
+            ? QColor(80, 255, 120)
+            : QColor(255, 120, 255);
 
-    const double displayScopeRight =
-        static_cast<double>(displayRect.left()) +
-        renderedScopeRight * imageToDisplayScaleX;
+        painter.save();
+        painter.setFont(measurementLabelFont);
+        painter.setPen(modeColor);
+
+        const QFontMetricsF modeMetrics(
+            measurementLabelFont,
+            painter.device());
+
+        constexpr double kModeGapX = 18.0;
+        constexpr double kModeGapY = 14.0;
+        constexpr double kModePaddingX = 6.0;
+        constexpr double kModePaddingY = 3.0;
+
+        const QSizeF textSize(
+            modeMetrics.horizontalAdvance(modeText),
+            modeMetrics.height());
+
+        QRectF modeRect(
+            hoverPosition_.x() -
+                kModeGapX -
+                textSize.width() -
+                2.0 * kModePaddingX,
+            hoverPosition_.y() -
+                kModeGapY -
+                textSize.height() -
+                2.0 * kModePaddingY,
+            textSize.width() + 2.0 * kModePaddingX,
+            textSize.height() + 2.0 * kModePaddingY);
+
+        if (modeRect.left() < geometry.scopeRect.left())
+        {
+            modeRect.moveLeft(geometry.scopeRect.left());
+        }
+        if (modeRect.top() < geometry.scopeRect.top())
+        {
+            modeRect.moveTop(geometry.scopeRect.top());
+        }
+        if (modeRect.right() > geometry.scopeRect.right())
+        {
+            modeRect.moveRight(geometry.scopeRect.right());
+        }
+        if (modeRect.bottom() > geometry.scopeRect.bottom())
+        {
+            modeRect.moveBottom(geometry.scopeRect.bottom());
+        }
+
+        painter.setBrush(QColor(0, 0, 0, 190));
+        painter.drawRoundedRect(modeRect, 3.0, 3.0);
+        painter.drawText(
+            modeRect.adjusted(
+                kModePaddingX,
+                kModePaddingY,
+                -kModePaddingX,
+                -kModePaddingY),
+            Qt::AlignCenter,
+            modeText);
+        painter.restore();
+    }
+
+    const double measurementScale =
+        std::clamp(
+            static_cast<double>(geometry.scopeRect.height()) / 576.0,
+            0.85,
+            3.0);
+    const double measurementPenWidth =
+        2.0 * measurementScale;
 
     const auto displayXToSourcePixels =
         [&](double displayX)
         {
             const double normalized =
                 std::clamp(
-                    (displayX - displayScopeLeft) /
-                        (std::max)(
-                            displayScopeRight - displayScopeLeft,
-                            1.0),
+                    (displayX - geometry.scopeRect.left()) /
+                        (std::max)(geometry.scopeRect.width(), 1.0),
                     0.0,
                     1.0);
 
             const double visibleSourceWidth =
-                static_cast<double>(standard.sampleWidth) /
+                static_cast<double>(geometry.standard.sampleWidth) /
                 static_cast<double>((std::max)(zoomFactor_, 1));
 
             const double maxScrollSourcePixels =
                 (std::max)(
-                    static_cast<double>(standard.sampleWidth) - visibleSourceWidth,
+                    static_cast<double>(geometry.standard.sampleWidth) - visibleSourceWidth,
                     0.0);
 
-            return
-                scrollPosition_ * maxScrollSourcePixels +
-                normalized * visibleSourceWidth;
+            return scrollPosition_ * maxScrollSourcePixels + normalized * visibleSourceWidth;
         };
 
-    if (measureActive_)
+    if (referenceSelecting_)
     {
-        const QPointF startPoint =
-            clampPointToRect(
-                measureStartPosition_,
-                displayRect);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(QColor(255, 120, 255), 1.5, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(
+            normalizedRect(
+                referenceStartPosition_,
+                referenceCurrentPosition_)
+                .intersected(geometry.scopeRect));
+        painter.restore();
+    }
 
-        const QPointF endPoint =
-            clampPointToRect(
-                measureCurrentPosition_,
-                displayRect);
-
-        const QLineF measureLine(
-            startPoint,
-            endPoint);
-
+    if (referenceAnalysis_.valid &&
+        !referenceAnalysis_.selectionRect.isEmpty())
+    {
         painter.save();
         painter.setRenderHint(QPainter::Antialiasing, true);
 
-        const QColor measureColor(80, 255, 120);
-        QPen measurePen(measureColor, 2.0);
-        painter.setPen(measurePen);
+        const double levelLineWidth =
+            (std::max)(1.5, measurementPenWidth * 0.65);
 
-        painter.drawLine(measureLine);
+        painter.setPen(
+            QPen(
+                QColor(255, 120, 255),
+                levelLineWidth));
 
-        const double lineLength =
-            measureLine.length();
+        const double referenceLowY =
+            voltsToDisplayY(referenceAnalysis_.lowVolts);
 
-        if (lineLength > 0.001)
+        const double referenceHighY =
+            voltsToDisplayY(referenceAnalysis_.highVolts);
+
+        painter.drawLine(
+            QPointF(
+                referenceAnalysis_.selectionRect.left(),
+                referenceLowY),
+            QPointF(
+                referenceAnalysis_.selectionRect.right(),
+                referenceLowY));
+
+        painter.drawLine(
+            QPointF(
+                referenceAnalysis_.selectionRect.left(),
+                referenceHighY),
+            QPointF(
+                referenceAnalysis_.selectionRect.right(),
+                referenceHighY));
+
+        QFont referenceFont =
+            WaveformGraticule().labelFont(
+                QApplication::font(),
+                geometry.scopeRect.height());
+        referenceFont.setBold(false);
+        referenceFont.setPixelSize(
+            (std::max)(
+                1,
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(referenceFont.pixelSize()) *
+                        0.90))));
+        painter.setFont(referenceFont);
+
+        const QString referenceText =
+            QStringLiteral("Ref %1 mVpp")
+                .arg(referenceAnalysis_.vppMillivolts);
+        const QFontMetricsF referenceMetrics(
+            referenceFont,
+            painter.device());
+
+        constexpr double kReferencePaddingX = 10.0;
+        constexpr double kReferencePaddingY = 5.0;
+
+        const QSizeF referenceTextSize(
+            referenceMetrics.horizontalAdvance(referenceText),
+            referenceMetrics.height());
+        const double referenceCenterX =
+            0.5 *
+            (referenceAnalysis_.selectionRect.left() +
+                referenceAnalysis_.selectionRect.right());
+
+        QRectF referenceRect(
+            referenceCenterX -
+                (referenceTextSize.width() +
+                    2.0 * kReferencePaddingX) * 0.5,
+            referenceHighY -
+                referenceTextSize.height() -
+                2.0 * kReferencePaddingY -
+                measurementLabelLineGap,
+            referenceTextSize.width() + 2.0 * kReferencePaddingX,
+            referenceTextSize.height() + 2.0 * kReferencePaddingY);
+
+        if (referenceRect.left() < geometry.scopeRect.left())
         {
-            const QPointF direction(
-                measureLine.dx() / lineLength,
-                measureLine.dy() / lineLength);
-
-            drawArrowHead(
-                painter,
-                startPoint,
-                QPointF(-direction.x(), -direction.y()),
-                12.0,
-                5.0);
-
-            drawArrowHead(
-                painter,
-                endPoint,
-                direction,
-                12.0,
-                5.0);
+            referenceRect.moveLeft(geometry.scopeRect.left());
+        }
+        if (referenceRect.right() > geometry.scopeRect.right())
+        {
+            referenceRect.moveRight(geometry.scopeRect.right());
+        }
+        if (referenceRect.top() < geometry.scopeRect.top())
+        {
+            referenceRect.moveTop(geometry.scopeRect.top());
         }
 
-        const double startVolts =
-            displayYToVolts(startPoint.y());
+        painter.setPen(QPen(QColor(255, 120, 255), 1.5));
+        painter.setBrush(QColor(0, 0, 0, 210));
+        painter.drawRoundedRect(referenceRect, 4.0, 4.0);
+        painter.drawText(
+            referenceRect.adjusted(
+                kReferencePaddingX,
+                kReferencePaddingY,
+                -kReferencePaddingX,
+                -kReferencePaddingY),
+            Qt::AlignCenter,
+            referenceText);
 
-        const double endVolts =
-            displayYToVolts(endPoint.y());
+        painter.restore();
+    }
 
-        const int deltaMillivolts =
-            static_cast<int>(
-                std::lround(
-                    (endVolts - startVolts) * 1000.0));
+    if (areaMode_ || areaAnalysis_.attempted)
+    {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QColor measureColor(80, 255, 120);
+        QPen boxPen(measureColor, 1.5, Qt::DashLine);
+        painter.setPen(boxPen);
+        painter.setBrush(Qt::NoBrush);
 
-        const double startSourcePixels =
-            displayXToSourcePixels(startPoint.x());
+        if (areaSelecting_)
+        {
+            const QRectF box = normalizedRect(areaStartPosition_, areaCurrentPosition_).intersected(geometry.scopeRect);
+            painter.drawRect(box);
+        }
+        else if (areaAnalysis_.attempted)
+        {
+            if (areaAnalysis_.valid)
+            {
+                const double levelLineWidth =
+                    (std::max)(1.5, measurementPenWidth * 0.65);
 
-        const double endSourcePixels =
-            displayXToSourcePixels(endPoint.x());
+                painter.setPen(
+                    QPen(
+                        measureColor,
+                        levelLineWidth));
 
-        const double deltaSourcePixels =
-            std::abs(
-                endSourcePixels - startSourcePixels);
+                painter.drawLine(
+                    QPointF(
+                        areaAnalysis_.selectionRect.left(),
+                        areaAnalysis_.vppTop.y()),
+                    QPointF(
+                        areaAnalysis_.selectionRect.right(),
+                        areaAnalysis_.vppTop.y()));
 
-        const double deltaSeconds =
-            deltaSourcePixels /
-            standard.sampleClockHz;
+                painter.drawLine(
+                    QPointF(
+                        areaAnalysis_.selectionRect.left(),
+                        areaAnalysis_.vppBottom.y()),
+                    QPointF(
+                        areaAnalysis_.selectionRect.right(),
+                        areaAnalysis_.vppBottom.y()));
 
-        QString frequencyText =
-            QStringLiteral("∞ MHz");
+                const QString frequencyLabel =
+                    QStringLiteral("%1 MHz")
+                        .arg(areaAnalysis_.frequencyMHz, 0, 'f', 2);
 
+                QString amplitudeLabel;
+
+                if (referenceAnalysis_.valid &&
+                    referenceAnalysis_.vppVolts > 0.0 &&
+                    areaAnalysis_.vppMillivolts > 0)
+                {
+                    double decibels =
+                        20.0 *
+                        std::log10(
+                            (static_cast<double>(areaAnalysis_.vppMillivolts) / 1000.0) /
+                            referenceAnalysis_.vppVolts);
+
+                    if (std::abs(decibels) < 0.05)
+                    {
+                        decibels = 0.0;
+                    }
+
+                    amplitudeLabel =
+                        QStringLiteral("%1 dB")
+                            .arg(decibels, 0, 'f', 1);
+                }
+                else
+                {
+                    amplitudeLabel =
+                        QStringLiteral("%1 mV")
+                            .arg(areaAnalysis_.vppMillivolts);
+                }
+
+                painter.setFont(measurementLabelFont);
+                const QFontMetricsF metrics(
+                    measurementLabelFont,
+                    painter.device());
+
+                constexpr double kPaddingX = 10.0;
+                constexpr double kPaddingY = 5.0;
+
+                const auto makeLabelRect =
+                    [&](const QString& label,
+                        double centerX,
+                        double top)
+                    {
+                        const QSizeF textSize(
+                            metrics.horizontalAdvance(label),
+                            metrics.height());
+
+                        QRectF rect(
+                            centerX -
+                                (textSize.width() + 2.0 * kPaddingX) * 0.5,
+                            top,
+                            textSize.width() + 2.0 * kPaddingX,
+                            textSize.height() + 2.0 * kPaddingY);
+
+                        if (rect.left() < geometry.scopeRect.left())
+                        {
+                            rect.moveLeft(geometry.scopeRect.left());
+                        }
+                        if (rect.right() > geometry.scopeRect.right())
+                        {
+                            rect.moveRight(geometry.scopeRect.right());
+                        }
+
+                        return rect;
+                    };
+
+                const double labelCenterX =
+                    0.5 *
+                    (areaAnalysis_.selectionRect.left() +
+                        areaAnalysis_.selectionRect.right());
+
+                const bool useReferenceAnchors =
+                    referenceAnalysis_.valid &&
+                    !referenceAnalysis_.selectionRect.isEmpty();
+
+                const double amplitudeAnchorY =
+                    useReferenceAnchors
+                    ? voltsToDisplayY(referenceAnalysis_.highVolts)
+                    : areaAnalysis_.vppTop.y();
+
+                const double frequencyAnchorY =
+                    useReferenceAnchors
+                    ? voltsToDisplayY(referenceAnalysis_.lowVolts)
+                    : areaAnalysis_.vppBottom.y();
+
+                QRectF amplitudeRect =
+                    makeLabelRect(
+                        amplitudeLabel,
+                        labelCenterX,
+                        amplitudeAnchorY -
+                            metrics.height() -
+                            2.0 * kPaddingY -
+                            measurementLabelLineGap);
+
+                if (amplitudeRect.top() < geometry.scopeRect.top())
+                {
+                    amplitudeRect.moveTop(geometry.scopeRect.top());
+                }
+
+                QRectF frequencyRect =
+                    makeLabelRect(
+                        frequencyLabel,
+                        labelCenterX,
+                        frequencyAnchorY + measurementLabelLineGap);
+
+                if (frequencyRect.bottom() > geometry.scopeRect.bottom())
+                {
+                    frequencyRect.moveBottom(geometry.scopeRect.bottom());
+                }
+
+                painter.setPen(QPen(measureColor, 1.5));
+                painter.setBrush(QColor(0, 0, 0, 210));
+
+                painter.drawRoundedRect(
+                    frequencyRect,
+                    4.0,
+                    4.0);
+                painter.drawText(
+                    frequencyRect.adjusted(
+                        kPaddingX,
+                        kPaddingY,
+                        -kPaddingX,
+                        -kPaddingY),
+                    Qt::AlignCenter,
+                    frequencyLabel);
+
+                painter.drawRoundedRect(
+                    amplitudeRect,
+                    4.0,
+                    4.0);
+                painter.drawText(
+                    amplitudeRect.adjusted(
+                        kPaddingX,
+                        kPaddingY,
+                        -kPaddingX,
+                        -kPaddingY),
+                    Qt::AlignCenter,
+                    amplitudeLabel);
+            }
+            else
+            {
+                painter.setFont(measurementLabelFont);
+                const QString text = areaAnalysis_.message;
+                const QFontMetricsF metrics(measurementLabelFont, painter.device());
+                constexpr double kPaddingX = 10.0;
+                constexpr double kPaddingY = 6.0;
+                const QSizeF textSize(metrics.horizontalAdvance(text), metrics.height());
+                QRectF labelRect(
+                    areaAnalysis_.selectionRect.center().x() - (textSize.width() + 2.0 * kPaddingX) * 0.5,
+                    infoBandTop + textSize.height() + 12.0,
+                    textSize.width() + 2.0 * kPaddingX,
+                    textSize.height() + 2.0 * kPaddingY);
+                if (labelRect.right() > geometry.scopeRect.right())
+                {
+                    labelRect.moveRight(geometry.scopeRect.right());
+                }
+                if (labelRect.left() < geometry.scopeRect.left())
+                {
+                    labelRect.moveLeft(geometry.scopeRect.left());
+                }
+                if (labelRect.bottom() > geometry.scopeRect.bottom())
+                {
+                    labelRect.moveBottom(geometry.scopeRect.bottom());
+                }
+                painter.setPen(QPen(measureColor, 1.5));
+                painter.setBrush(QColor(0, 0, 0, 210));
+                painter.drawRoundedRect(labelRect, 4.0, 4.0);
+                painter.drawText(
+                    labelRect.adjusted(kPaddingX, kPaddingY, -kPaddingX, -kPaddingY),
+                    Qt::AlignCenter,
+                    text);
+            }
+        }
+
+        painter.restore();
+    }
+
+    if (measureActive_ &&
+        !areaMode_ &&
+        !referenceMode_)
+    {
+        const QPointF startPoint = clampPointToRect(measureStartPosition_, geometry.scopeRect);
+        const QPointF endPoint = clampPointToRect(measureCurrentPosition_, geometry.scopeRect);
+        const QLineF measureLine(startPoint, endPoint);
+
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QColor measureColor(80, 255, 120);
+        painter.setPen(QPen(measureColor, measurementPenWidth));
+        painter.drawLine(startPoint, endPoint);
+
+        const double startVolts = displayYToVolts(startPoint.y());
+        const double endVolts = displayYToVolts(endPoint.y());
+        const int deltaMillivolts = static_cast<int>(std::lround((endVolts - startVolts) * 1000.0));
+        const double startSourcePixels = displayXToSourcePixels(startPoint.x());
+        const double endSourcePixels = displayXToSourcePixels(endPoint.x());
+        const double deltaSourcePixels = std::abs(endSourcePixels - startSourcePixels);
+        const double deltaSeconds = deltaSourcePixels / sampleClockHz(geometry.standard);
+
+        QString frequencyText = QStringLiteral("∞ MHz");
         if (deltaSeconds > 1.0e-12)
         {
-            const double frequencyMHz =
-                1.0 /
-                (deltaSeconds * 1.0e6);
-
-            frequencyText =
-                QStringLiteral("%1 MHz")
-                    .arg(frequencyMHz, 0, 'f', 3);
+            frequencyText = QStringLiteral("%1 MHz").arg(1.0 / (deltaSeconds * 1.0e6), 0, 'f', 2);
         }
 
         const QString deltaMillivoltsText =
@@ -602,207 +2546,88 @@ void WaveformWidget::paintEvent(
             ? QStringLiteral("+%1").arg(deltaMillivolts)
             : QString::number(deltaMillivolts);
 
-        const QString measureText =
-            QStringLiteral("ΔV %1 mV   %2")
-                .arg(deltaMillivoltsText)
-                .arg(frequencyText);
-
-        QFont labelFont = painter.font();
-        labelFont.setBold(true);
-        const double pointSize = labelFont.pointSizeF();
-        if (pointSize > 0.0)
-        {
-            labelFont.setPointSizeF(pointSize * 1.2);
-        }
-        painter.setFont(labelFont);
-
-        const QFontMetricsF labelMetrics(labelFont, painter.device());
-
+        const QString measureText = QStringLiteral("ΔV %1 mV   %2").arg(deltaMillivoltsText).arg(frequencyText);
+        painter.setFont(measurementLabelFont);
+        const QFontMetricsF labelMetrics(measurementLabelFont, painter.device());
         constexpr double kPaddingX = 10.0;
         constexpr double kPaddingY = 6.0;
+        const QSizeF textSize(labelMetrics.horizontalAdvance(measureText), labelMetrics.height());
 
-        const QSizeF textSize(
-            labelMetrics.horizontalAdvance(measureText),
-            labelMetrics.height());
-
-        QPointF labelCenter =
-            (startPoint + endPoint) * 0.5;
-
-        // Keep the label clear of the measurement arrow. Offset it
-        // perpendicular to the A-B line, preferring the upper side.
-        QPointF labelNormal(0.0, -1.0);
-
+        QPointF labelCenter = (startPoint + endPoint) * 0.5;
+        const double lineLength = measureLine.length();
         if (lineLength > 0.001)
         {
-            labelNormal =
-            {
-                -measureLine.dy() / lineLength,
-                measureLine.dx() / lineLength
-            };
-
-            if (labelNormal.y() > 0.0)
-            {
-                labelNormal = -labelNormal;
-            }
+            const QPointF normal(-measureLine.dy() / lineLength, measureLine.dx() / lineLength);
+            labelCenter += normal * 18.0;
         }
-
-        constexpr double kMeasureLabelGap = 34.0;
-
-        labelCenter +=
-            labelNormal * kMeasureLabelGap;
 
         QRectF labelRect(
             labelCenter.x() - (textSize.width() + 2.0 * kPaddingX) * 0.5,
-            labelCenter.y() - (textSize.height() + 2.0 * kPaddingY) * 0.5,
+            infoBandTop,
             textSize.width() + 2.0 * kPaddingX,
             textSize.height() + 2.0 * kPaddingY);
 
-        if (labelRect.left() < displayRect.left())
-        {
-            labelRect.moveLeft(displayRect.left());
-        }
-        if (labelRect.right() > displayRect.right())
-        {
-            labelRect.moveRight(displayRect.right());
-        }
-        if (labelRect.top() < displayRect.top())
-        {
-            labelRect.moveTop(displayRect.top());
-        }
-        if (labelRect.bottom() > displayRect.bottom())
-        {
-            labelRect.moveBottom(displayRect.bottom());
-        }
-
+        if (labelRect.left() < geometry.scopeRect.left()) labelRect.moveLeft(geometry.scopeRect.left());
+        if (labelRect.right() > geometry.scopeRect.right()) labelRect.moveRight(geometry.scopeRect.right());
+        if (labelRect.bottom() > geometry.scopeRect.bottom()) labelRect.moveBottom(geometry.scopeRect.bottom());
         painter.setPen(QPen(measureColor, 1.5));
         painter.setBrush(QColor(0, 0, 0, 210));
         painter.drawRoundedRect(labelRect, 4.0, 4.0);
-        painter.drawText(
-            labelRect.adjusted(
-                kPaddingX,
-                kPaddingY,
-                -kPaddingX,
-                -kPaddingY),
-            Qt::AlignCenter,
-            measureText);
-
+        painter.drawText(labelRect.adjusted(kPaddingX, kPaddingY, -kPaddingX, -kPaddingY), Qt::AlignCenter, measureText);
         painter.restore();
-        return;
     }
 
-    if (!hoverActive_ ||
-        panActive_ ||
-        !displayRect.contains(
-            hoverPosition_.toPoint()))
+    if (!hoverActive_ || panActive_ || areaMode_ || referenceMode_ || !displayRect.contains(hoverPosition_.toPoint()))
     {
         return;
     }
 
-    const double volts =
-        displayYToVolts(
-            hoverPosition_.y());
-
-    const int millivolts =
-        static_cast<int>(
-            std::lround(
-                volts * 1000.0));
-
-    const double percent =
-        (volts - kBlackLevelVolts) *
-        100.0 /
-        (kWhiteLevelVolts - kBlackLevelVolts);
-
-    const QString text =
-        QStringLiteral("%1 mV   %2")
-            .arg(millivolts)
-            .arg(formatPercent(percent));
+    const double volts = displayYToVolts(hoverPosition_.y());
+    const int millivolts = static_cast<int>(std::lround(volts * 1000.0));
+    const double percent = (volts - kBlackLevelVolts) * 100.0 / (kWhiteLevelVolts - kBlackLevelVolts);
+    const QString text = QStringLiteral("%1 mV   %2").arg(millivolts).arg(formatPercent(percent));
 
     painter.save();
+    painter.setFont(measurementLabelFont);
 
-    QFont font =
-        painter.font();
-
-    font.setBold(true);
-
-    const double pointSize =
-        font.pointSizeF();
-
-    if (pointSize > 0.0)
-    {
-        font.setPointSizeF(
-            pointSize * 1.35);
-    }
-
-    painter.setFont(font);
-
-    const QFontMetricsF metrics(
-        font,
-        painter.device());
-
+    const QFontMetricsF metrics(measurementLabelFont, painter.device());
     constexpr double kPaddingX = 10.0;
     constexpr double kPaddingY = 6.0;
     constexpr double kCursorGap = 12.0;
-
-    const QSizeF textSize(
-        metrics.horizontalAdvance(text),
-        metrics.height());
+    const QSizeF textSize(metrics.horizontalAdvance(text), metrics.height());
 
     QRectF labelRect(
-        hoverPosition_.x() + kCursorGap,
-        hoverPosition_.y() -
-            textSize.height() * 0.5 -
-            kPaddingY,
-        textSize.width() +
-            2.0 * kPaddingX,
-        textSize.height() +
-            2.0 * kPaddingY);
+        hoverPosition_.x() - (textSize.width() + 2.0 * kPaddingX) * 0.5,
+        infoBandTop,
+        textSize.width() + 2.0 * kPaddingX,
+        textSize.height() + 2.0 * kPaddingY);
 
-    if (labelRect.right() > displayRect.right())
+    if (labelRect.right() > geometry.scopeRect.right())
     {
-        labelRect.moveRight(
-            hoverPosition_.x() - kCursorGap);
+        labelRect.moveRight(geometry.scopeRect.right());
     }
-
-    if (labelRect.top() < displayRect.top())
+    if (labelRect.left() < geometry.scopeRect.left())
     {
-        labelRect.moveTop(
-            static_cast<double>(displayRect.top()));
+        labelRect.moveLeft(geometry.scopeRect.left());
     }
-
-    if (labelRect.bottom() > displayRect.bottom())
+    if (labelRect.bottom() > geometry.scopeRect.bottom())
     {
-        labelRect.moveBottom(
-            static_cast<double>(displayRect.bottom()));
+        labelRect.moveBottom(geometry.scopeRect.bottom());
     }
-
-    painter.setPen(
-        QPen(
-            QColor(80, 170, 255),
-            1.5));
-
-    painter.setBrush(
-        QColor(0, 0, 0, 210));
-
-    painter.drawRoundedRect(
-        labelRect,
-        4.0,
-        4.0);
-
+    painter.setPen(QPen(QColor(80, 170, 255), 1.5));
+    painter.setBrush(QColor(0, 0, 0, 210));
+    painter.drawRoundedRect(labelRect, 4.0, 4.0);
     painter.drawText(
-        labelRect.adjusted(
-            kPaddingX,
-            kPaddingY,
-            -kPaddingX,
-            -kPaddingY),
+        labelRect.adjusted(kPaddingX, kPaddingY, -kPaddingX, -kPaddingY),
         Qt::AlignCenter,
         text);
-
     painter.restore();
 }
 
-void WaveformWidget::resizeEvent(
-    QResizeEvent* event)
+void WaveformWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
+    clearAreaAnalysis();
+    referenceAnalysis_.selectionRect = {};
     emitOutputSize();
 }

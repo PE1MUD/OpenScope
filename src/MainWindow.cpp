@@ -370,6 +370,12 @@ MainWindow::MainWindow(QWidget* parent)
         waveformWidget_,
         &WaveformWidget::setImage);
 
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformMeasurementDataChanged,
+        waveformWidget_,
+        &WaveformWidget::setMeasurementLuma);
+
     auto* waveformVideoPreview =
         new WaveformVideoPreview(this);
 
@@ -382,7 +388,10 @@ MainWindow::MainWindow(QWidget* parent)
             waveformVideoPreview->setImage(image);
         });
 
-    waveformVideoPreview->show();
+    waveformVideoPreview->setVisible(
+        initialSettings.local
+            .floaties
+            .waveformVideoVisible);
 
     connect(
         videoEngine_,

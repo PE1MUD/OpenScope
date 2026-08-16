@@ -49,6 +49,7 @@ public:
 
     [[nodiscard]] double traceBandwidthMHz() const;
     [[nodiscard]] const QImage& image() const;
+    [[nodiscard]] const std::vector<float>& visibleLumaVolts() const noexcept;
 
     void setChromaFillIntensity(
         int intensity);

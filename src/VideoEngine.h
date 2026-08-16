@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QImage>
 #include <QThread>
+#include <QVector>
 
 #include <array>
 #include <atomic>
@@ -105,6 +106,9 @@ signals:
 
     void waveformVideoChanged(
         const QImage& image);
+
+    void waveformMeasurementDataChanged(
+        const QVector<float>& samples);
 
     void vectorscopeChanged(
         const QImage& image);

@@ -131,6 +131,7 @@ struct OpenScopeSettings
             Floaty settings;
 
             bool performanceVisible = true;
+            bool waveformVideoVisible = false;
         };
 
         Display display;

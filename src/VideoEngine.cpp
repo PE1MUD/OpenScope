@@ -1707,6 +1707,21 @@ void VideoEngine::waveformWorkerLoop()
                 << generation;
         }
 
+        const auto& measurementSource =
+            waveformScreenRenderer_.visibleLumaVolts();
+
+        QVector<float> measurementSamples;
+        measurementSamples.reserve(
+            static_cast<qsizetype>(measurementSource.size()));
+
+        for (float sample : measurementSource)
+        {
+            measurementSamples.append(sample);
+        }
+
+        emit waveformMeasurementDataChanged(
+            measurementSamples);
+
         emit waveformChanged(
             waveformScreenRenderer_.image());
 

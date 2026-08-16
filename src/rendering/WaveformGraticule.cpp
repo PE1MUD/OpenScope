@@ -6,17 +6,30 @@
 
 namespace
 {
-    constexpr std::array<double, 8> kGraticuleLevels
+    struct GraticuleLevel
     {
-        0.0,
-        0.2,
-        0.3,
-        0.4,
-        0.6,
-        0.8,
-        1.0,
-        1.2
+        double volts;
+        bool showLabel;
+        bool majorLine;
     };
+
+    constexpr double kBlackLevelVolts = 0.3;
+    constexpr double kWhiteLevelVolts = 1.0;
+    constexpr double kActiveRangeVolts =
+        kWhiteLevelVolts -
+        kBlackLevelVolts;
+
+    constexpr std::array<GraticuleLevel, 8> kGraticuleLevels
+    {{
+        { 0.0, true,  true  },
+        { 0.2, true,  false },
+        { 0.3, true,  true  },
+        { kBlackLevelVolts + 0.20 * kActiveRangeVolts, false, false },
+        { kBlackLevelVolts + 0.50 * kActiveRangeVolts, false, false },
+        { kBlackLevelVolts + 0.80 * kActiveRangeVolts, false, false },
+        { 1.0, true,  true  },
+        { 1.2, true,  false }
+    }};
 }
 
 void WaveformGraticule::draw(
@@ -67,17 +80,12 @@ void WaveformGraticule::draw(
     const double labelGap =
         metrics.horizontalAdvance(".");
 
-    for (double volts : kGraticuleLevels)
+    for (const GraticuleLevel& level : kGraticuleLevels)
     {
         const double y =
-            voltsToY(volts);
+            voltsToY(level.volts);
 
-        const bool majorLine =
-            std::abs(volts - 0.0) < 0.001 ||
-            std::abs(volts - 0.3) < 0.001 ||
-            std::abs(volts - 1.0) < 0.001;
-
-        if (majorLine)
+        if (level.majorLine)
         {
             pen.setWidth(3);
             pen.setStyle(Qt::SolidLine);
@@ -110,34 +118,37 @@ void WaveformGraticule::draw(
                 scopeRect.right(),
                 y));
 
-        const QString label =
-            QString::number(
-                volts,
-                'f',
-                1);
+        if (level.showLabel)
+        {
+            const QString label =
+                QString::number(
+                    level.volts,
+                    'f',
+                    1);
 
-        const QRectF labelRect(
-            scopeRect.left() -
-            labelGap -
-            labelWidth,
-            y - labelHeight * 0.5,
-            labelWidth,
-            labelHeight);
+            const QRectF labelRect(
+                scopeRect.left() -
+                labelGap -
+                labelWidth,
+                y - labelHeight * 0.5,
+                labelWidth,
+                labelHeight);
 
-        QPen labelPen(
-            QColor(
-                180,
-                150,
-                50,
-                255));
+            QPen labelPen(
+                QColor(
+                    180,
+                    150,
+                    50,
+                    255));
 
-        painter.setPen(labelPen);
+            painter.setPen(labelPen);
 
-        painter.drawText(
-            labelRect,
-            Qt::AlignVCenter |
-            Qt::AlignRight,
-            label);
+            painter.drawText(
+                labelRect,
+                Qt::AlignVCenter |
+                Qt::AlignRight,
+                label);
+        }
     }
 
     painter.restore();
