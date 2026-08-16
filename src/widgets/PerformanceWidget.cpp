@@ -321,8 +321,13 @@ auto makeBars(
             BarType::Field2Ready },
 
         Bar{
-            "Waveform",
-            &snapshot.waveform,
+            "Waveform screen",
+            &snapshot.waveformScreen,
+            BarType::Normal },
+
+        Bar{
+            "Waveform video",
+            &snapshot.waveformVideo,
             BarType::Normal },
 
         Bar{
@@ -343,7 +348,7 @@ PerformanceWidget::PerformanceWidget(
 {
     setMinimumSize(
         320,
-        180);
+        205);
 
     setMouseTracking(
         true);

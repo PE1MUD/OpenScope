@@ -1,9 +1,11 @@
 #include <QMetaObject>
 #include "VideoEngine.h"
+#include "standards/VideoStandard.h"
 #include "VectorscopeSettings.h"
 #include <QDebug>
 #include <QElapsedTimer>
 #include <algorithm>
+#include <cmath>
 #include <thread>
 #include <chrono>
 #ifndef NOMINMAX
@@ -329,6 +331,18 @@ void VideoEngine::setWaveformOutputSize(
 }
 
 
+void VideoEngine::setWaveformVideoContentScale(
+    double scale)
+{
+    waveformVideoContentScale_.store(
+        std::clamp(
+            scale,
+            0.1,
+            1.0),
+        std::memory_order_release);
+}
+
+
 void VideoEngine::setVectorscopeOutputSize(
     int width,
     int height)
@@ -380,7 +394,10 @@ void VideoEngine::setWaveformZoomFactor(
         factor,
         std::memory_order_release);
 
-    waveformRenderer_.setZoomFactor(
+    waveformScreenRenderer_.setZoomFactor(
+        factor);
+
+    waveformVideoRenderer_.setZoomFactor(
         factor);
 }
 
@@ -392,7 +409,10 @@ void VideoEngine::setWaveformScrollPosition(
         position,
         std::memory_order_release);
 
-    waveformRenderer_.setScrollPosition(
+    waveformScreenRenderer_.setScrollPosition(
+        position);
+
+    waveformVideoRenderer_.setScrollPosition(
         position);
 }
 
@@ -1576,53 +1596,101 @@ void VideoEngine::waveformWorkerLoop()
                 static_cast<std::size_t>(
                     captureSlotIndex)];
 
-        const int outputWidth =
+        const int screenOutputWidth =
             waveformOutputWidth_.load(
                 std::memory_order_acquire);
 
-        const int outputHeight =
+        const int screenOutputHeight =
             waveformOutputHeight_.load(
                 std::memory_order_acquire);
-
-        waveformRenderer_.setOutputSize(
-            outputWidth,
-            outputHeight);
 
         const int selectedLine =
             selectedLine_.load(
                 std::memory_order_acquire);
 
-        waveformRenderer_.setSelectedLine(
-            selectedLine);
-
         const int waveformPersistence =
             waveformPersistence_.load(
                 std::memory_order_acquire);
-
-        waveformRenderer_.setPersistence(
-            waveformPersistence);
 
         const int glow =
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
 
-        waveformRenderer_.setGlow(
+        // Screen render: current widget canvas, always full-frame.
+        waveformScreenRenderer_.setOutputSize(
+            screenOutputWidth,
+            screenOutputHeight);
+
+        waveformScreenRenderer_.setFitAspectRatio(true);
+
+        waveformScreenRenderer_.setContentScale(
+            1.0,
+            1.0);
+
+        waveformScreenRenderer_.setSelectedLine(
+            selectedLine);
+
+        waveformScreenRenderer_.setPersistence(
+            waveformPersistence);
+
+        waveformScreenRenderer_.setGlow(
             glow);
 
-        QElapsedTimer timer;
-        timer.start();
+        QElapsedTimer screenTimer;
+        screenTimer.start();
 
-        //
-        // Tijdelijk nog alleen capture frame.
-        // De waveform-specifieke Y reconstructie
-        // voegen we hierna binnen dit pad toe.
-        //
-        waveformRenderer_.analyze(
+        waveformScreenRenderer_.analyze(
             captureSlot.frame);
 
-        performanceStats_.waveform.update(
+        performanceStats_.waveformScreen.update(
             static_cast<std::uint64_t>(
-                timer.nsecsElapsed() /
+                screenTimer.nsecsElapsed() /
+                1000));
+
+        // Video render target is the actual output raster of the
+        // selected video standard. PAL625 therefore remains 720x576
+        // for both 4:3 and 16:9; aspect ratio is carried separately.
+        constexpr VideoStandard videoStandard =
+            VideoStandard::pal625();
+
+        const auto videoAspectRatio =
+            waveformVideoAspectRatio_.load(
+                std::memory_order_acquire);
+
+        waveformVideoRenderer_.setOutputSize(
+            videoStandard.outputWidth,
+            videoStandard.outputHeight);
+
+        waveformVideoRenderer_.setAspectRatio(
+            videoAspectRatio);
+
+        // PAL 4:3 and 16:9 both use the complete 720x576
+        // output raster. Aspect ratio is metadata / pixel aspect;
+        // it must not letterbox the render canvas.
+        waveformVideoRenderer_.setFitAspectRatio(false);
+
+        waveformVideoRenderer_.setContentScale(
+            videoStandard.safeWidthScale,
+            videoStandard.safeHeightScale);
+
+        waveformVideoRenderer_.setSelectedLine(
+            selectedLine);
+
+        waveformVideoRenderer_.setPersistence(
+            waveformPersistence);
+
+        waveformVideoRenderer_.setGlow(
+            glow);
+
+        QElapsedTimer videoTimer;
+        videoTimer.start();
+
+        waveformVideoRenderer_.analyze(
+            captureSlot.frame);
+
+        performanceStats_.waveformVideo.update(
+            static_cast<std::uint64_t>(
+                videoTimer.nsecsElapsed() /
                 1000));
 
         const bool captureValid =
@@ -1640,7 +1708,10 @@ void VideoEngine::waveformWorkerLoop()
         }
 
         emit waveformChanged(
-            waveformRenderer_.image());
+            waveformScreenRenderer_.image());
+
+        emit waveformVideoChanged(
+            waveformVideoRenderer_.image());
     }
 }
 
@@ -1854,13 +1925,17 @@ std::size_t VideoEngine::acquireNextCaptureWriteSlot()
 void VideoEngine::setWaveformChromaFillIntensity(
     int intensity)
 {
-    waveformRenderer_.setChromaFillIntensity(
+    waveformScreenRenderer_.setChromaFillIntensity(
+        intensity);
+
+    waveformVideoRenderer_.setChromaFillIntensity(
         intensity);
 }
 
 void VideoEngine::setWaveformColor(bool enabled)
 {
-    waveformRenderer_.setColor(enabled);
+    waveformScreenRenderer_.setColor(enabled);
+    waveformVideoRenderer_.setColor(enabled);
 }
 
 void VideoEngine::setDisplayGamma(double gamma)
@@ -1881,6 +1956,14 @@ PerformanceSnapshot VideoEngine::performanceSnapshot() const
 void VideoEngine::setWaveformAspectRatio(
     OpenScopeSettings::AspectRatio aspectRatio)
 {
-    waveformRenderer_.setAspectRatio(
+    waveformScreenRenderer_.setAspectRatio(
         aspectRatio);
+}
+
+void VideoEngine::setWaveformVideoAspectRatio(
+    OpenScopeSettings::AspectRatio aspectRatio)
+{
+    waveformVideoAspectRatio_.store(
+        aspectRatio,
+        std::memory_order_release);
 }

@@ -2,9 +2,13 @@
 
 #include "widgets/VideoWidget.h"
 
+#include <QPointF>
+#include <QRect>
+
+class QEvent;
+class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
-class QSlider;
 
 class WaveformWidget final : public VideoWidget
 {
@@ -27,14 +31,29 @@ signals:
     void scrollPositionChanged(double position);
 
 protected:
+    void leaveEvent(QEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    void updateScrollSliderGeometry();
+    QRect imageRect() const;
+    void updateHover(const QPointF& position);
 
-    QSlider* scrollSlider_ = nullptr;
     int zoomFactor_ = 1;
     bool zoomEnabled_ = true;
     double scrollPosition_ = 0.0;
+
+    bool panActive_ = false;
+    double panStartX_ = 0.0;
+    double panStartScrollPosition_ = 0.0;
+
+    bool hoverActive_ = false;
+    QPointF hoverPosition_;
+
+    bool measureActive_ = false;
+    QPointF measureStartPosition_;
+    QPointF measureCurrentPosition_;
 };

@@ -41,6 +41,11 @@ public:
     void setZoomFactor(int factor);
     void setScrollPosition(double position);
     void setContentScale(double scale);
+    void setContentScale(
+        double horizontalScale,
+        double verticalScale);
+
+    void setFitAspectRatio(bool enabled);
 
     [[nodiscard]] double traceBandwidthMHz() const;
     [[nodiscard]] const QImage& image() const;
@@ -140,7 +145,9 @@ private:
 
     int zoomFactor_ = 1;
     double scrollPosition_ = 0.0;
-    double contentScale_ = 1.0;
+    double contentScaleX_ = 1.0;
+    double contentScaleY_ = 1.0;
+    bool fitAspectRatio_ = true;
     int chromaFillIntensity_ = 64;
 
     WaveformSettings settings_;

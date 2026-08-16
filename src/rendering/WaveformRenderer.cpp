@@ -227,20 +227,46 @@ void resampleMinMax(
 }
 WaveformRenderer::WaveformRenderer()
     : image_(
-        720,
-        576,
+        VideoStandard::pal625().outputWidth,
+        VideoStandard::pal625().outputHeight,
         QImage::Format_RGB32)
     , hits_(
-        720u * 576u,
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth) *
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputHeight),
         0u)
     , allLinesPersistence_(
-        720u * 576u,
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth) *
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputHeight),
         0.0f)
     , trace_(
-        720u * 576u)
-    , displayY_(720u)
-    , displayU_(720u)
-    , displayV_(720u)
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth) *
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputHeight))
+    , chromaTrace_(
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth) *
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputHeight))
+    , displayY_(
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth))
+    , displayYMin_(
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth))
+    , displayYMax_(
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth))
+    , displayU_(
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth))
+    , displayV_(
+        static_cast<std::size_t>(
+            VideoStandard::pal625().outputWidth))
 {
     for (std::size_t i = 0;
         i < displayLut_.size();
@@ -361,20 +387,44 @@ void WaveformRenderer::setZoomFactor(
 void WaveformRenderer::setContentScale(
     double scale)
 {
-    const double newScale =
+    setContentScale(
+        scale,
+        scale);
+}
+
+
+void WaveformRenderer::setContentScale(
+    double horizontalScale,
+    double verticalScale)
+{
+    const double newHorizontalScale =
         std::clamp(
-            scale,
+            horizontalScale,
             0.1,
             1.0);
 
-    if (newScale == contentScale_)
+    const double newVerticalScale =
+        std::clamp(
+            verticalScale,
+            0.1,
+            1.0);
+
+    if (newHorizontalScale == contentScaleX_ &&
+        newVerticalScale == contentScaleY_)
     {
         return;
     }
 
-    contentScale_ = newScale;
+    contentScaleX_ = newHorizontalScale;
+    contentScaleY_ = newVerticalScale;
     clearTrace();
 }
+
+void WaveformRenderer::setFitAspectRatio(bool enabled)
+{
+    fitAspectRatio_ = enabled;
+}
+
 
 void WaveformRenderer::setScrollPosition(
     double position)
@@ -391,7 +441,6 @@ void WaveformRenderer::setScrollPosition(
     }
 
     scrollPosition_ = newPosition;
-    clearTrace();
 }
 
 void WaveformRenderer::analyze(
@@ -505,29 +554,35 @@ QRectF WaveformRenderer::viewportRect() const
         static_cast<double>(
             image_.height() - 1);
 
-    const double aspectRatio =
-        OpenScopeSettings::aspectRatioValue(
-            aspectRatio_);
-
     double width =
         widgetWidth;
 
     double height =
-        width /
-        aspectRatio;
+        widgetHeight;
 
-    if (height > widgetHeight)
+    if (fitAspectRatio_)
     {
-        height =
-            widgetHeight;
+        const double aspectRatio =
+            OpenScopeSettings::aspectRatioValue(
+                aspectRatio_);
 
-        width =
-            height *
+        height =
+            width /
             aspectRatio;
+
+        if (height > widgetHeight)
+        {
+            height =
+                widgetHeight;
+
+            width =
+                height *
+                aspectRatio;
+        }
     }
 
-    width *= contentScale_;
-    height *= contentScale_;
+    width *= contentScaleX_;
+    height *= contentScaleY_;
 
     const double left =
         (widgetWidth - width) *

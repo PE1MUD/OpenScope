@@ -106,7 +106,8 @@ struct PerformanceSnapshot
     PerformanceMetricSnapshot deinterlaceWorker0;
     PerformanceMetricSnapshot deinterlaceWorker1;
 
-    PerformanceMetricSnapshot waveform;
+    PerformanceMetricSnapshot waveformScreen;
+    PerformanceMetricSnapshot waveformVideo;
     PerformanceMetricSnapshot vectorscope;
 
     PerformanceMetricSnapshot displayFirst;
@@ -141,7 +142,8 @@ struct PerformanceStats
     PerformanceMetric deinterlaceWorker0;
     PerformanceMetric deinterlaceWorker1;
 
-    PerformanceMetric waveform;
+    PerformanceMetric waveformScreen;
+    PerformanceMetric waveformVideo;
     PerformanceMetric vectorscope;
 
     PerformanceMetric displayFirst;
@@ -177,7 +179,8 @@ struct PerformanceStats
             deinterlaceWorker0.snapshot(),
             deinterlaceWorker1.snapshot(),
 
-            waveform.snapshot(),
+            waveformScreen.snapshot(),
+            waveformVideo.snapshot(),
             vectorscope.snapshot(),
 
             displayFirst.snapshot(),

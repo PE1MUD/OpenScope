@@ -18,13 +18,27 @@ struct VideoStandard
 {
     VideoColorStandard colorStandard;
     VideoRange range;
+    int sampleWidth;
+    int sampleHeight;
+    int outputWidth;
+    int outputHeight;
+    double sampleClockHz;
+    double safeWidthScale;
+    double safeHeightScale;
 
     static constexpr VideoStandard pal625()
     {
         return
         {
             VideoColorStandard::Rec601_625,
-            VideoRange::Legal
+            VideoRange::Legal,
+            720,
+            576,
+            720,
+            576,
+            13'500'000.0,
+            0.80,
+            0.90
         };
     }
 
@@ -33,7 +47,14 @@ struct VideoStandard
         return
         {
             VideoColorStandard::Rec601_525,
-            VideoRange::Legal
+            VideoRange::Legal,
+            720,
+            486,
+            720,
+            486,
+            13'500'000.0,
+            1.0,
+            1.0
         };
     }
 };

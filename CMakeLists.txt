@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.4.1
+    VERSION 0.4.2
     LANGUAGES C CXX
 )
 

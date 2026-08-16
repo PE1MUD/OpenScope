@@ -8,6 +8,7 @@
 #include "widgets/VectorscopeWidget.h"
 #include "settings/SettingsService.h"
 #include "widgets/PerformanceWidget.h"
+#include "standards/VideoStandard.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,8 +21,59 @@
 #include <windows.h>
 
 #include <QTimer>
+#include <QImage>
+#include <QPainter>
+#include <QPaintEvent>
 #include <algorithm>
 #include <cmath>
+
+namespace
+{
+class WaveformVideoPreview final : public QWidget
+{
+public:
+    explicit WaveformVideoPreview(QWidget* parent = nullptr)
+        : QWidget(parent, Qt::Tool)
+    {
+        setWindowTitle("Waveform Video Out");
+
+        constexpr VideoStandard videoStandard =
+            VideoStandard::pal625();
+
+        setFixedSize(
+            videoStandard.outputWidth,
+            videoStandard.outputHeight);
+    }
+
+    void setImage(const QImage& image)
+    {
+        image_ = image;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override
+    {
+        Q_UNUSED(event);
+
+        QPainter painter(this);
+        painter.fillRect(rect(), Qt::black);
+
+        if (image_.isNull())
+        {
+            return;
+        }
+
+        // 1:1 inspection of the actual video-out raster.
+        painter.drawImage(
+            QPoint(0, 0),
+            image_);
+    }
+
+private:
+    QImage image_;
+};
+}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -318,6 +370,20 @@ MainWindow::MainWindow(QWidget* parent)
         waveformWidget_,
         &WaveformWidget::setImage);
 
+    auto* waveformVideoPreview =
+        new WaveformVideoPreview(this);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformVideoChanged,
+        waveformVideoPreview,
+        [waveformVideoPreview](const QImage& image)
+        {
+            waveformVideoPreview->setImage(image);
+        });
+
+    waveformVideoPreview->show();
+
     connect(
         videoEngine_,
         &VideoEngine::vectorscopeChanged,
@@ -364,6 +430,16 @@ MainWindow::MainWindow(QWidget* parent)
             .instrument
             .waveform
             .persistenceFrames);
+
+    videoEngine_->setWaveformVideoContentScale(
+        initialSettings.control
+            .videoOut
+            .underscan);
+
+    videoEngine_->setWaveformVideoAspectRatio(
+        initialSettings.control
+            .videoOut
+            .aspectRatio);
 
     videoEngine_->setVectorscopeGlow(
         initialSettings.control

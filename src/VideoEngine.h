@@ -60,6 +60,9 @@ public:
         int width,
         int height);
 
+    void setWaveformVideoContentScale(
+        double scale);
+
     void setWaveformZoomed(
         bool zoomed);
 
@@ -88,6 +91,9 @@ public:
     void setWaveformAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
 
+    void setWaveformVideoAspectRatio(
+        OpenScopeSettings::AspectRatio aspectRatio);
+
     PerformanceSnapshot performanceSnapshot() const;
 
 signals:
@@ -95,6 +101,9 @@ signals:
         const QImage& image);
 
     void waveformChanged(
+        const QImage& image);
+
+    void waveformVideoChanged(
         const QImage& image);
 
     void vectorscopeChanged(
@@ -199,6 +208,15 @@ private:
         kMinimumOutputSize
     };
 
+    std::atomic<double> waveformVideoContentScale_{
+        0.80
+    };
+
+    std::atomic<OpenScopeSettings::AspectRatio>
+        waveformVideoAspectRatio_{
+            OpenScopeSettings::AspectRatio::Ratio16x9
+        };
+
     std::atomic<int> vectorscopeOutputWidth_{
         kMinimumOutputSize
     };
@@ -294,7 +312,8 @@ private:
     std::array<
         DisplayConverter,
         2> displayConverters_;
-    WaveformRenderer waveformRenderer_;
+    WaveformRenderer waveformScreenRenderer_;
+    WaveformRenderer waveformVideoRenderer_;
     VectorscopeAnalyzer vectorscopeAnalyzer_;
 
     NoiseReducer noiseReducer_;
