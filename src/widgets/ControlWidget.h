@@ -44,6 +44,8 @@ signals:
 
     void performanceVisibilityChanged(bool visible);
     void legacyAspectRatioChanged(bool legacyEnabled);
+    void exportHighResolutionPngRequested();
+    void exportHighResolutionPngQuickRequested();
 
 private:
     QCheckBox* performanceCheckBox_ = nullptr;

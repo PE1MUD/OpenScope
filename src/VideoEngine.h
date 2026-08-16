@@ -97,6 +97,8 @@ public:
 
     PerformanceSnapshot performanceSnapshot() const;
 
+    QImage captureHighResolutionSnapshot();
+
 signals:
     void frameChanged(
         const QImage& image);
@@ -245,6 +247,15 @@ private:
     std::atomic<std::uint64_t> captureGeneration_{
         0
     };
+
+    // One-shot source-frame snapshot for high-resolution PNG export.
+    // submitWriteFrame() owns the source slot while copying, so the copy
+    // cannot race with the DeckLink writer.
+    std::mutex exportSnapshotMutex_;
+    std::condition_variable exportSnapshotCondition_;
+    bool exportSnapshotRequested_ = false;
+    bool exportSnapshotReady_ = false;
+    Yuv444Frame exportSnapshotFrame_;
 
     // Reconstructed luma buffers
 

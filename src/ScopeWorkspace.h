@@ -61,6 +61,8 @@ signals:
     void legacyAspectRatioChanged(bool legacyEnabled);
 
     void videoMaximizedChanged(bool maximized);
+    void exportHighResolutionPngRequested();
+    void exportHighResolutionPngQuickRequested();
 
 private:
     void showGrid();

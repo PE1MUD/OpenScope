@@ -210,6 +210,22 @@ void VideoEngine::submitWriteFrame()
         generation,
         std::memory_order_release);
 
+    {
+        std::lock_guard<std::mutex> lock(
+            exportSnapshotMutex_);
+
+        if (exportSnapshotRequested_)
+        {
+            exportSnapshotFrame_ =
+                slot.frame;
+
+            exportSnapshotRequested_ = false;
+            exportSnapshotReady_ = true;
+
+            exportSnapshotCondition_.notify_one();
+        }
+    }
+
     slot.writing.store(
         false,
         std::memory_order_release);
@@ -1962,6 +1978,246 @@ void VideoEngine::setDisplayGamma(double gamma)
             gamma);
     }
 }
+
+
+QImage VideoEngine::captureHighResolutionSnapshot()
+{
+    Yuv444Frame sourceFrame;
+
+    {
+        std::unique_lock<std::mutex> lock(
+            exportSnapshotMutex_);
+
+        exportSnapshotReady_ = false;
+        exportSnapshotRequested_ = true;
+
+        constexpr auto kSnapshotTimeout =
+            std::chrono::milliseconds(250);
+
+        const bool ready =
+            exportSnapshotCondition_.wait_for(
+                lock,
+                kSnapshotTimeout,
+                [this]()
+                {
+                    return exportSnapshotReady_;
+                });
+
+        if (!ready)
+        {
+            exportSnapshotRequested_ = false;
+            return {};
+        }
+
+        sourceFrame =
+            std::move(
+                exportSnapshotFrame_);
+
+        exportSnapshotFrame_ = {};
+        exportSnapshotReady_ = false;
+    }
+
+    if (sourceFrame.width <= 0 ||
+        sourceFrame.height <= 0 ||
+        sourceFrame.y.empty() ||
+        sourceFrame.u.empty() ||
+        sourceFrame.v.empty())
+    {
+        return {};
+    }
+
+    constexpr int kExportScale = 4;
+
+    const int exportWidth =
+        sourceFrame.width *
+        kExportScale;
+
+    const int exportHeight =
+        sourceFrame.height *
+        kExportScale;
+
+    Yuv444Frame exportFrame;
+
+    exportFrame.resize(
+        exportWidth,
+        sourceFrame.height);
+
+    LineResampler lumaResampler(
+        kLumaReconstructionRadius,
+        kLumaReconstructionCutoff);
+
+    lumaResampler.setImplementation(
+        ResamplerImplementation::Avx2);
+
+    std::vector<float> sourceLuma(
+        static_cast<std::size_t>(
+            sourceFrame.width));
+
+    std::vector<float> reconstructedLuma(
+        static_cast<std::size_t>(
+            exportWidth));
+
+    const double horizontalScale =
+        static_cast<double>(
+            sourceFrame.width) /
+        static_cast<double>(
+            exportWidth);
+
+    const auto interpolateChroma =
+        [](std::uint16_t left,
+            std::uint16_t right,
+            double fraction)
+        {
+            const double value =
+                static_cast<double>(left) +
+                (
+                    static_cast<double>(right) -
+                    static_cast<double>(left)
+                ) *
+                fraction;
+
+            return
+                static_cast<std::uint16_t>(
+                    std::lround(
+                        std::clamp(
+                            value,
+                            0.0,
+                            65535.0)));
+        };
+
+    for (int y = 0;
+        y < sourceFrame.height;
+        ++y)
+    {
+        const std::size_t sourceLineOffset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(
+                sourceFrame.width);
+
+        const std::size_t exportLineOffset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(
+                exportWidth);
+
+        for (int x = 0;
+            x < sourceFrame.width;
+            ++x)
+        {
+            sourceLuma[
+                static_cast<std::size_t>(x)] =
+                static_cast<float>(
+                    sourceFrame.y[
+                        sourceLineOffset +
+                        static_cast<std::size_t>(
+                            x)]);
+        }
+
+        lumaResampler.resample(
+            sourceLuma,
+            reconstructedLuma);
+
+        for (int x = 0;
+            x < exportWidth;
+            ++x)
+        {
+            const std::size_t exportIndex =
+                exportLineOffset +
+                static_cast<std::size_t>(x);
+
+            exportFrame.y[
+                exportIndex] =
+                static_cast<std::uint16_t>(
+                    std::lround(
+                        std::clamp(
+                            reconstructedLuma[
+                                static_cast<std::size_t>(
+                                    x)],
+                            0.0f,
+                            65535.0f)));
+
+            const double sourcePosition =
+                (static_cast<double>(x) + 0.5) *
+                horizontalScale -
+                0.5;
+
+            const int leftIndex =
+                std::clamp(
+                    static_cast<int>(
+                        std::floor(
+                            sourcePosition)),
+                    0,
+                    sourceFrame.width - 1);
+
+            const int rightIndex =
+                (std::min)(
+                    leftIndex + 1,
+                    sourceFrame.width - 1);
+
+            const double fraction =
+                std::clamp(
+                    sourcePosition -
+                    static_cast<double>(
+                        leftIndex),
+                    0.0,
+                    1.0);
+
+            const std::size_t leftOffset =
+                sourceLineOffset +
+                static_cast<std::size_t>(
+                    leftIndex);
+
+            const std::size_t rightOffset =
+                sourceLineOffset +
+                static_cast<std::size_t>(
+                    rightIndex);
+
+            exportFrame.u[
+                exportIndex] =
+                interpolateChroma(
+                    sourceFrame.u[
+                        leftOffset],
+                    sourceFrame.u[
+                        rightOffset],
+                    fraction);
+
+            exportFrame.v[
+                exportIndex] =
+                interpolateChroma(
+                    sourceFrame.v[
+                        leftOffset],
+                    sourceFrame.v[
+                        rightOffset],
+                    fraction);
+        }
+    }
+
+    DisplayConverter exportConverter;
+
+    exportConverter.setImplementation(
+        DisplayConversionImplementation::Avx2);
+
+    // Export must represent the signal, not the user's display-look setting.
+    exportConverter.setGamma(
+        1.0);
+
+    exportConverter.setHighlightedLine(
+        -1);
+
+    exportConverter.setHighlightedRange(
+        0,
+        -1);
+
+    DisplayPerformance performance;
+
+    return
+        exportConverter.convert(
+            exportFrame,
+            exportFrame.y.data(),
+            exportWidth,
+            exportHeight,
+            performance);
+}
+
 
 PerformanceSnapshot VideoEngine::performanceSnapshot() const
 {

@@ -21,7 +21,14 @@
 #include <windows.h>
 
 #include <QTimer>
+#include <QFileDialog>
+#include <QMessageBox>
 #include <QImage>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QPainter>
 #include <QPaintEvent>
 #include <algorithm>
@@ -136,6 +143,209 @@ MainWindow::MainWindow(QWidget* parent)
             this);
 
     setCentralWidget(workspace_);
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::exportHighResolutionPngRequested,
+        this,
+        [this]()
+        {
+            const QString settingsFileName =
+                QDir(
+                    QCoreApplication::
+                        applicationDirPath())
+                    .filePath(
+                        QStringLiteral(
+                            "OpenScope.ini"));
+
+            QSettings settings(
+                settingsFileName,
+                QSettings::IniFormat);
+
+            QString exportDirectory =
+                settings.value(
+                    QStringLiteral(
+                        "Local/Export/LastDirectory"))
+                    .toString();
+
+            if (exportDirectory.isEmpty() ||
+                !QDir(exportDirectory).exists())
+            {
+                exportDirectory =
+                    QStandardPaths::writableLocation(
+                        QStandardPaths::PicturesLocation);
+            }
+
+            if (exportDirectory.isEmpty() ||
+                !QDir(exportDirectory).exists())
+            {
+                exportDirectory =
+                    QCoreApplication::
+                        applicationDirPath();
+            }
+
+            QDir directory(
+                exportDirectory);
+
+            int sequenceNumber = 1;
+            QString suggestedFileName;
+
+            for (;;)
+            {
+                suggestedFileName =
+                    QStringLiteral(
+                        "capture_%1.png")
+                        .arg(
+                            sequenceNumber,
+                            4,
+                            10,
+                            QLatin1Char('0'));
+
+                if (!QFileInfo::exists(
+                        directory.filePath(
+                            suggestedFileName)))
+                {
+                    break;
+                }
+
+                ++sequenceNumber;
+            }
+
+            QString fileName =
+                QFileDialog::getSaveFileName(
+                    this,
+                    tr("Export high-resolution PNG"),
+                    directory.filePath(
+                        suggestedFileName),
+                    tr("PNG image (*.png)"));
+
+            if (fileName.isEmpty())
+            {
+                return;
+            }
+
+            if (!fileName.endsWith(
+                    QStringLiteral(".png"),
+                    Qt::CaseInsensitive))
+            {
+                fileName +=
+                    QStringLiteral(".png");
+            }
+
+            settings.setValue(
+                QStringLiteral(
+                    "Local/Export/LastDirectory"),
+                QFileInfo(
+                    fileName)
+                    .absolutePath());
+
+            const QImage image =
+                videoEngine_->
+                    captureHighResolutionSnapshot();
+
+            if (image.isNull() ||
+                !image.save(
+                    fileName,
+                    "PNG"))
+            {
+                QMessageBox::warning(
+                    this,
+                    tr("Export failed"),
+                    tr("Could not capture or save the high-resolution PNG."));
+            }
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::exportHighResolutionPngQuickRequested,
+        this,
+        [this]()
+        {
+            const QString settingsFileName =
+                QDir(
+                    QCoreApplication::
+                        applicationDirPath())
+                    .filePath(
+                        QStringLiteral(
+                            "OpenScope.ini"));
+
+            QSettings settings(
+                settingsFileName,
+                QSettings::IniFormat);
+
+            QString exportDirectory =
+                settings.value(
+                    QStringLiteral(
+                        "Local/Export/LastDirectory"))
+                    .toString();
+
+            if (exportDirectory.isEmpty() ||
+                !QDir(exportDirectory).exists())
+            {
+                exportDirectory =
+                    QStandardPaths::writableLocation(
+                        QStandardPaths::PicturesLocation);
+            }
+
+            if (exportDirectory.isEmpty() ||
+                !QDir(exportDirectory).exists())
+            {
+                exportDirectory =
+                    QCoreApplication::
+                        applicationDirPath();
+            }
+
+            QDir directory(
+                exportDirectory);
+
+            int sequenceNumber = 1;
+            QString fileName;
+
+            for (;;)
+            {
+                const QString suggestedFileName =
+                    QStringLiteral(
+                        "capture_%1.png")
+                        .arg(
+                            sequenceNumber,
+                            4,
+                            10,
+                            QLatin1Char('0'));
+
+                const QString candidatePath =
+                    directory.filePath(
+                        suggestedFileName);
+
+                if (!QFileInfo::exists(
+                        candidatePath))
+                {
+                    fileName = candidatePath;
+                    break;
+                }
+
+                ++sequenceNumber;
+            }
+
+            settings.setValue(
+                QStringLiteral(
+                    "Local/Export/LastDirectory"),
+                directory.absolutePath());
+
+            const QImage image =
+                videoEngine_->
+                    captureHighResolutionSnapshot();
+
+            if (image.isNull() ||
+                !image.save(
+                    fileName,
+                    "PNG"))
+            {
+                QMessageBox::warning(
+                    this,
+                    tr("Export failed"),
+                    tr("Could not capture or save the high-resolution PNG."));
+            }
+        });
 
     // Render-output wiring first. Aspect-ratio changes can now safely
     // emit fresh output sizes into the engine.

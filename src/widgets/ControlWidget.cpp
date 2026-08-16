@@ -824,6 +824,28 @@ ControlWidget::ControlWidget(
     miscLayout->addWidget(
         performanceCheckBox_);
 
+    auto* exportHighResolutionPngButton =
+        new QPushButton(
+            "Export high-res PNG...",
+            miscTab);
+
+    exportHighResolutionPngButton->setToolTip(
+        "Choose a file name and export the next complete captured frame as a 2880 x 2304 PNG");
+
+    miscLayout->addWidget(
+        exportHighResolutionPngButton);
+
+    auto* exportHighResolutionPngBamButton =
+        new QPushButton(
+            "Export high-res PNG BAM",
+            miscTab);
+
+    exportHighResolutionPngBamButton->setToolTip(
+        "Immediately export the next complete captured frame to the remembered folder using the next free capture_0001.png number");
+
+    miscLayout->addWidget(
+        exportHighResolutionPngBamButton);
+
     miscLayout->addStretch();
 
     connect(
@@ -837,6 +859,18 @@ ControlWidget::ControlWidget(
         &QCheckBox::toggled,
         this,
         &ControlWidget::performanceVisibilityChanged);
+
+    connect(
+        exportHighResolutionPngButton,
+        &QPushButton::clicked,
+        this,
+        &ControlWidget::exportHighResolutionPngRequested);
+
+    connect(
+        exportHighResolutionPngBamButton,
+        &QPushButton::clicked,
+        this,
+        &ControlWidget::exportHighResolutionPngQuickRequested);
 
     tabs->addTab(
         miscTab,

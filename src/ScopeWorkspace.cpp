@@ -198,6 +198,18 @@ ScopeWorkspace::ScopeWorkspace(
         &ControlWidget::legacyAspectRatioChanged,
         this,
         &ScopeWorkspace::legacyAspectRatioChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::exportHighResolutionPngRequested,
+        this,
+        &ScopeWorkspace::exportHighResolutionPngRequested);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::exportHighResolutionPngQuickRequested,
+        this,
+        &ScopeWorkspace::exportHighResolutionPngQuickRequested);
 }
 
 void ScopeWorkspace::toggleMaximized(
