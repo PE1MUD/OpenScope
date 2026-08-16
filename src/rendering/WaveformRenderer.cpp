@@ -596,50 +596,49 @@ void WaveformRenderer::renderSingleLine(
         static_cast<std::size_t>(
             frame.width);
 
+    // Always reconstruct luminance to 4x the native line width.
+    // X1 needs the reconstructed samples too: when the reconstructed
+    // line is wider than the render canvas, the min/max reducer can
+    // preserve high-frequency burst energy that would otherwise alias
+    // away between display columns.
     const std::size_t reconstructedWidth =
-        zoomFactor_ > 1
-        ? sourceWidth * 4u
-        : sourceWidth;
+        sourceWidth * 4u;
 
     const std::size_t sourceLineOffset =
         static_cast<std::size_t>(
             selectedLine_) *
         sourceWidth;
 
-    if (zoomFactor_ > 1)
+    singleLineSource_.resize(
+        sourceWidth);
+
+    singleLineReconstructed_.resize(
+        reconstructedWidth);
+
+    for (std::size_t x = 0;
+        x < sourceWidth;
+        ++x)
     {
-        singleLineSource_.resize(
-            sourceWidth);
-
-        singleLineReconstructed_.resize(
-            reconstructedWidth);
-
-        for (std::size_t x = 0;
-            x < sourceWidth;
-            ++x)
-        {
-            singleLineSource_[x] =
-                static_cast<float>(
-                    frame.y[
-                        sourceLineOffset +
-                            x]);
-        }
-
-        singleLineReconstructor_.resample(
-            singleLineSource_,
-            singleLineReconstructed_);
+        singleLineSource_[x] =
+            static_cast<float>(
+                frame.y[
+                    sourceLineOffset +
+                        x]);
     }
 
+    singleLineReconstructor_.resample(
+        singleLineSource_,
+        singleLineReconstructed_);
+
     /*
-     * Determine which part of the line
+     * Determine which part of the reconstructed line
      * is visible.
      *
      * X1:
-     *     complete native 720-sample line.
+     *     complete reconstructed 2880-sample line.
      *
-     * X10:
-     *     selected line reconstructed to 2880 samples,
-     *     then one tenth is shown.
+     * X5/X10:
+     *     the corresponding fraction of that same reconstructed line.
      */
     std::size_t reconstructedViewWidth =
         reconstructedWidth;
@@ -685,24 +684,11 @@ void WaveformRenderer::renderSingleLine(
         x < reconstructedViewWidth;
         ++x)
     {
-        double y16 = 0.0;
-
-        if (zoomFactor_ > 1)
-        {
-            y16 =
-                static_cast<double>(
-                    singleLineReconstructed_[
-                        reconstructedViewOffset +
-                            x]);
-        }
-        else
-        {
-            y16 =
-                static_cast<double>(
-                    frame.y[
-                        sourceLineOffset +
-                            x]);
-        }
+        const double y16 =
+            static_cast<double>(
+                singleLineReconstructed_[
+                    reconstructedViewOffset +
+                        x]);
 
         const double y10 =
             y16 /
