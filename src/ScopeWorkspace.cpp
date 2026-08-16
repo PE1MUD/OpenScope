@@ -1,4 +1,5 @@
 #include "ScopeWorkspace.h"
+#include "widgets/WaveformWidget.h"
 #include "ScopeViewport.h"
 #include "widgets/ControlWidget.h"
 
@@ -127,7 +128,18 @@ ScopeWorkspace::ScopeWorkspace(
         controlWidget_,
         &ControlWidget::lineNumberChanged,
         this,
-        &ScopeWorkspace::lineNumberChanged);
+        [this, waveformWidget](int lineNumber)
+        {
+            if (auto* waveform =
+                    qobject_cast<WaveformWidget*>(
+                        waveformWidget))
+            {
+                waveform->clearMeasurements();
+            }
+
+            emit lineNumberChanged(
+                lineNumber);
+        });
 
     connect(
         controlWidget_,

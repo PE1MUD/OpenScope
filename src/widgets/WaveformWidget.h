@@ -13,6 +13,7 @@ class QKeyEvent;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
+class QTimer;
 
 class WaveformWidget final : public VideoWidget
 {
@@ -29,6 +30,7 @@ public:
     void setZoomEnabled(bool enabled);
     void setScrollPosition(double position);
     void setMeasurementLuma(const QVector<float>& samples);
+    void clearMeasurements();
 
 signals:
     void zoomChanged(bool zoomed);
@@ -101,17 +103,28 @@ private:
         ReferenceAnalysisResult representative;
     };
 
+    struct MultiburstLayout
+    {
+        bool valid = false;
+        QRectF referenceRect;
+        QVector<QRectF> burstRects;
+    };
+
     QRect imageRect() const;
     QRectF scopeRect(const QRect& displayRect) const;
     void updateHover(const QPointF& position);
     void updateInteractionCursor();
     void clearAreaAnalysis();
-    void clearMeasurements();
     void processTemporalMeasurements();
+    void advanceMultiburstDebugStep();
+    MultiburstLayout detectMultiburstLayout() const;
     AreaAnalysisResult analyzeSelection(const QRectF& selectionRect) const;
     ReferenceAnalysisResult analyzeReferenceSelection(const QRectF& selectionRect) const;
     int referenceLevelHit(const QPointF& position) const;
     int areaLevelHit(const QPointF& position) const;
+    int multiburstLevelHit(
+        const QPointF& position,
+        int* measurementIndex = nullptr) const;
     double displayYToVolts(double displayY) const;
     double voltsToDisplayY(double volts) const;
 
@@ -125,6 +138,7 @@ private:
 
     bool hoverActive_ = false;
     QPointF hoverPosition_;
+    bool probeDetailsMode_ = false;
 
     bool measureActive_ = false;
     QPointF measureStartPosition_;
@@ -147,8 +161,26 @@ private:
     int referenceLevelDragIndex_ = -1; // 0 = LOW, 1 = HIGH
     bool areaLevelDragging_ = false;
     int areaLevelDragIndex_ = -1; // 0 = LOW, 1 = HIGH
+    bool multiburstLevelDragging_ = false;
+    int multiburstDragMeasurementIndex_ = -1;
+    int multiburstLevelDragIndex_ = -1; // 0 = LOW, 1 = HIGH
 
     QVector<float> measurementLuma_;
     TemporalAreaMeasurement temporalArea_;
     TemporalReferenceMeasurement temporalReference_;
+
+    bool multiburstMeasurementActive_ = false;
+    bool multiburstPending_ = false;
+    int multiburstSearchFrames_ = 0;
+    int multiburstMeasureStep_ = 0;
+    QString multiburstStatus_;
+    QTimer* multiburstDebugTimer_ = nullptr;
+    mutable QVector<double> multiburstDebugActivity_;
+    mutable QVector<double> multiburstDebugBaseline_;
+    mutable double multiburstDebugThreshold_ = 0.0;
+    mutable double multiburstDebugMaximum_ = 0.0;
+    mutable QVector<QRectF> multiburstDebugCandidateRects_;
+    mutable int multiburstDebugCandidateCount_ = 0;
+    QVector<AreaAnalysisResult> multiburstAnalyses_;
+    QVector<TemporalAreaMeasurement> temporalMultiburst_;
 };

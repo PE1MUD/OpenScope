@@ -12,7 +12,9 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPolygonF>
 #include <QResizeEvent>
+#include <QTimer>
 #include <QVector>
 
 #include <algorithm>
@@ -29,6 +31,9 @@ constexpr double kMaximumVariation = 0.10;
 constexpr int kMinimumStableCycles = 2;
 constexpr int kTemporalMeasurementFrames = 4;
 constexpr int kMinimumTemporalValidFrames = 2;
+constexpr int kExpectedMultiburstBursts = 6;
+constexpr int kMinimumMultiburstBursts = 4;
+constexpr int kMultiburstSearchFrames = 8;
 
 struct WaveformGeometry
 {
@@ -394,6 +399,16 @@ WaveformWidget::WaveformWidget(QWidget* parent)
 {
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
+
+    multiburstDebugTimer_ = new QTimer(this);
+    multiburstDebugTimer_->setInterval(1000);
+    multiburstDebugTimer_->setSingleShot(false);
+
+    connect(
+        multiburstDebugTimer_,
+        &QTimer::timeout,
+        this,
+        &WaveformWidget::advanceMultiburstDebugStep);
 }
 
 bool WaveformWidget::isZoomed() const
@@ -522,7 +537,9 @@ void WaveformWidget::updateHover(const QPointF& position)
 
 void WaveformWidget::updateInteractionCursor()
 {
-    if (referenceLevelDragging_ || areaLevelDragging_)
+    if (referenceLevelDragging_ ||
+        areaLevelDragging_ ||
+        multiburstLevelDragging_)
     {
         setCursor(Qt::SizeVerCursor);
         return;
@@ -633,6 +650,69 @@ int WaveformWidget::areaLevelHit(const QPointF& position) const
     return -1;
 }
 
+int WaveformWidget::multiburstLevelHit(
+    const QPointF& position,
+    int* measurementIndex) const
+{
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+
+    const double hitDistance =
+        (std::max)(6.0, geometry.scopeRect.height() * 0.006);
+
+    for (int i = 0;
+        i < multiburstAnalyses_.size();
+        ++i)
+    {
+        const AreaAnalysisResult& analysis =
+            multiburstAnalyses_[i];
+
+        if (!analysis.valid ||
+            analysis.selectionRect.isEmpty())
+        {
+            continue;
+        }
+
+        if (position.x() < analysis.selectionRect.left() ||
+            position.x() > analysis.selectionRect.right())
+        {
+            continue;
+        }
+
+        const double lowY =
+            voltsToDisplayY(analysis.lowVolts);
+        const double highY =
+            voltsToDisplayY(analysis.highVolts);
+
+        const double lowDistance =
+            std::abs(position.y() - lowY);
+        const double highDistance =
+            std::abs(position.y() - highY);
+
+        if (lowDistance <= hitDistance &&
+            lowDistance <= highDistance)
+        {
+            if (measurementIndex != nullptr)
+            {
+                *measurementIndex = i;
+            }
+            return 0;
+        }
+
+        if (highDistance <= hitDistance)
+        {
+            if (measurementIndex != nullptr)
+            {
+                *measurementIndex = i;
+            }
+            return 1;
+        }
+    }
+
+    return -1;
+}
+
 double WaveformWidget::displayYToVolts(double displayY) const
 {
     const QRect displayRect = imageRect();
@@ -684,16 +764,158 @@ void WaveformWidget::clearMeasurements()
     referenceLevelDragIndex_ = -1;
     areaLevelDragging_ = false;
     areaLevelDragIndex_ = -1;
+    multiburstLevelDragging_ = false;
+    multiburstDragMeasurementIndex_ = -1;
+    multiburstLevelDragIndex_ = -1;
     measureActive_ = false;
     areaAnalysis_ = {};
     referenceAnalysis_ = {};
     temporalArea_ = {};
     temporalReference_ = {};
+    multiburstMeasurementActive_ = false;
+    multiburstPending_ = false;
+    multiburstSearchFrames_ = 0;
+    multiburstMeasureStep_ = 0;
+    multiburstStatus_.clear();
+    multiburstDebugActivity_.clear();
+    multiburstDebugBaseline_.clear();
+    multiburstDebugThreshold_ = 0.0;
+    multiburstDebugMaximum_ = 0.0;
+    multiburstDebugCandidateRects_.clear();
+    multiburstDebugCandidateCount_ = 0;
+    if (multiburstDebugTimer_ != nullptr)
+    {
+        multiburstDebugTimer_->stop();
+    }
+    multiburstAnalyses_.clear();
+    temporalMultiburst_.clear();
+    update();
+}
+
+void WaveformWidget::advanceMultiburstDebugStep()
+{
+    if (multiburstPending_)
+    {
+        processTemporalMeasurements();
+
+        if (multiburstPending_)
+        {
+            if (multiburstSearchFrames_ >= kMultiburstSearchFrames)
+            {
+                multiburstStatus_ =
+                    QStringLiteral("MULTIBURST  NOT FOUND   CANDIDATES %1")
+                        .arg(multiburstDebugCandidateCount_);
+                multiburstDebugTimer_->stop();
+            }
+            else
+            {
+                multiburstStatus_ =
+                    QStringLiteral("MULTIBURST  SEARCH  %1/%2   CANDIDATES %3")
+                        .arg(multiburstSearchFrames_ + 1)
+                        .arg(kMultiburstSearchFrames)
+                        .arg(multiburstDebugCandidateCount_);
+            }
+        }
+        else if (!temporalMultiburst_.isEmpty())
+        {
+            multiburstMeasureStep_ = 0;
+            multiburstStatus_ =
+                QStringLiteral("MULTIBURST  MEASURE  1/%1")
+                    .arg(kTemporalMeasurementFrames);
+        }
+        else
+        {
+            multiburstStatus_ =
+                QStringLiteral("MULTIBURST  NOT FOUND   CANDIDATES %1")
+                    .arg(multiburstDebugCandidateCount_);
+            multiburstDebugTimer_->stop();
+        }
+
+        update();
+        return;
+    }
+
+    if (!multiburstMeasurementActive_ ||
+        (temporalMultiburst_.isEmpty() &&
+            !temporalReference_.active))
+    {
+        multiburstDebugTimer_->stop();
+        return;
+    }
+
+    ++multiburstMeasureStep_;
+    processTemporalMeasurements();
+
+    if (multiburstMeasureStep_ >= kTemporalMeasurementFrames)
+    {
+        int validBursts = 0;
+        for (const AreaAnalysisResult& analysis : multiburstAnalyses_)
+        {
+            if (analysis.valid)
+            {
+                ++validBursts;
+            }
+        }
+
+        multiburstStatus_ =
+            QStringLiteral("MULTIBURST  DONE  %1/%2")
+                .arg(validBursts)
+                .arg(kExpectedMultiburstBursts);
+        multiburstDebugTimer_->stop();
+    }
+    else
+    {
+        multiburstStatus_ =
+            QStringLiteral("MULTIBURST  MEASURE  %1/%2")
+                .arg(multiburstMeasureStep_ + 1)
+                .arg(kTemporalMeasurementFrames);
+    }
+
     update();
 }
 
 void WaveformWidget::processTemporalMeasurements()
 {
+    if (multiburstPending_)
+    {
+        ++multiburstSearchFrames_;
+
+        const MultiburstLayout layout =
+            detectMultiburstLayout();
+
+        if (layout.valid &&
+            layout.burstRects.size() >= kMinimumMultiburstBursts)
+        {
+            multiburstPending_ = false;
+            multiburstSearchFrames_ = 0;
+
+            temporalReference_ = {};
+            temporalReference_.active = true;
+            temporalReference_.selectionRect = layout.referenceRect;
+
+            const int burstCount =
+                static_cast<int>(layout.burstRects.size());
+
+            temporalMultiburst_.clear();
+            temporalMultiburst_.resize(burstCount);
+            multiburstAnalyses_.clear();
+            multiburstAnalyses_.resize(burstCount);
+
+            for (int i = 0; i < burstCount; ++i)
+            {
+                temporalMultiburst_[i].active = true;
+                temporalMultiburst_[i].selectionRect = layout.burstRects[i];
+            }
+
+            return;
+        }
+        else if (multiburstSearchFrames_ >= kMultiburstSearchFrames)
+        {
+            multiburstPending_ = false;
+            multiburstSearchFrames_ = 0;
+        }
+    }
+
     if (temporalArea_.active)
     {
         ++temporalArea_.framesSeen;
@@ -771,6 +993,93 @@ void WaveformWidget::processTemporalMeasurements()
         }
     }
 
+    for (int burstIndex = 0;
+        burstIndex < temporalMultiburst_.size();
+        ++burstIndex)
+    {
+        TemporalAreaMeasurement& temporal =
+            temporalMultiburst_[burstIndex];
+
+        if (!temporal.active)
+        {
+            continue;
+        }
+
+        ++temporal.framesSeen;
+
+        const AreaAnalysisResult result =
+            analyzeSelection(temporal.selectionRect);
+
+        if (result.valid)
+        {
+            ++temporal.validFrames;
+            temporal.sumFrequencyMHz += result.frequencyMHz;
+            temporal.sumVppVolts +=
+                static_cast<double>(result.vppMillivolts) / 1000.0;
+            temporal.sumLowVolts += result.lowVolts;
+            temporal.sumHighVolts += result.highVolts;
+            temporal.sumVppTopY += result.vppTop.y();
+            temporal.sumVppBottomY += result.vppBottom.y();
+            temporal.representative = result;
+        }
+
+        if (temporal.framesSeen >= kTemporalMeasurementFrames)
+        {
+            AreaAnalysisResult averaged;
+            averaged.attempted = true;
+            averaged.selectionRect = temporal.selectionRect;
+
+            if (temporal.validFrames >= kMinimumTemporalValidFrames)
+            {
+                const double divisor =
+                    static_cast<double>(temporal.validFrames);
+
+                averaged = temporal.representative;
+                averaged.attempted = true;
+                averaged.valid = true;
+                averaged.selectionRect = temporal.selectionRect;
+                averaged.frequencyMHz =
+                    temporal.sumFrequencyMHz / divisor;
+
+                const double averagedVppVolts =
+                    temporal.sumVppVolts / divisor;
+
+                averaged.vppMillivolts =
+                    static_cast<int>(
+                        std::lround(
+                            averagedVppVolts * 1000.0));
+                averaged.lowVolts =
+                    temporal.sumLowVolts / divisor;
+                averaged.highVolts =
+                    temporal.sumHighVolts / divisor;
+                averaged.vppTop.setY(
+                    temporal.sumVppTopY / divisor);
+                averaged.vppBottom.setY(
+                    temporal.sumVppBottomY / divisor);
+                averaged.message =
+                    QStringLiteral("Multiburst temporal average %1/%2")
+                        .arg(temporal.validFrames)
+                        .arg(kTemporalMeasurementFrames);
+            }
+            else
+            {
+                averaged.valid = false;
+                averaged.message =
+                    QStringLiteral("Multiburst unstable (%1/%2 valid)")
+                        .arg(temporal.validFrames)
+                        .arg(kTemporalMeasurementFrames);
+            }
+
+            if (burstIndex >= multiburstAnalyses_.size())
+            {
+                multiburstAnalyses_.resize(burstIndex + 1);
+            }
+
+            multiburstAnalyses_[burstIndex] = averaged;
+            temporal.active = false;
+        }
+    }
+
     if (temporalReference_.active)
     {
         ++temporalReference_.framesSeen;
@@ -842,6 +1151,45 @@ void WaveformWidget::processTemporalMeasurements()
             update();
         }
     }
+
+    if (multiburstMeasurementActive_)
+    {
+        bool multiburstMeasuring =
+            temporalReference_.active;
+        int multiburstFramesSeen = 0;
+
+        for (const TemporalAreaMeasurement& temporal : temporalMultiburst_)
+        {
+            if (temporal.active)
+            {
+                multiburstMeasuring = true;
+            }
+
+            multiburstFramesSeen =
+                (std::max)(
+                    multiburstFramesSeen,
+                    temporal.framesSeen);
+        }
+
+        multiburstMeasureStep_ =
+            (std::min)(
+                multiburstFramesSeen,
+                kTemporalMeasurementFrames);
+
+        if (multiburstMeasuring)
+        {
+            multiburstStatus_ =
+                QStringLiteral("MULTIBURST  MEASURE  %1/%2")
+                    .arg(multiburstMeasureStep_)
+                    .arg(kTemporalMeasurementFrames);
+        }
+        else
+        {
+            // The M-owned temporal measurements have finished.
+            multiburstMeasurementActive_ = false;
+            multiburstStatus_.clear();
+        }
+    }
 }
 
 void WaveformWidget::setMeasurementLuma(
@@ -869,6 +1217,9 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
 
     if (event->key() == Qt::Key_R && !event->isAutoRepeat())
     {
+        multiburstMeasurementActive_ = false;
+        multiburstStatus_.clear();
+
         referenceMode_ = true;
         referenceModeLabelMuted_ = false;
         referenceSelecting_ = false;
@@ -876,6 +1227,76 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
         hoverActive_ = false;
         measureActive_ = false;
         areaSelecting_ = false;
+        updateInteractionCursor();
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_D && !event->isAutoRepeat())
+    {
+        probeDetailsMode_ = true;
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_M && !event->isAutoRepeat())
+    {
+        clearMeasurements();
+        areaMode_ = false;
+        referenceMode_ = false;
+        areaModeLabelMuted_ = false;
+        referenceModeLabelMuted_ = false;
+        hoverActive_ = false;
+        measureActive_ = false;
+        multiburstSearchFrames_ = 0;
+        multiburstMeasureStep_ = 0;
+        multiburstPending_ = false;
+        multiburstDebugActivity_.clear();
+        multiburstDebugBaseline_.clear();
+        multiburstDebugThreshold_ = 0.0;
+        multiburstDebugMaximum_ = 0.0;
+        multiburstDebugCandidateRects_.clear();
+        multiburstDebugCandidateCount_ = 0;
+
+        const MultiburstLayout layout =
+            detectMultiburstLayout();
+
+        if (layout.valid &&
+            layout.burstRects.size() >= kMinimumMultiburstBursts)
+        {
+            multiburstMeasurementActive_ = true;
+
+            temporalReference_ = {};
+            temporalReference_.active = true;
+            temporalReference_.selectionRect = layout.referenceRect;
+
+            const int burstCount =
+                static_cast<int>(layout.burstRects.size());
+
+            temporalMultiburst_.clear();
+            temporalMultiburst_.resize(burstCount);
+            multiburstAnalyses_.clear();
+            multiburstAnalyses_.resize(burstCount);
+
+            for (int i = 0; i < burstCount; ++i)
+            {
+                temporalMultiburst_[i].active = true;
+                temporalMultiburst_[i].selectionRect = layout.burstRects[i];
+            }
+
+            multiburstStatus_ =
+                QStringLiteral("MULTIBURST  MEASURE  0/%1")
+                    .arg(kTemporalMeasurementFrames);
+        }
+        else
+        {
+            multiburstMeasurementActive_ = false;
+            multiburstStatus_ =
+                QStringLiteral("MULTIBURST  NOT FOUND");
+        }
+
         updateInteractionCursor();
         update();
         event->accept();
@@ -910,6 +1331,14 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
 
 void WaveformWidget::keyReleaseEvent(QKeyEvent* event)
 {
+    if (event->key() == Qt::Key_D && !event->isAutoRepeat())
+    {
+        probeDetailsMode_ = false;
+        update();
+        event->accept();
+        return;
+    }
+
     if (event->key() == Qt::Key_A && !event->isAutoRepeat())
     {
         areaMode_ = false;
@@ -943,6 +1372,9 @@ void WaveformWidget::leaveEvent(QEvent* event)
     referenceLevelDragIndex_ = -1;
     areaLevelDragging_ = false;
     areaLevelDragIndex_ = -1;
+    multiburstLevelDragging_ = false;
+    multiburstDragMeasurementIndex_ = -1;
+    multiburstLevelDragIndex_ = -1;
     updateInteractionCursor();
     update();
     QWidget::leaveEvent(event);
@@ -978,6 +1410,26 @@ void WaveformWidget::mousePressEvent(QMouseEvent* event)
         {
             areaLevelDragging_ = true;
             areaLevelDragIndex_ = areaLevel;
+            hoverActive_ = false;
+            updateInteractionCursor();
+            event->accept();
+            return;
+        }
+
+
+        int multiburstMeasurementIndex = -1;
+        const int multiburstLevel =
+            multiburstLevelHit(
+                event->position(),
+                &multiburstMeasurementIndex);
+
+        if (multiburstLevel >= 0 &&
+            multiburstMeasurementIndex >= 0)
+        {
+            multiburstLevelDragging_ = true;
+            multiburstDragMeasurementIndex_ =
+                multiburstMeasurementIndex;
+            multiburstLevelDragIndex_ = multiburstLevel;
             hoverActive_ = false;
             updateInteractionCursor();
             event->accept();
@@ -1108,6 +1560,45 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
+    if (multiburstLevelDragging_ &&
+        (event->buttons() & Qt::LeftButton) != 0 &&
+        multiburstDragMeasurementIndex_ >= 0 &&
+        multiburstDragMeasurementIndex_ < multiburstAnalyses_.size())
+    {
+        AreaAnalysisResult& analysis =
+            multiburstAnalyses_[multiburstDragMeasurementIndex_];
+
+        const double volts =
+            displayYToVolts(event->position().y());
+
+        if (multiburstLevelDragIndex_ == 0)
+        {
+            analysis.lowVolts =
+                (std::min)(volts, analysis.highVolts);
+        }
+        else if (multiburstLevelDragIndex_ == 1)
+        {
+            analysis.highVolts =
+                (std::max)(volts, analysis.lowVolts);
+        }
+
+        const double vppVolts =
+            analysis.highVolts - analysis.lowVolts;
+
+        analysis.vppMillivolts =
+            static_cast<int>(
+                std::lround(vppVolts * 1000.0));
+
+        analysis.vppTop.setY(
+            voltsToDisplayY(analysis.highVolts));
+        analysis.vppBottom.setY(
+            voltsToDisplayY(analysis.lowVolts));
+
+        event->accept();
+        update();
+        return;
+    }
+
     if (referenceSelecting_ && (event->buttons() & Qt::LeftButton) != 0)
     {
         referenceCurrentPosition_ = clampPointToRect(event->position(), scope);
@@ -1149,7 +1640,8 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
     {
         if (!areaMode_ && !referenceMode_ &&
             (referenceLevelHit(event->position()) >= 0 ||
-                areaLevelHit(event->position()) >= 0))
+                areaLevelHit(event->position()) >= 0 ||
+                multiburstLevelHit(event->position()) >= 0))
         {
             setCursor(Qt::SizeVerCursor);
         }
@@ -1166,6 +1658,17 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 
 void WaveformWidget::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (multiburstLevelDragging_ && event->button() == Qt::LeftButton)
+    {
+        multiburstLevelDragging_ = false;
+        multiburstDragMeasurementIndex_ = -1;
+        multiburstLevelDragIndex_ = -1;
+        updateInteractionCursor();
+        event->accept();
+        update();
+        return;
+    }
+
     if (referenceLevelDragging_ && event->button() == Qt::LeftButton)
     {
         referenceLevelDragging_ = false;
@@ -1255,6 +1758,488 @@ void WaveformWidget::mouseDoubleClickEvent(QMouseEvent* event)
 
     // Preserve the normal waveform-view double-click behavior.
     VideoWidget::mouseDoubleClickEvent(event);
+}
+
+WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
+{
+    MultiburstLayout layout;
+
+    // The old FIR / residual-energy detector deliberately disappears here.
+    // Multiburst is centred around 50 % video level, so discover periodic
+    // regions directly from alternating excursions around that level.
+    multiburstDebugActivity_.clear();
+    multiburstDebugBaseline_.clear();
+    multiburstDebugThreshold_ = 0.0;
+    multiburstDebugMaximum_ = 0.0;
+    multiburstDebugCandidateRects_.clear();
+    multiburstDebugCandidateCount_ = 0;
+
+    const int sampleCount =
+        static_cast<int>(measurementLuma_.size());
+
+    if (sampleCount < 512)
+    {
+        return layout;
+    }
+
+    const QRect displayRect = imageRect();
+    const WaveformGeometry geometry =
+        makeGeometry(image(), displayRect, this);
+
+    constexpr double kMidLevelVolts =
+        kBlackLevelVolts +
+        0.5 * (kWhiteLevelVolts - kBlackLevelVolts);
+
+    // A little dead-band prevents noise near 50 % from making tiny false
+    // lobes.  It does NOT determine the measured amplitude or frequency;
+    // it is used only to discover where periodic signals live.
+    constexpr double kDiscoveryDeadBandVolts = 0.045;
+    constexpr int kMinimumLobeSamples = 3;
+    constexpr int kMaximumSignalCount =
+        kExpectedMultiburstBursts + 1; // Ref + up to six bursts.
+    constexpr int kMinimumSignalCount =
+        kMinimumMultiburstBursts + 1; // Ref + at least four bursts.
+
+    struct Lobe
+    {
+        int first = 0;
+        int last = 0;
+        int sign = 0;
+
+        int length() const
+        {
+            return last - first + 1;
+        }
+
+        double center() const
+        {
+            return
+                0.5 *
+                (static_cast<double>(first) +
+                    static_cast<double>(last));
+        }
+    };
+
+    struct SignalGroup
+    {
+        int firstLobe = 0;
+        int lastLobe = 0;
+        int firstSample = 0;
+        int lastSample = 0;
+        double halfPeriodSamples = 0.0;
+        double frequencyHz = 0.0;
+        int lobeCount = 0;
+
+        int length() const
+        {
+            return lastSample - firstSample + 1;
+        }
+    };
+
+    QVector<Lobe> lobes;
+
+    bool inLobe = false;
+    int lobeStart = 0;
+    int lobeSign = 0;
+
+    for (int i = 0; i < sampleCount; ++i)
+    {
+        const double value =
+            static_cast<double>(measurementLuma_[i]);
+
+        int sign = 0;
+
+        if (value >= kMidLevelVolts + kDiscoveryDeadBandVolts)
+        {
+            sign = 1;
+        }
+        else if (value <= kMidLevelVolts - kDiscoveryDeadBandVolts)
+        {
+            sign = -1;
+        }
+
+        if (sign == 0)
+        {
+            if (inLobe)
+            {
+                const Lobe lobe
+                {
+                    lobeStart,
+                    i - 1,
+                    lobeSign
+                };
+
+                if (lobe.length() >= kMinimumLobeSamples)
+                {
+                    lobes.push_back(lobe);
+                }
+
+                inLobe = false;
+            }
+
+            continue;
+        }
+
+        if (!inLobe)
+        {
+            inLobe = true;
+            lobeStart = i;
+            lobeSign = sign;
+            continue;
+        }
+
+        if (sign != lobeSign)
+        {
+            const Lobe lobe
+            {
+                lobeStart,
+                i - 1,
+                lobeSign
+            };
+
+            if (lobe.length() >= kMinimumLobeSamples)
+            {
+                lobes.push_back(lobe);
+            }
+
+            lobeStart = i;
+            lobeSign = sign;
+        }
+    }
+
+    if (inLobe)
+    {
+        const Lobe lobe
+        {
+            lobeStart,
+            sampleCount - 1,
+            lobeSign
+        };
+
+        if (lobe.length() >= kMinimumLobeSamples)
+        {
+            lobes.push_back(lobe);
+        }
+    }
+
+    if (lobes.size() < 2)
+    {
+        return layout;
+    }
+
+    const auto pairLooksPeriodic =
+        [](const Lobe& a,
+            const Lobe& b)
+        {
+            if (a.sign == b.sign)
+            {
+                return false;
+            }
+
+            const double widthA =
+                static_cast<double>(a.length());
+            const double widthB =
+                static_cast<double>(b.length());
+
+            const double widthRatio =
+                (std::max)(widthA, widthB) /
+                (std::max)(1.0, (std::min)(widthA, widthB));
+
+            // Positive and negative half-cycles of both the square-wave Ref
+            // and the sine bursts should be of the same order of duration.
+            if (widthRatio > 1.75)
+            {
+                return false;
+            }
+
+            const int gap =
+                b.first - a.last - 1;
+
+            const double smallerWidth =
+                (std::min)(widthA, widthB);
+
+            // The 45 mV dead-band creates a short quiet gap around each
+            // 50%-crossing.  Real separators between bursts are much wider.
+            return
+                gap <=
+                (std::max)(
+                    12,
+                    static_cast<int>(
+                        std::lround(smallerWidth * 0.85)));
+        };
+
+    QVector<SignalGroup> groups;
+
+    int lobeIndex = 0;
+
+    while (lobeIndex + 1 < lobes.size())
+    {
+        if (!pairLooksPeriodic(
+                lobes[lobeIndex],
+                lobes[lobeIndex + 1]))
+        {
+            ++lobeIndex;
+            continue;
+        }
+
+        const int groupStart = lobeIndex;
+        int groupEnd = lobeIndex + 1;
+
+        QVector<double> halfPeriods;
+        halfPeriods.push_back(
+            lobes[groupEnd].center() -
+            lobes[groupEnd - 1].center());
+
+        while (groupEnd + 1 < lobes.size())
+        {
+            const Lobe& previous = lobes[groupEnd];
+            const Lobe& next = lobes[groupEnd + 1];
+
+            if (!pairLooksPeriodic(previous, next))
+            {
+                break;
+            }
+
+            const double nextHalfPeriod =
+                next.center() - previous.center();
+
+            const double meanHalfPeriod =
+                std::accumulate(
+                    halfPeriods.cbegin(),
+                    halfPeriods.cend(),
+                    0.0) /
+                static_cast<double>(halfPeriods.size());
+
+            if (relativeVariation(
+                    nextHalfPeriod,
+                    meanHalfPeriod) > 0.30)
+            {
+                break;
+            }
+
+            halfPeriods.push_back(nextHalfPeriod);
+            ++groupEnd;
+        }
+
+        const double meanHalfPeriod =
+            std::accumulate(
+                halfPeriods.cbegin(),
+                halfPeriods.cend(),
+                0.0) /
+            static_cast<double>(halfPeriods.size());
+
+        if (meanHalfPeriod > 1.0)
+        {
+            SignalGroup group;
+            group.firstLobe = groupStart;
+            group.lastLobe = groupEnd;
+            group.firstSample = lobes[groupStart].first;
+            group.lastSample = lobes[groupEnd].last;
+            group.halfPeriodSamples = meanHalfPeriod;
+            group.frequencyHz =
+                geometry.standard.sampleClockHz * 4.0 /
+                (2.0 * meanHalfPeriod);
+            group.lobeCount = groupEnd - groupStart + 1;
+            groups.push_back(group);
+        }
+
+        lobeIndex = groupEnd + 1;
+    }
+
+    const auto indexToDisplayX =
+        [&](int index)
+        {
+            const double normalized =
+                static_cast<double>(index) /
+                static_cast<double>(sampleCount - 1);
+
+            return
+                geometry.scopeRect.left() +
+                normalized * geometry.scopeRect.width();
+        };
+
+    multiburstDebugCandidateCount_ =
+        static_cast<int>(groups.size());
+
+    multiburstDebugCandidateRects_.reserve(groups.size());
+
+    for (const SignalGroup& group : groups)
+    {
+        multiburstDebugCandidateRects_.push_back(
+            QRectF(
+                QPointF(
+                    indexToDisplayX(group.firstSample),
+                    geometry.scopeRect.top()),
+                QPointF(
+                    indexToDisplayX(group.lastSample),
+                    geometry.scopeRect.bottom()))
+                .normalized());
+    }
+
+    if (groups.size() < kMinimumSignalCount)
+    {
+        return layout;
+    }
+
+    // If noise produced harmless extra periodic groups, keep at most the
+    // reference plus six strongest structures. Lobe count is the primary
+    // quality measure; horizontal duration breaks ties and favours the
+    // actual multiburst blocks.
+    if (groups.size() > kMaximumSignalCount)
+    {
+        std::sort(
+            groups.begin(),
+            groups.end(),
+            [](const SignalGroup& a,
+                const SignalGroup& b)
+            {
+                if (a.lobeCount != b.lobeCount)
+                {
+                    return a.lobeCount > b.lobeCount;
+                }
+
+                return a.length() > b.length();
+            });
+
+        groups.resize(kMaximumSignalCount);
+    }
+
+    // The reference is not hard-coded to a location or nominal frequency:
+    // measure the discovered periodic groups and take the slowest one.
+    int referenceGroupIndex = 0;
+
+    for (int i = 1; i < groups.size(); ++i)
+    {
+        if (groups[i].frequencyHz <
+            groups[referenceGroupIndex].frequencyHz)
+        {
+            referenceGroupIndex = i;
+        }
+    }
+
+    const SignalGroup referenceGroup =
+        groups[referenceGroupIndex];
+
+    QVector<SignalGroup> burstGroups;
+    burstGroups.reserve(kExpectedMultiburstBursts);
+
+    for (int i = 0; i < groups.size(); ++i)
+    {
+        if (i != referenceGroupIndex)
+        {
+            burstGroups.push_back(groups[i]);
+        }
+    }
+
+    std::sort(
+        burstGroups.begin(),
+        burstGroups.end(),
+        [](const SignalGroup& a,
+            const SignalGroup& b)
+        {
+            return a.firstSample < b.firstSample;
+        });
+
+    if (burstGroups.size() < kMinimumMultiburstBursts)
+    {
+        return layout;
+    }
+
+    const auto expandedGroupRect =
+        [&](const SignalGroup& group,
+            int leftLimit,
+            int rightLimit)
+        {
+            const int desiredPadding =
+                (std::max)(
+                    sampleCount / 48,
+                    group.length() / 2);
+
+            int first =
+                (std::max)(leftLimit, group.firstSample - desiredPadding);
+            int last =
+                (std::min)(rightLimit, group.lastSample + desiredPadding);
+
+            if (last <= first)
+            {
+                first = group.firstSample;
+                last = group.lastSample;
+            }
+
+            return QRectF(
+                QPointF(
+                    indexToDisplayX(first),
+                    geometry.scopeRect.top()),
+                QPointF(
+                    indexToDisplayX(last),
+                    geometry.scopeRect.bottom()))
+                .normalized();
+        };
+
+    // Reference gets a generous window around its two dominant lobes.  The
+    // existing reference analyser then determines the actual HIGH/LOW levels
+    // over four frames; discovery does not invent the Ref amplitude.
+    int referenceLeftLimit = 0;
+    int referenceRightLimit = sampleCount - 1;
+
+    for (const SignalGroup& group : groups)
+    {
+        if (group.firstSample > referenceGroup.lastSample)
+        {
+            referenceRightLimit =
+                referenceGroup.lastSample +
+                (group.firstSample - referenceGroup.lastSample) / 2;
+            break;
+        }
+    }
+
+    layout.referenceRect =
+        expandedGroupRect(
+            referenceGroup,
+            referenceLeftLimit,
+            referenceRightLimit);
+
+    layout.burstRects.clear();
+    layout.burstRects.reserve(kExpectedMultiburstBursts);
+
+    for (int i = 0; i < burstGroups.size(); ++i)
+    {
+        const SignalGroup& group = burstGroups[i];
+
+        int leftLimit = 0;
+        int rightLimit = sampleCount - 1;
+
+        if (i > 0)
+        {
+            const SignalGroup& previous = burstGroups[i - 1];
+            leftLimit =
+                previous.lastSample +
+                (group.firstSample - previous.lastSample) / 2;
+        }
+        else if (referenceGroup.firstSample < group.firstSample)
+        {
+            leftLimit =
+                referenceGroup.lastSample +
+                (group.firstSample - referenceGroup.lastSample) / 2;
+        }
+
+        if (i + 1 < burstGroups.size())
+        {
+            const SignalGroup& next = burstGroups[i + 1];
+            rightLimit =
+                group.lastSample +
+                (next.firstSample - group.lastSample) / 2;
+        }
+
+        layout.burstRects.push_back(
+            expandedGroupRect(
+                group,
+                leftLimit,
+                rightLimit));
+    }
+
+    layout.valid = true;
+    return layout;
 }
 
 WaveformWidget::AreaAnalysisResult WaveformWidget::analyzeSelection(
@@ -2065,6 +3050,194 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                     static_cast<double>(measurementLabelFont.pixelSize()) *
                     0.80))));
 
+    if (!multiburstDebugActivity_.isEmpty() &&
+        multiburstDebugMaximum_ > 0.0)
+    {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        // Exact 30 kHz FIR baseline used by M.  Plot it in waveform
+        // coordinates so edge behaviour and baseline tracking are directly
+        // visible against the source trace.
+        if (multiburstDebugBaseline_.size() > 1 &&
+            geometry.voltsPerDisplayPixel > 0.0)
+        {
+            QPolygonF baselineCurve;
+            baselineCurve.reserve(multiburstDebugBaseline_.size());
+
+            const int baselineCount =
+                static_cast<int>(multiburstDebugBaseline_.size());
+
+            for (int i = 0; i < baselineCount; ++i)
+            {
+                const double normalizedX =
+                    static_cast<double>(i) /
+                    static_cast<double>(baselineCount - 1);
+
+                const double y =
+                    geometry.zeroVoltY -
+                    multiburstDebugBaseline_[i] /
+                        geometry.voltsPerDisplayPixel;
+
+                baselineCurve.push_back(
+                    QPointF(
+                        geometry.scopeRect.left() +
+                            normalizedX * geometry.scopeRect.width(),
+                        y));
+            }
+
+            painter.save();
+            painter.setClipRect(geometry.scopeRect);
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(QColor(180, 120, 255, 235), 1.5));
+            painter.drawPolyline(baselineCurve);
+            painter.restore();
+
+            painter.setFont(measurementLabelFont);
+            painter.setPen(QColor(180, 120, 255));
+            painter.drawText(
+                QRectF(
+                    geometry.scopeRect.left() + 10.0,
+                    geometry.scopeRect.top() + 34.0,
+                    220.0,
+                    24.0),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                QStringLiteral("30 kHz FIR BASELINE"));
+        }
+
+        // Candidate islands: red vertical bands.  These are deliberately
+        // full-height while debugging so a missed/merged island is obvious.
+        painter.setPen(QPen(QColor(255, 80, 80, 230), 1.5, Qt::DashLine));
+        painter.setBrush(QColor(255, 60, 60, 32));
+        for (const QRectF& candidateRect : multiburstDebugCandidateRects_)
+        {
+            painter.drawRect(candidateRect.intersected(geometry.scopeRect));
+        }
+
+        // AC-energy scope at the bottom of the waveform.  The detector uses
+        // this exact activity array, so this is a view of what M sees rather
+        // than a second diagnostic calculation.
+        const double debugBandHeight =
+            geometry.scopeRect.height() * 0.24;
+        const double debugBottom =
+            geometry.scopeRect.bottom() - 8.0;
+        const double debugTop =
+            debugBottom - debugBandHeight;
+
+        QPolygonF activityCurve;
+        activityCurve.reserve(multiburstDebugActivity_.size());
+
+        const int debugCount =
+            static_cast<int>(multiburstDebugActivity_.size());
+
+        for (int i = 0; i < debugCount; ++i)
+        {
+            const double normalizedX =
+                debugCount > 1
+                ? static_cast<double>(i) /
+                    static_cast<double>(debugCount - 1)
+                : 0.0;
+            const double normalizedActivity =
+                std::clamp(
+                    multiburstDebugActivity_[i] /
+                        multiburstDebugMaximum_,
+                    0.0,
+                    1.0);
+
+            activityCurve.push_back(
+                QPointF(
+                    geometry.scopeRect.left() +
+                        normalizedX * geometry.scopeRect.width(),
+                    debugBottom -
+                        normalizedActivity * debugBandHeight));
+        }
+
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(QColor(80, 220, 255, 230), 1.5));
+        painter.drawPolyline(activityCurve);
+
+        const double normalizedThreshold =
+            std::clamp(
+                multiburstDebugThreshold_ /
+                    multiburstDebugMaximum_,
+                0.0,
+                1.0);
+        const double thresholdY =
+            debugBottom -
+            normalizedThreshold * debugBandHeight;
+
+        painter.setPen(QPen(QColor(255, 220, 80, 230), 1.5, Qt::DashLine));
+        painter.drawLine(
+            QPointF(geometry.scopeRect.left(), thresholdY),
+            QPointF(geometry.scopeRect.right(), thresholdY));
+
+        // Small labels make a screen recording self-explanatory.
+        painter.setFont(measurementLabelFont);
+        painter.setPen(QColor(80, 220, 255));
+        painter.drawText(
+            QRectF(
+                geometry.scopeRect.left() + 10.0,
+                debugTop,
+                180.0,
+                24.0),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral("AC ENERGY"));
+
+        painter.setPen(QColor(255, 220, 80));
+        painter.drawText(
+            QRectF(
+                geometry.scopeRect.left() + 10.0,
+                thresholdY - 24.0,
+                180.0,
+                22.0),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral("THRESHOLD"));
+
+        painter.restore();
+    }
+
+    if (!multiburstStatus_.isEmpty())
+    {
+        painter.save();
+        painter.setFont(measurementLabelFont);
+
+        const QFontMetricsF statusMetrics(
+            measurementLabelFont,
+            painter.device());
+
+        constexpr double kStatusPaddingX = 12.0;
+        constexpr double kStatusPaddingY = 6.0;
+        constexpr double kStatusMargin = 18.0;
+
+        const QSizeF statusTextSize(
+            statusMetrics.horizontalAdvance(multiburstStatus_),
+            statusMetrics.height());
+
+        QRectF statusRect(
+            geometry.scopeRect.left() + kStatusMargin,
+            geometry.scopeRect.top() + kStatusMargin,
+            statusTextSize.width() + 2.0 * kStatusPaddingX,
+            statusTextSize.height() + 2.0 * kStatusPaddingY);
+
+        if (statusRect.right() > geometry.scopeRect.right())
+        {
+            statusRect.moveRight(geometry.scopeRect.right());
+        }
+
+        painter.setPen(QPen(QColor(255, 220, 80), 1.5));
+        painter.setBrush(QColor(0, 0, 0, 220));
+        painter.drawRoundedRect(statusRect, 4.0, 4.0);
+        painter.drawText(
+            statusRect.adjusted(
+                kStatusPaddingX,
+                kStatusPaddingY,
+                -kStatusPaddingX,
+                -kStatusPaddingY),
+            Qt::AlignCenter,
+            multiburstStatus_);
+        painter.restore();
+    }
+
     const bool showAreaModeLabel =
         areaMode_ && !areaModeLabelMuted_;
     const bool showReferenceModeLabel =
@@ -2513,6 +3686,190 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         painter.restore();
     }
 
+    if (!multiburstAnalyses_.isEmpty())
+    {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        const QColor measureColor(80, 255, 120);
+        const double levelLineWidth =
+            (std::max)(1.5, measurementPenWidth * 0.65);
+
+        painter.setFont(measurementLabelFont);
+        const QFontMetricsF metrics(
+            measurementLabelFont,
+            painter.device());
+
+        constexpr double kPaddingX = 10.0;
+        constexpr double kPaddingY = 5.0;
+
+        const auto makeLabelRect =
+            [&](const QString& label,
+                double centerX,
+                double top)
+            {
+                const QSizeF textSize(
+                    metrics.horizontalAdvance(label),
+                    metrics.height());
+
+                QRectF rect(
+                    centerX -
+                        (textSize.width() + 2.0 * kPaddingX) * 0.5,
+                    top,
+                    textSize.width() + 2.0 * kPaddingX,
+                    textSize.height() + 2.0 * kPaddingY);
+
+                if (rect.left() < geometry.scopeRect.left())
+                {
+                    rect.moveLeft(geometry.scopeRect.left());
+                }
+                if (rect.right() > geometry.scopeRect.right())
+                {
+                    rect.moveRight(geometry.scopeRect.right());
+                }
+
+                return rect;
+            };
+
+        for (const AreaAnalysisResult& analysis : multiburstAnalyses_)
+        {
+            if (!analysis.valid ||
+                analysis.selectionRect.isEmpty())
+            {
+                continue;
+            }
+
+            painter.setPen(
+                QPen(
+                    measureColor,
+                    levelLineWidth));
+
+            painter.drawLine(
+                QPointF(
+                    analysis.selectionRect.left(),
+                    analysis.vppTop.y()),
+                QPointF(
+                    analysis.selectionRect.right(),
+                    analysis.vppTop.y()));
+
+            painter.drawLine(
+                QPointF(
+                    analysis.selectionRect.left(),
+                    analysis.vppBottom.y()),
+                QPointF(
+                    analysis.selectionRect.right(),
+                    analysis.vppBottom.y()));
+
+            const QString frequencyLabel =
+                QStringLiteral("%1 MHz")
+                    .arg(analysis.frequencyMHz, 0, 'f', 2);
+
+            QString amplitudeLabel;
+
+            if (referenceAnalysis_.valid &&
+                referenceAnalysis_.vppVolts > 0.0 &&
+                analysis.vppMillivolts > 0)
+            {
+                double decibels =
+                    20.0 *
+                    std::log10(
+                        (static_cast<double>(analysis.vppMillivolts) / 1000.0) /
+                        referenceAnalysis_.vppVolts);
+
+                if (std::abs(decibels) < 0.05)
+                {
+                    decibels = 0.0;
+                }
+
+                amplitudeLabel =
+                    QStringLiteral("%1 dB")
+                        .arg(decibels, 0, 'f', 1);
+            }
+            else
+            {
+                amplitudeLabel =
+                    QStringLiteral("%1 mV")
+                        .arg(analysis.vppMillivolts);
+            }
+
+            const double labelCenterX =
+                0.5 *
+                (analysis.selectionRect.left() +
+                    analysis.selectionRect.right());
+
+            const bool useReferenceAnchors =
+                referenceAnalysis_.valid &&
+                !referenceAnalysis_.selectionRect.isEmpty();
+
+            const double amplitudeAnchorY =
+                useReferenceAnchors
+                ? voltsToDisplayY(referenceAnalysis_.highVolts)
+                : analysis.vppTop.y();
+
+            const double frequencyAnchorY =
+                useReferenceAnchors
+                ? voltsToDisplayY(referenceAnalysis_.lowVolts)
+                : analysis.vppBottom.y();
+
+            QRectF amplitudeRect =
+                makeLabelRect(
+                    amplitudeLabel,
+                    labelCenterX,
+                    amplitudeAnchorY -
+                        metrics.height() -
+                        2.0 * kPaddingY -
+                        measurementLabelLineGap);
+
+            QRectF frequencyRect =
+                makeLabelRect(
+                    frequencyLabel,
+                    labelCenterX,
+                    frequencyAnchorY +
+                        measurementLabelLineGap);
+
+            if (amplitudeRect.top() < geometry.scopeRect.top())
+            {
+                amplitudeRect.moveTop(geometry.scopeRect.top());
+            }
+
+            if (frequencyRect.bottom() > geometry.scopeRect.bottom())
+            {
+                frequencyRect.moveBottom(geometry.scopeRect.bottom());
+            }
+
+            painter.setPen(QPen(measureColor, 1.5));
+            painter.setBrush(QColor(0, 0, 0, 210));
+
+            painter.drawRoundedRect(
+                amplitudeRect,
+                4.0,
+                4.0);
+            painter.drawText(
+                amplitudeRect.adjusted(
+                    kPaddingX,
+                    kPaddingY,
+                    -kPaddingX,
+                    -kPaddingY),
+                Qt::AlignCenter,
+                amplitudeLabel);
+
+            painter.drawRoundedRect(
+                frequencyRect,
+                4.0,
+                4.0);
+            painter.drawText(
+                frequencyRect.adjusted(
+                    kPaddingX,
+                    kPaddingY,
+                    -kPaddingX,
+                    -kPaddingY),
+                Qt::AlignCenter,
+                frequencyLabel);
+        }
+
+        painter.restore();
+    }
+
     if (measureActive_ &&
         !areaMode_ &&
         !referenceMode_)
@@ -2583,9 +3940,42 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
     }
 
     const double volts = displayYToVolts(hoverPosition_.y());
-    const int millivolts = static_cast<int>(std::lround(volts * 1000.0));
-    const double percent = (volts - kBlackLevelVolts) * 100.0 / (kWhiteLevelVolts - kBlackLevelVolts);
-    const QString text = QStringLiteral("%1 mV   %2").arg(millivolts).arg(formatPercent(percent));
+    const int millivolts =
+        static_cast<int>(
+            std::lround(volts * 1000.0));
+    const double percent =
+        (volts - kBlackLevelVolts) *
+        100.0 /
+        (kWhiteLevelVolts - kBlackLevelVolts);
+
+    QString text =
+        QStringLiteral("%1 mV   %2")
+            .arg(millivolts)
+            .arg(formatPercent(percent));
+
+    if (probeDetailsMode_)
+    {
+        const double sourcePixelPosition =
+            displayXToSourcePixels(
+                hoverPosition_.x());
+
+        const int sourcePixel =
+            std::clamp(
+                static_cast<int>(
+                    std::lround(sourcePixelPosition)),
+                0,
+                geometry.standard.sampleWidth - 1);
+
+        const double lineTimeMicroseconds =
+            static_cast<double>(sourcePixel) /
+            sampleClockHz(geometry.standard) *
+            1.0e6;
+
+        text +=
+            QStringLiteral("   %1 us   px %2")
+                .arg(lineTimeMicroseconds, 0, 'f', 2)
+                .arg(sourcePixel);
+    }
 
     painter.save();
     painter.setFont(measurementLabelFont);
@@ -2627,7 +4017,6 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 void WaveformWidget::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    clearAreaAnalysis();
-    referenceAnalysis_.selectionRect = {};
+    clearMeasurements();
     emitOutputSize();
 }
