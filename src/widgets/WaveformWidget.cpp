@@ -537,6 +537,12 @@ void WaveformWidget::updateHover(const QPointF& position)
 
 void WaveformWidget::updateInteractionCursor()
 {
+    if (measurementTableDragging_)
+    {
+        setCursor(Qt::SizeAllCursor);
+        return;
+    }
+
     if (referenceLevelDragging_ ||
         areaLevelDragging_ ||
         multiburstLevelDragging_)
@@ -767,6 +773,10 @@ void WaveformWidget::clearMeasurements()
     multiburstLevelDragging_ = false;
     multiburstDragMeasurementIndex_ = -1;
     multiburstLevelDragIndex_ = -1;
+    measurementTableDragging_ = false;
+    measurementTableUserPositioned_ = false;
+    measurementTableRect_ = {};
+    measurementTablePosition_ = {};
     measureActive_ = false;
     areaAnalysis_ = {};
     referenceAnalysis_ = {};
@@ -892,6 +902,8 @@ void WaveformWidget::processTemporalMeasurements()
             temporalReference_ = {};
             temporalReference_.active = true;
             temporalReference_.selectionRect = layout.referenceRect;
+            temporalReference_.representative.frequencyMHz =
+                layout.referenceFrequencyMHz;
 
             const int burstCount =
                 static_cast<int>(layout.burstRects.size());
@@ -1087,6 +1099,9 @@ void WaveformWidget::processTemporalMeasurements()
         ReferenceAnalysisResult result =
             analyzeReferenceSelection(temporalReference_.selectionRect);
 
+        result.frequencyMHz =
+            temporalReference_.representative.frequencyMHz;
+
         if (!result.valid)
         {
             const AreaAnalysisResult sinusResult =
@@ -1103,6 +1118,13 @@ void WaveformWidget::processTemporalMeasurements()
                 result.selectionRect = sinusResult.selectionRect;
                 result.lowVolts = sinusResult.lowVolts;
                 result.highVolts = sinusResult.highVolts;
+
+                if (result.frequencyMHz <= 0.0)
+                {
+                    result.frequencyMHz =
+                        sinusResult.frequencyMHz;
+                }
+
                 result.message =
                     QStringLiteral("Reference set from sinus");
             }
@@ -1139,6 +1161,8 @@ void WaveformWidget::processTemporalMeasurements()
                     temporalReference_.sumLowVolts / divisor;
                 averaged.highVolts =
                     temporalReference_.sumHighVolts / divisor;
+                averaged.frequencyMHz =
+                    temporalReference_.representative.frequencyMHz;
                 averaged.message =
                     QStringLiteral("Reference temporal average %1/%2")
                         .arg(temporalReference_.validFrames)
@@ -1219,6 +1243,7 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
     {
         multiburstMeasurementActive_ = false;
         multiburstStatus_.clear();
+        referenceAnalysis_.frequencyMHz = 0.0;
 
         referenceMode_ = true;
         referenceModeLabelMuted_ = false;
@@ -1271,6 +1296,8 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
             temporalReference_ = {};
             temporalReference_.active = true;
             temporalReference_.selectionRect = layout.referenceRect;
+            temporalReference_.representative.frequencyMHz =
+                layout.referenceFrequencyMHz;
 
             const int burstCount =
                 static_cast<int>(layout.burstRects.size());
@@ -1375,6 +1402,7 @@ void WaveformWidget::leaveEvent(QEvent* event)
     multiburstLevelDragging_ = false;
     multiburstDragMeasurementIndex_ = -1;
     multiburstLevelDragIndex_ = -1;
+    measurementTableDragging_ = false;
     updateInteractionCursor();
     update();
     QWidget::leaveEvent(event);
@@ -1390,6 +1418,23 @@ void WaveformWidget::mousePressEvent(QMouseEvent* event)
     if (!areaMode_ && !referenceMode_ &&
         event->button() == Qt::LeftButton)
     {
+        if (!measurementTableRect_.isEmpty() &&
+            measurementTableRect_.contains(
+                event->position()))
+        {
+            measurementTableDragging_ = true;
+            measurementTableUserPositioned_ = true;
+            measurementTableDragOffset_ =
+                event->position() -
+                measurementTableRect_.topLeft();
+            measurementTablePosition_ =
+                measurementTableRect_.topLeft();
+            hoverActive_ = false;
+            updateInteractionCursor();
+            event->accept();
+            return;
+        }
+
         const int referenceLevel =
             referenceLevelHit(event->position());
 
@@ -1497,6 +1542,43 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 {
     const QRect displayRect = imageRect();
     const QRectF scope = scopeRect(displayRect);
+
+    if (measurementTableDragging_ &&
+        (event->buttons() & Qt::LeftButton) != 0)
+    {
+        QPointF position =
+            event->position() -
+            measurementTableDragOffset_;
+
+        const double maximumX =
+            (std::max)(
+                scope.left(),
+                scope.right() -
+                    measurementTableRect_.width());
+
+        const double maximumY =
+            (std::max)(
+                scope.top(),
+                scope.bottom() -
+                    measurementTableRect_.height());
+
+        position.setX(
+            std::clamp(
+                position.x(),
+                scope.left(),
+                maximumX));
+
+        position.setY(
+            std::clamp(
+                position.y(),
+                scope.top(),
+                maximumY));
+
+        measurementTablePosition_ = position;
+        event->accept();
+        update();
+        return;
+    }
 
     if (referenceLevelDragging_ &&
         (event->buttons() & Qt::LeftButton) != 0)
@@ -1639,6 +1721,13 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
     if (event->buttons() == Qt::NoButton)
     {
         if (!areaMode_ && !referenceMode_ &&
+            !measurementTableRect_.isEmpty() &&
+            measurementTableRect_.contains(
+                event->position()))
+        {
+            setCursor(Qt::SizeAllCursor);
+        }
+        else if (!areaMode_ && !referenceMode_ &&
             (referenceLevelHit(event->position()) >= 0 ||
                 areaLevelHit(event->position()) >= 0 ||
                 multiburstLevelHit(event->position()) >= 0))
@@ -1658,6 +1747,16 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 
 void WaveformWidget::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (measurementTableDragging_ &&
+        event->button() == Qt::LeftButton)
+    {
+        measurementTableDragging_ = false;
+        updateInteractionCursor();
+        event->accept();
+        update();
+        return;
+    }
+
     if (multiburstLevelDragging_ && event->button() == Qt::LeftButton)
     {
         multiburstLevelDragging_ = false;
@@ -2198,6 +2297,9 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
             referenceGroup,
             referenceLeftLimit,
             referenceRightLimit);
+
+    layout.referenceFrequencyMHz =
+        referenceGroup.frequencyHz / 1.0e6;
 
     layout.burstRects.clear();
     layout.burstRects.reserve(kExpectedMultiburstBursts);
@@ -3394,73 +3496,70 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                 referenceAnalysis_.selectionRect.right(),
                 referenceHighY));
 
-        QFont referenceFont =
-            WaveformGraticule().labelFont(
-                QApplication::font(),
-                geometry.scopeRect.height());
-        referenceFont.setBold(false);
-        referenceFont.setPixelSize(
+        QFont referenceTagFont =
+            measurementLabelFont;
+        referenceTagFont.setPixelSize(
             (std::max)(
                 1,
                 static_cast<int>(
                     std::lround(
-                        static_cast<double>(referenceFont.pixelSize()) *
-                        0.90))));
-        painter.setFont(referenceFont);
+                        static_cast<double>(
+                            measurementLabelFont.pixelSize()) *
+                        0.72))));
+        painter.setFont(referenceTagFont);
 
-        const QString referenceText =
-            QStringLiteral("Ref %1 mVpp")
-                .arg(referenceAnalysis_.vppMillivolts);
-        const QFontMetricsF referenceMetrics(
-            referenceFont,
+        const QFontMetricsF tagMetrics(
+            referenceTagFont,
             painter.device());
 
-        constexpr double kReferencePaddingX = 10.0;
-        constexpr double kReferencePaddingY = 5.0;
+        constexpr double kTagPaddingX = 5.0;
+        constexpr double kTagPaddingY = 2.0;
+        constexpr double kTagGap = 9.0;
 
-        const QSizeF referenceTextSize(
-            referenceMetrics.horizontalAdvance(referenceText),
-            referenceMetrics.height());
-        const double referenceCenterX =
-            0.5 *
-            (referenceAnalysis_.selectionRect.left() +
-                referenceAnalysis_.selectionRect.right());
+        const QString tagText =
+            QStringLiteral("Ref");
 
-        QRectF referenceRect(
-            referenceCenterX -
-                (referenceTextSize.width() +
-                    2.0 * kReferencePaddingX) * 0.5,
+        const double tagWidth =
+            tagMetrics.horizontalAdvance(tagText) +
+            2.0 * kTagPaddingX;
+
+        const double tagCenterX =
+            referenceAnalysis_.selectionRect.center().x();
+
+        QRectF tagRect(
+            tagCenterX - tagWidth * 0.5,
             referenceHighY -
-                referenceTextSize.height() -
-                2.0 * kReferencePaddingY -
-                measurementLabelLineGap,
-            referenceTextSize.width() + 2.0 * kReferencePaddingX,
-            referenceTextSize.height() + 2.0 * kReferencePaddingY);
+                tagMetrics.height() -
+                2.0 * kTagPaddingY -
+                kTagGap,
+            tagWidth,
+            tagMetrics.height() +
+                2.0 * kTagPaddingY);
 
-        if (referenceRect.left() < geometry.scopeRect.left())
+        if (tagRect.left() < geometry.scopeRect.left())
         {
-            referenceRect.moveLeft(geometry.scopeRect.left());
+            tagRect.moveLeft(geometry.scopeRect.left());
         }
-        if (referenceRect.right() > geometry.scopeRect.right())
+        if (tagRect.right() > geometry.scopeRect.right())
         {
-            referenceRect.moveRight(geometry.scopeRect.right());
+            tagRect.moveRight(geometry.scopeRect.right());
         }
-        if (referenceRect.top() < geometry.scopeRect.top())
+        if (tagRect.top() < geometry.scopeRect.top())
         {
-            referenceRect.moveTop(geometry.scopeRect.top());
+            tagRect.moveTop(geometry.scopeRect.top());
         }
 
-        painter.setPen(QPen(QColor(255, 120, 255), 1.5));
-        painter.setBrush(QColor(0, 0, 0, 210));
-        painter.drawRoundedRect(referenceRect, 4.0, 4.0);
+        painter.setPen(QPen(QColor(255, 120, 255), 1.0));
+        painter.setBrush(QColor(0, 0, 0, 180));
+        painter.drawRoundedRect(tagRect, 3.0, 3.0);
         painter.drawText(
-            referenceRect.adjusted(
-                kReferencePaddingX,
-                kReferencePaddingY,
-                -kReferencePaddingX,
-                -kReferencePaddingY),
+            tagRect.adjusted(
+                kTagPaddingX,
+                kTagPaddingY,
+                -kTagPaddingX,
+                -kTagPaddingY),
             Qt::AlignCenter,
-            referenceText);
+            tagText);
 
         painter.restore();
     }
@@ -3692,44 +3791,30 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         painter.setRenderHint(QPainter::Antialiasing, true);
 
         const QColor measureColor(80, 255, 120);
+        const QColor referenceColor(255, 120, 255);
         const double levelLineWidth =
             (std::max)(1.5, measurementPenWidth * 0.65);
 
-        painter.setFont(measurementLabelFont);
-        const QFontMetricsF metrics(
-            measurementLabelFont,
+        QFont tagFont =
+            measurementLabelFont;
+        tagFont.setPixelSize(
+            (std::max)(
+                1,
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(
+                            measurementLabelFont.pixelSize()) *
+                        0.68))));
+
+        const QFontMetricsF tagMetrics(
+            tagFont,
             painter.device());
 
-        constexpr double kPaddingX = 10.0;
-        constexpr double kPaddingY = 5.0;
+        constexpr double kTagPaddingX = 4.0;
+        constexpr double kTagPaddingY = 1.5;
+        constexpr double kTagGap = 9.0;
 
-        const auto makeLabelRect =
-            [&](const QString& label,
-                double centerX,
-                double top)
-            {
-                const QSizeF textSize(
-                    metrics.horizontalAdvance(label),
-                    metrics.height());
-
-                QRectF rect(
-                    centerX -
-                        (textSize.width() + 2.0 * kPaddingX) * 0.5,
-                    top,
-                    textSize.width() + 2.0 * kPaddingX,
-                    textSize.height() + 2.0 * kPaddingY);
-
-                if (rect.left() < geometry.scopeRect.left())
-                {
-                    rect.moveLeft(geometry.scopeRect.left());
-                }
-                if (rect.right() > geometry.scopeRect.right())
-                {
-                    rect.moveRight(geometry.scopeRect.right());
-                }
-
-                return rect;
-            };
+        int visibleMeasurementNumber = 0;
 
         for (const AreaAnalysisResult& analysis : multiburstAnalyses_)
         {
@@ -3738,6 +3823,8 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             {
                 continue;
             }
+
+            ++visibleMeasurementNumber;
 
             painter.setPen(
                 QPen(
@@ -3760,11 +3847,130 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                     analysis.selectionRect.right(),
                     analysis.vppBottom.y()));
 
-            const QString frequencyLabel =
+            const QString tagText =
+                QStringLiteral("MB%1")
+                    .arg(visibleMeasurementNumber);
+
+            painter.setFont(tagFont);
+
+            const double tagWidth =
+                tagMetrics.horizontalAdvance(tagText) +
+                2.0 * kTagPaddingX;
+
+            const double tagCenterX =
+                analysis.selectionRect.center().x();
+
+            QRectF tagRect(
+                tagCenterX - tagWidth * 0.5,
+                analysis.vppTop.y() -
+                    tagMetrics.height() -
+                    2.0 * kTagPaddingY -
+                    kTagGap,
+                tagWidth,
+                tagMetrics.height() +
+                    2.0 * kTagPaddingY);
+
+            if (tagRect.left() < geometry.scopeRect.left())
+            {
+                tagRect.moveLeft(geometry.scopeRect.left());
+            }
+            if (tagRect.right() > geometry.scopeRect.right())
+            {
+                tagRect.moveRight(geometry.scopeRect.right());
+            }
+            if (tagRect.top() < geometry.scopeRect.top())
+            {
+                tagRect.moveTop(geometry.scopeRect.top());
+            }
+
+            painter.setPen(QPen(measureColor, 1.0));
+            painter.setBrush(QColor(0, 0, 0, 180));
+            painter.drawRoundedRect(tagRect, 3.0, 3.0);
+            painter.drawText(
+                tagRect.adjusted(
+                    kTagPaddingX,
+                    kTagPaddingY,
+                    -kTagPaddingX,
+                    -kTagPaddingY),
+                Qt::AlignCenter,
+                tagText);
+        }
+
+        // Compact measurement table anchored to the right edge of the scope.
+        // It is generated from the live analysis values, so dragging any
+        // REF/MB level line immediately updates mV and relative dB.
+        QFont tableFont =
+            measurementLabelFont;
+        tableFont.setPixelSize(
+            (std::max)(
+                1,
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(
+                            measurementLabelFont.pixelSize()) *
+                        0.76))));
+        painter.setFont(tableFont);
+
+        const QFontMetricsF tableMetrics(
+            tableFont,
+            painter.device());
+
+        constexpr double kTablePaddingX = 8.0;
+        constexpr double kTablePaddingY = 6.0;
+        constexpr double kColumnGap = 10.0;
+        constexpr double kRowGap = 2.0;
+        constexpr double kRightMargin = 8.0;
+        constexpr double kTopMargin = 8.0;
+
+        struct TableRow
+        {
+            QString id;
+            QString frequency;
+            QString millivolts;
+            QString decibels;
+            QColor color;
+        };
+
+        QVector<TableRow> rows;
+
+        if (referenceAnalysis_.valid)
+        {
+            TableRow refRow;
+            refRow.id = QStringLiteral("Ref");
+            refRow.frequency =
+                referenceAnalysis_.frequencyMHz > 0.0
+                ? QStringLiteral("%1 MHz")
+                    .arg(referenceAnalysis_.frequencyMHz, 0, 'f', 3)
+                : QStringLiteral("--");
+            refRow.millivolts =
+                QStringLiteral("%1 mV")
+                    .arg(referenceAnalysis_.vppMillivolts);
+            refRow.decibels = QStringLiteral("0.0 dB");
+            refRow.color = referenceColor;
+            rows.push_back(refRow);
+        }
+
+        int tableMeasurementNumber = 0;
+
+        for (const AreaAnalysisResult& analysis : multiburstAnalyses_)
+        {
+            if (!analysis.valid)
+            {
+                continue;
+            }
+
+            ++tableMeasurementNumber;
+
+            TableRow row;
+            row.id =
+                QStringLiteral("MB%1")
+                    .arg(tableMeasurementNumber);
+            row.frequency =
                 QStringLiteral("%1 MHz")
                     .arg(analysis.frequencyMHz, 0, 'f', 2);
-
-            QString amplitudeLabel;
+            row.millivolts =
+                QStringLiteral("%1 mV")
+                    .arg(analysis.vppMillivolts);
 
             if (referenceAnalysis_.valid &&
                 referenceAnalysis_.vppVolts > 0.0 &&
@@ -3773,7 +3979,8 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                 double decibels =
                     20.0 *
                     std::log10(
-                        (static_cast<double>(analysis.vppMillivolts) / 1000.0) /
+                        (static_cast<double>(
+                            analysis.vppMillivolts) / 1000.0) /
                         referenceAnalysis_.vppVolts);
 
                 if (std::abs(decibels) < 0.05)
@@ -3781,90 +3988,217 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                     decibels = 0.0;
                 }
 
-                amplitudeLabel =
+                row.decibels =
                     QStringLiteral("%1 dB")
                         .arg(decibels, 0, 'f', 1);
             }
             else
             {
-                amplitudeLabel =
-                    QStringLiteral("%1 mV")
-                        .arg(analysis.vppMillivolts);
+                row.decibels = QStringLiteral("--");
             }
 
-            const double labelCenterX =
-                0.5 *
-                (analysis.selectionRect.left() +
-                    analysis.selectionRect.right());
+            row.color = measureColor;
+            rows.push_back(row);
+        }
 
-            const bool useReferenceAnchors =
-                referenceAnalysis_.valid &&
-                !referenceAnalysis_.selectionRect.isEmpty();
+        measurementTableRect_ = {};
 
-            const double amplitudeAnchorY =
-                useReferenceAnchors
-                ? voltsToDisplayY(referenceAnalysis_.highVolts)
-                : analysis.vppTop.y();
+        if (!rows.isEmpty())
+        {
+            double idWidth =
+                tableMetrics.horizontalAdvance(
+                    QStringLiteral("ID"));
+            double frequencyWidth =
+                tableMetrics.horizontalAdvance(
+                    QStringLiteral("Freq"));
+            double millivoltsWidth =
+                tableMetrics.horizontalAdvance(
+                    QStringLiteral("Level"));
+            double decibelsWidth =
+                tableMetrics.horizontalAdvance(
+                    QStringLiteral("Rel"));
 
-            const double frequencyAnchorY =
-                useReferenceAnchors
-                ? voltsToDisplayY(referenceAnalysis_.lowVolts)
-                : analysis.vppBottom.y();
-
-            QRectF amplitudeRect =
-                makeLabelRect(
-                    amplitudeLabel,
-                    labelCenterX,
-                    amplitudeAnchorY -
-                        metrics.height() -
-                        2.0 * kPaddingY -
-                        measurementLabelLineGap);
-
-            QRectF frequencyRect =
-                makeLabelRect(
-                    frequencyLabel,
-                    labelCenterX,
-                    frequencyAnchorY +
-                        measurementLabelLineGap);
-
-            if (amplitudeRect.top() < geometry.scopeRect.top())
+            for (const TableRow& row : rows)
             {
-                amplitudeRect.moveTop(geometry.scopeRect.top());
+                idWidth =
+                    (std::max)(
+                        idWidth,
+                        tableMetrics.horizontalAdvance(row.id));
+                frequencyWidth =
+                    (std::max)(
+                        frequencyWidth,
+                        tableMetrics.horizontalAdvance(row.frequency));
+                millivoltsWidth =
+                    (std::max)(
+                        millivoltsWidth,
+                        tableMetrics.horizontalAdvance(row.millivolts));
+                decibelsWidth =
+                    (std::max)(
+                        decibelsWidth,
+                        tableMetrics.horizontalAdvance(row.decibels));
             }
 
-            if (frequencyRect.bottom() > geometry.scopeRect.bottom())
+            const double rowHeight =
+                tableMetrics.height() + kRowGap;
+
+            const double tableWidth =
+                2.0 * kTablePaddingX +
+                idWidth +
+                frequencyWidth +
+                millivoltsWidth +
+                decibelsWidth +
+                3.0 * kColumnGap;
+
+            const double tableHeight =
+                2.0 * kTablePaddingY +
+                rowHeight *
+                    static_cast<double>(rows.size() + 1);
+
+            constexpr double kDefaultBottomMargin = 12.0;
+
+            QPointF tableTopLeft(
+                geometry.scopeRect.center().x() -
+                    tableWidth * 0.5,
+                geometry.scopeRect.bottom() -
+                    kDefaultBottomMargin -
+                    tableHeight);
+
+            if (measurementTableUserPositioned_)
             {
-                frequencyRect.moveBottom(geometry.scopeRect.bottom());
+                tableTopLeft =
+                    measurementTablePosition_;
             }
 
-            painter.setPen(QPen(measureColor, 1.5));
-            painter.setBrush(QColor(0, 0, 0, 210));
+            const double maximumX =
+                (std::max)(
+                    geometry.scopeRect.left(),
+                    geometry.scopeRect.right() -
+                        tableWidth);
 
-            painter.drawRoundedRect(
-                amplitudeRect,
-                4.0,
-                4.0);
-            painter.drawText(
-                amplitudeRect.adjusted(
-                    kPaddingX,
-                    kPaddingY,
-                    -kPaddingX,
-                    -kPaddingY),
-                Qt::AlignCenter,
-                amplitudeLabel);
+            const double maximumY =
+                (std::max)(
+                    geometry.scopeRect.top(),
+                    geometry.scopeRect.bottom() -
+                        tableHeight);
 
-            painter.drawRoundedRect(
-                frequencyRect,
-                4.0,
-                4.0);
-            painter.drawText(
-                frequencyRect.adjusted(
-                    kPaddingX,
-                    kPaddingY,
-                    -kPaddingX,
-                    -kPaddingY),
-                Qt::AlignCenter,
-                frequencyLabel);
+            tableTopLeft.setX(
+                std::clamp(
+                    tableTopLeft.x(),
+                    geometry.scopeRect.left(),
+                    maximumX));
+
+            tableTopLeft.setY(
+                std::clamp(
+                    tableTopLeft.y(),
+                    geometry.scopeRect.top(),
+                    maximumY));
+
+            QRectF tableRect(
+                tableTopLeft,
+                QSizeF(
+                    tableWidth,
+                    tableHeight));
+
+            measurementTableRect_ = tableRect;
+
+            if (measurementTableUserPositioned_)
+            {
+                measurementTablePosition_ =
+                    tableRect.topLeft();
+            }
+
+            painter.setPen(QPen(QColor(110, 110, 110), 1.0));
+            painter.setBrush(QColor(0, 0, 0, 205));
+            painter.drawRoundedRect(tableRect, 4.0, 4.0);
+
+            const double xId =
+                tableRect.left() + kTablePaddingX;
+            const double xFrequency =
+                xId + idWidth + kColumnGap;
+            const double xMillivolts =
+                xFrequency + frequencyWidth + kColumnGap;
+            const double xDecibels =
+                xMillivolts + millivoltsWidth + kColumnGap;
+
+            double y =
+                tableRect.top() + kTablePaddingY;
+
+            const auto drawCell =
+                [&](double x,
+                    double width,
+                    const QString& text,
+                    Qt::Alignment alignment,
+                    const QColor& color)
+                {
+                    painter.setPen(color);
+                    painter.drawText(
+                        QRectF(
+                            x,
+                            y,
+                            width,
+                            tableMetrics.height()),
+                        alignment | Qt::AlignVCenter,
+                        text);
+                };
+
+            const QColor headerColor(180, 180, 180);
+
+            drawCell(
+                xId,
+                idWidth,
+                QStringLiteral("ID"),
+                Qt::AlignLeft,
+                headerColor);
+            drawCell(
+                xFrequency,
+                frequencyWidth,
+                QStringLiteral("Freq"),
+                Qt::AlignRight,
+                headerColor);
+            drawCell(
+                xMillivolts,
+                millivoltsWidth,
+                QStringLiteral("Level"),
+                Qt::AlignRight,
+                headerColor);
+            drawCell(
+                xDecibels,
+                decibelsWidth,
+                QStringLiteral("Rel"),
+                Qt::AlignRight,
+                headerColor);
+
+            y += rowHeight;
+
+            for (const TableRow& row : rows)
+            {
+                drawCell(
+                    xId,
+                    idWidth,
+                    row.id,
+                    Qt::AlignLeft,
+                    row.color);
+                drawCell(
+                    xFrequency,
+                    frequencyWidth,
+                    row.frequency,
+                    Qt::AlignRight,
+                    row.color);
+                drawCell(
+                    xMillivolts,
+                    millivoltsWidth,
+                    row.millivolts,
+                    Qt::AlignRight,
+                    row.color);
+                drawCell(
+                    xDecibels,
+                    decibelsWidth,
+                    row.decibels,
+                    Qt::AlignRight,
+                    row.color);
+
+                y += rowHeight;
+            }
         }
 
         painter.restore();

@@ -72,6 +72,7 @@ private:
         QRectF selectionRect;
         double lowVolts = 0.0;
         double highVolts = 0.0;
+        double frequencyMHz = 0.0;
         int vppMillivolts = 0;
         double vppVolts = 0.0;
     };
@@ -107,6 +108,7 @@ private:
     {
         bool valid = false;
         QRectF referenceRect;
+        double referenceFrequencyMHz = 0.0;
         QVector<QRectF> burstRects;
     };
 
@@ -164,6 +166,12 @@ private:
     bool multiburstLevelDragging_ = false;
     int multiburstDragMeasurementIndex_ = -1;
     int multiburstLevelDragIndex_ = -1; // 0 = LOW, 1 = HIGH
+
+    bool measurementTableDragging_ = false;
+    bool measurementTableUserPositioned_ = false;
+    QRectF measurementTableRect_;
+    QPointF measurementTablePosition_;
+    QPointF measurementTableDragOffset_;
 
     QVector<float> measurementLuma_;
     TemporalAreaMeasurement temporalArea_;
