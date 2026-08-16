@@ -143,6 +143,12 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::vectorscopeGlowChanged,
+        this,
+        &ScopeWorkspace::vectorscopeGlowChanged);
+
+    connect(
+        controlWidget_,
         &ControlWidget::vintageLookChanged,
         this,
         [this](bool enabled)

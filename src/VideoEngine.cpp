@@ -287,8 +287,30 @@ void VideoEngine::setNoiseReductionIntensity(
 
 void VideoEngine::setWaveformPersistence(int persistence)
 {
+    const int clampedPersistence =
+        std::clamp(
+            persistence,
+            0,
+            200);
+
     waveformPersistence_.store(
-        std::clamp(persistence, 0, 255),
+        clampedPersistence,
+        std::memory_order_release);
+
+    vectorscopePersistence_.store(
+        clampedPersistence,
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setVectorscopeGlow(
+    int glow)
+{
+    vectorscopeGlow_.store(
+        std::clamp(
+            glow,
+            0,
+            100),
         std::memory_order_release);
 }
 
@@ -1580,6 +1602,13 @@ void VideoEngine::waveformWorkerLoop()
         waveformRenderer_.setPersistence(
             waveformPersistence);
 
+        const int glow =
+            vectorscopeGlow_.load(
+                std::memory_order_acquire);
+
+        waveformRenderer_.setGlow(
+            glow);
+
         QElapsedTimer timer;
         timer.start();
 
@@ -1709,6 +1738,26 @@ void VideoEngine::vectorscopeWorkerLoop()
 
         vectorscopeAnalyzer_.setSelectedLine(
             selectedLine);
+
+        vectorscopeAnalyzer_.setHorizontalWindow(
+            waveformZoomFactor_.load(
+                std::memory_order_acquire),
+            waveformScrollPosition_.load(
+                std::memory_order_acquire));
+
+        const int vectorscopePersistence =
+            vectorscopePersistence_.load(
+                std::memory_order_acquire);
+
+        vectorscopeAnalyzer_.setPersistence(
+            vectorscopePersistence);
+
+        const int vectorscopeGlow =
+            vectorscopeGlow_.load(
+                std::memory_order_acquire);
+
+        vectorscopeAnalyzer_.setGlow(
+            vectorscopeGlow);
 
         QElapsedTimer timer;
         timer.start();

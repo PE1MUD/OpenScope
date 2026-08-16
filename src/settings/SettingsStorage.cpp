@@ -228,6 +228,18 @@ OpenScopeSettings SettingsStorage::load() const
         .toInt();
 
     result.control
+        .instrument
+        .vectorscope
+        .glow =
+        settings.value(
+            "Control/Instrument/Vectorscope/Glow",
+            result.control
+            .instrument
+            .vectorscope
+            .glow)
+        .toInt();
+
+    result.control
         .processing
         .noiseFilter
         .enabled =
@@ -385,6 +397,12 @@ OpenScopeSettings SettingsStorage::load() const
             result.local.floaties.performance.positionValid)
         .toBool();
 
+    result.local.floaties.performanceVisible =
+        settings.value(
+            "Local/Floaties/Performance/Visible",
+            result.local.floaties.performanceVisible)
+        .toBool();
+
     result.local.floaties.settings.x =
         settings.value(
             "Local/Floaties/Settings/X",
@@ -485,6 +503,13 @@ void SettingsStorage::save(
         .persistenceFrames);
 
     storage.setValue(
+        "Control/Instrument/Vectorscope/Glow",
+        settings.control
+        .instrument
+        .vectorscope
+        .glow);
+
+    storage.setValue(
         "Control/Processing/NoiseFilter/Enabled",
         settings.control
         .processing
@@ -578,6 +603,10 @@ void SettingsStorage::save(
     storage.setValue(
         "Local/Floaties/Performance/PositionValid",
         settings.local.floaties.performance.positionValid);
+
+    storage.setValue(
+        "Local/Floaties/Performance/Visible",
+        settings.local.floaties.performanceVisible);
 
     storage.setValue(
         "Local/Floaties/Settings/X",

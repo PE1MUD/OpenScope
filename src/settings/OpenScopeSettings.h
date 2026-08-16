@@ -48,6 +48,7 @@ struct OpenScopeSettings
                 bool showHundredPercentTargets = true;
 
                 int persistenceFrames = 5;
+                int glow = 50;
             };
 
             Waveform waveform;
@@ -128,6 +129,8 @@ struct OpenScopeSettings
         {
             Floaty performance;
             Floaty settings;
+
+            bool performanceVisible = true;
         };
 
         Display display;

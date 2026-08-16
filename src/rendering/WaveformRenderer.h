@@ -32,6 +32,7 @@ public:
 
     void setSelectedLine(int line);
     void setPersistence(int persistence);
+    void setGlow(int glow);
     void setOutputSize(
         int width,
         int height);
@@ -135,6 +136,7 @@ private:
 
     int selectedLine_ = -1;
     int persistence_ = 0;
+    int glow_ = 50;
 
     int zoomFactor_ = 1;
     double scrollPosition_ = 0.0;

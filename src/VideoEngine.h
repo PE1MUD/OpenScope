@@ -72,6 +72,9 @@ public:
     void setWaveformPersistence(
         int persistence);
 
+    void setVectorscopeGlow(
+        int glow);
+
     void setWaveformChromaFillIntensity(
         int intensity);
 
@@ -403,4 +406,6 @@ private:
     std::atomic<double> waveformScrollPosition_{ 0.0 };
 
     std::atomic<int> waveformPersistence_{ 0 };
+    std::atomic<int> vectorscopePersistence_{ 0 };
+    std::atomic<int> vectorscopeGlow_{ 50 };
 };

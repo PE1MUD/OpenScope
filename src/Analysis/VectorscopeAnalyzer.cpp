@@ -16,6 +16,15 @@ VectorscopeAnalyzer::VectorscopeAnalyzer()
         QImage::Format_RGB32)
 {
     image_.fill(Qt::black);
+
+    persistenceImage_ =
+        QImage(
+            image_.size(),
+            QImage::Format_RGB32);
+
+    persistenceImage_.fill(
+        Qt::black);
+
     allLinesImage_.fill(Qt::black);
     allLinesDensity_.resize(
         static_cast<std::size_t>(
@@ -45,6 +54,15 @@ void VectorscopeAnalyzer::setOutputSize(
             QImage::Format_RGB32);
 
     image_.fill(Qt::black);
+
+    persistenceImage_ =
+        QImage(
+            width,
+            height,
+            QImage::Format_RGB32);
+
+    persistenceImage_.fill(
+        Qt::black);
 }
 void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 {
@@ -78,13 +96,51 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
     if (selectedLine_ >= 0 &&
         selectedLine_ < frame.height)
     {
-        firstSample =
+        const std::size_t lineStart =
             static_cast<std::size_t>(selectedLine_) *
             static_cast<std::size_t>(frame.width);
 
+        const std::size_t sourceWidth =
+            static_cast<std::size_t>(
+                frame.width);
+
+        std::size_t viewWidth =
+            sourceWidth;
+
+        std::size_t viewOffset =
+            0u;
+
+        if (horizontalZoomFactor_ > 1)
+        {
+            viewWidth =
+                std::max<std::size_t>(
+                    sourceWidth /
+                        static_cast<std::size_t>(
+                            horizontalZoomFactor_),
+                    1u);
+
+            const std::size_t maximumOffset =
+                sourceWidth -
+                viewWidth;
+
+            viewOffset =
+                static_cast<std::size_t>(
+                    std::lround(
+                        horizontalScrollPosition_ *
+                        static_cast<double>(
+                            maximumOffset)));
+        }
+
+        firstSample =
+            lineStart +
+            viewOffset;
+
         lastSample =
-            firstSample +
-            static_cast<std::size_t>(frame.width);
+            std::min(
+                lineStart +
+                    sourceWidth,
+                firstSample +
+                    viewWidth);
     }
 
     const qint64 setupUs =
@@ -119,11 +175,47 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                 centerY - v * scale);
         };
 
+    auto addGlowPixel =
+        [this](
+            int x,
+            int y,
+            int green)
+        {
+            if (green <= 0 ||
+                x < 0 ||
+                x >= image_.width() ||
+                y < 0 ||
+                y >= image_.height())
+            {
+                return;
+            }
+
+            auto* line =
+                reinterpret_cast<QRgb*>(
+                    image_.scanLine(y));
+
+            const int oldGreen =
+                qGreen(
+                    line[x]);
+
+            const int newGreen =
+                std::min(
+                    255,
+                    oldGreen +
+                    green);
+
+            line[x] =
+                qRgb(
+                    newGreen,
+                    newGreen,
+                    newGreen);
+        };
+
     auto plotPoint =
         [&](double x, double y, double intensity)
         {
-            constexpr double radius = 1.6;
-            constexpr double sigma = 0.65;
+            constexpr double radius = 2.0;
+            constexpr double sigma = 0.80;
 
             const int minX =
                 static_cast<int>(std::floor(x - radius));
@@ -201,6 +293,100 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                             newGreen);
                 }
             }
+
+            if (glow_ <= 0)
+            {
+                return;
+            }
+
+            const double glowStrength =
+                static_cast<double>(
+                    glow_) /
+                100.0;
+
+            const int centerX =
+                static_cast<int>(
+                    std::lround(
+                        x));
+
+            const int centerY =
+                static_cast<int>(
+                    std::lround(
+                        y));
+
+            const int nearGlow =
+                static_cast<int>(
+                    intensity *
+                    0.40 *
+                    glowStrength);
+
+            const int farGlow =
+                static_cast<int>(
+                    intensity *
+                    0.18 *
+                    glowStrength);
+
+            // Sparse halo: eight nearby writes and four wider writes.
+            // No full-frame blur, no extra exp()/hypot() work.
+            addGlowPixel(
+                centerX - 2,
+                centerY,
+                nearGlow);
+
+            addGlowPixel(
+                centerX + 2,
+                centerY,
+                nearGlow);
+
+            addGlowPixel(
+                centerX,
+                centerY - 2,
+                nearGlow);
+
+            addGlowPixel(
+                centerX,
+                centerY + 2,
+                nearGlow);
+
+            addGlowPixel(
+                centerX - 2,
+                centerY - 2,
+                nearGlow / 2);
+
+            addGlowPixel(
+                centerX + 2,
+                centerY - 2,
+                nearGlow / 2);
+
+            addGlowPixel(
+                centerX - 2,
+                centerY + 2,
+                nearGlow / 2);
+
+            addGlowPixel(
+                centerX + 2,
+                centerY + 2,
+                nearGlow / 2);
+
+            addGlowPixel(
+                centerX - 4,
+                centerY,
+                farGlow);
+
+            addGlowPixel(
+                centerX + 4,
+                centerY,
+                farGlow);
+
+            addGlowPixel(
+                centerX,
+                centerY - 4,
+                farGlow);
+
+            addGlowPixel(
+                centerX,
+                centerY + 4,
+                farGlow);
         };
 
     for (std::size_t i = firstSample;
@@ -272,7 +458,7 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                 32.0;
 
             constexpr double referenceEnergy =
-                80.0;
+                150.0;
 
             constexpr double referenceSize =
                 576.0;
@@ -292,6 +478,24 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                     1.2) /
                 static_cast<double>(
                     subdivisions);
+
+            // A CRT beam deposits less energy per area while it is
+            // travelling quickly between chroma states. Keep dense
+            // colour clusters bright, but suppress long transitions.
+            constexpr double transitionAttenuationStrength =
+                0.05;
+
+            const double motionAttenuation =
+                1.0 /
+                (
+                    1.0 +
+                    distance *
+                    transitionAttenuationStrength
+                );
+
+            const double segmentBeamEnergy =
+                beamEnergy *
+                motionAttenuation;
 
             for (int step = 0;
                 step < subdivisions;
@@ -338,7 +542,7 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                 plotPoint(
                     x,
                     y,
-                    beamEnergy);
+                    segmentBeamEnergy);
 
                 ++plottedPoints;
             }
@@ -347,6 +551,10 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 
     const qint64 renderUs =
         timer.nsecsElapsed() / 1000;
+
+    Q_UNUSED(renderUs);
+
+    applyPersistence();
 }
 const QImage& VectorscopeAnalyzer::image() const
 {
@@ -532,26 +740,14 @@ void VectorscopeAnalyzer::renderAllLines(
         }
     }
 
-    const int scopeSize =
-        std::min(
-            image_.width(),
-            image_.height());
+    const QSize outputSize =
+        image_.size();
 
-    const QImage scaledScope =
+    image_ =
         allLinesImage_.scaled(
-            scopeSize,
-            scopeSize,
+            outputSize,
             Qt::IgnoreAspectRatio,
             Qt::FastTransformation);
-
-    image_.fill(Qt::black);
-
-    QPainter painter(&image_);
-
-    painter.drawImage(
-        (image_.width() - scopeSize) / 2,
-        (image_.height() - scopeSize) / 2,
-        scaledScope);
 }
 
 void VectorscopeAnalyzer::accumulateLineSegmentInteger(
@@ -686,6 +882,136 @@ std::uint32_t VectorscopeAnalyzer::accumulateLineSegment(
         density_[index] += pointEnergy;
     }
     return static_cast<std::uint32_t>(steps + 1);
+}
+
+void VectorscopeAnalyzer::setPersistence(
+    int persistence)
+{
+    persistence =
+        std::clamp(
+            persistence,
+            0,
+            200);
+
+    if (persistence_ != persistence &&
+        persistence == 0)
+    {
+        persistenceImage_.fill(
+            Qt::black);
+    }
+
+    persistence_ =
+        persistence;
+}
+
+void VectorscopeAnalyzer::setGlow(
+    int glow)
+{
+    glow_ =
+        std::clamp(
+            glow,
+            0,
+            100);
+}
+
+void VectorscopeAnalyzer::applyPersistence()
+{
+    if (persistenceImage_.size() != image_.size() ||
+        persistenceImage_.format() != QImage::Format_RGB32)
+    {
+        persistenceImage_ =
+            QImage(
+                image_.size(),
+                QImage::Format_RGB32);
+
+        persistenceImage_.fill(
+            Qt::black);
+    }
+
+    if (persistence_ <= 0)
+    {
+        persistenceImage_ =
+            image_.copy();
+
+        return;
+    }
+
+    const std::uint32_t persistence =
+        static_cast<std::uint32_t>(
+            persistence_);
+
+    for (int y = 0;
+        y < image_.height();
+        ++y)
+    {
+        auto* current =
+            reinterpret_cast<QRgb*>(
+                image_.scanLine(y));
+
+        auto* previous =
+            reinterpret_cast<QRgb*>(
+                persistenceImage_.scanLine(y));
+
+        for (int x = 0;
+            x < image_.width();
+            ++x)
+        {
+            const int currentGreen =
+                qGreen(
+                    current[x]);
+
+            const int previousGreen =
+                qGreen(
+                    previous[x]);
+
+            const int decayedGreen =
+                static_cast<int>(
+                    (static_cast<std::uint32_t>(
+                        previousGreen) *
+                        persistence) >>
+                    8);
+
+            const int outputGreen =
+                std::min(
+                    255,
+                    currentGreen +
+                    decayedGreen);
+
+            const QRgb output =
+                qRgb(
+                    outputGreen,
+                    outputGreen,
+                    outputGreen);
+
+            previous[x] =
+                output;
+
+            current[x] =
+                output;
+        }
+    }
+}
+
+
+void VectorscopeAnalyzer::setHorizontalWindow(
+    int zoomFactor,
+    double scrollPosition)
+{
+    if (zoomFactor != 1 &&
+        zoomFactor != 5 &&
+        zoomFactor != 10)
+    {
+        zoomFactor = 1;
+    }
+
+    horizontalZoomFactor_ =
+        zoomFactor;
+
+    horizontalScrollPosition_ =
+        std::clamp(
+            scrollPosition,
+            0.0,
+            1.0);
 }
 
 void VectorscopeAnalyzer::setScale(double scale)

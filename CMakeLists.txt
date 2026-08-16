@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.1.0
+    VERSION 0.4.1
     LANGUAGES C CXX
 )
 
@@ -31,6 +31,28 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 qt_standard_project_setup()
+
+set(OPENSCOPE_GENERATED_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
+
+file(MAKE_DIRECTORY
+    "${OPENSCOPE_GENERATED_DIR}"
+)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.h.in"
+    "${OPENSCOPE_GENERATED_DIR}/Version.h"
+    @ONLY
+)
+
+if(WIN32)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenScope.rc.in"
+        "${OPENSCOPE_GENERATED_DIR}/OpenScope.rc"
+        @ONLY
+    )
+endif()
 
 set(DECKLINK_IDL
     "${DECKLINK_SDK_ROOT}/Win/include/DeckLinkAPI.idl"
@@ -161,6 +183,14 @@ src/widgets/ControlWidget.cpp
 "${DECKLINK_GENERATED_IID}"
 )
 
+
+if(WIN32)
+    target_sources(OpenScope
+        PRIVATE
+            "${OPENSCOPE_GENERATED_DIR}/OpenScope.rc"
+    )
+endif()
+
 if(WIN32)
     set_target_properties(OpenScope PROPERTIES
         WIN32_EXECUTABLE $<NOT:$<CONFIG:Debug>>
@@ -186,6 +216,7 @@ target_include_directories(OpenScope
         "${DECKLINK_SDK_ROOT}/Win/include"
         "${DECKLINK_GENERATED_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${OPENSCOPE_GENERATED_DIR}"
 )
 
 target_link_libraries(OpenScope

@@ -1093,6 +1093,7 @@ void WaveformRenderer::renderSingleLine(
         }
     }
     composeTraceImage();
+
     QPainter painter(&image_);
 
     graticule_.draw(
@@ -1945,6 +1946,106 @@ void WaveformRenderer::plotSegment(
             addChannel(
                 pixel.blue,
                 blue);
+
+            const bool addLumaGlow =
+                glow_ > 0 &&
+                selectedLine_ >= 0 &&
+                red == 255 &&
+                green == 255 &&
+                blue == 255;
+
+            if (addLumaGlow)
+            {
+                const double glowStrength =
+                    static_cast<double>(
+                        glow_) /
+                    100.0;
+
+                const auto addVerticalGlow =
+                    [this, x, y, contribution, glowStrength](
+                        int offset,
+                        double factor)
+                    {
+                        const int destinationY =
+                            y +
+                            offset;
+
+                        if (destinationY < 0 ||
+                            destinationY >= image_.height())
+                        {
+                            return;
+                        }
+
+                        const std::uint32_t glowContribution =
+                            static_cast<std::uint32_t>(
+                                static_cast<double>(
+                                    contribution) *
+                                factor *
+                                glowStrength);
+
+                        if (glowContribution == 0u)
+                        {
+                            return;
+                        }
+
+                        const std::size_t glowIndex =
+                            static_cast<std::size_t>(
+                                destinationY) *
+                            static_cast<std::size_t>(
+                                image_.width()) +
+                            static_cast<std::size_t>(
+                                x);
+
+                        TracePixel& glowPixel =
+                            trace_[glowIndex];
+
+                        const auto add =
+                            [glowContribution](
+                                std::uint16_t& destination)
+                            {
+                                destination =
+                                    static_cast<std::uint16_t>(
+                                        std::min<std::uint32_t>(
+                                            65535u,
+                                            static_cast<std::uint32_t>(
+                                                destination) +
+                                            glowContribution));
+                            };
+
+                        add(
+                            glowPixel.red);
+
+                        add(
+                            glowPixel.green);
+
+                        add(
+                            glowPixel.blue);
+                    };
+
+                addVerticalGlow(
+                    -1,
+                    0.55);
+
+                addVerticalGlow(
+                    1,
+                    0.55);
+
+                addVerticalGlow(
+                    -2,
+                    0.28);
+
+                addVerticalGlow(
+                    2,
+                    0.28);
+
+                addVerticalGlow(
+                    -4,
+                    0.12);
+
+                addVerticalGlow(
+                    4,
+                    0.12);
+            }
         }
     }
 }
@@ -2069,6 +2170,105 @@ void WaveformRenderer::plotBeam(
             addChannel(
                 pixel.blue,
                 blue);
+
+            const bool addLumaGlow =
+                glow_ > 0 &&
+                selectedLine_ >= 0 &&
+                red == 255 &&
+                green == 255 &&
+                blue == 255;
+
+            if (addLumaGlow)
+            {
+                const double glowStrength =
+                    static_cast<double>(
+                        glow_) /
+                    100.0;
+
+                const auto addVerticalGlow =
+                    [this, destinationX, destinationY, contribution, glowStrength](
+                        int offset,
+                        double factor)
+                    {
+                        const int glowY =
+                            destinationY +
+                            offset;
+
+                        if (glowY < 0 ||
+                            glowY >= image_.height())
+                        {
+                            return;
+                        }
+
+                        const std::uint32_t glowContribution =
+                            static_cast<std::uint32_t>(
+                                static_cast<double>(
+                                    contribution) *
+                                factor *
+                                glowStrength);
+
+                        if (glowContribution == 0u)
+                        {
+                            return;
+                        }
+
+                        const std::size_t glowIndex =
+                            static_cast<std::size_t>(
+                                glowY) *
+                            static_cast<std::size_t>(
+                                image_.width()) +
+                            static_cast<std::size_t>(
+                                destinationX);
+
+                        TracePixel& glowPixel =
+                            trace_[glowIndex];
+
+                        const auto add =
+                            [glowContribution](
+                                std::uint16_t& destination)
+                            {
+                                destination =
+                                    static_cast<std::uint16_t>(
+                                        std::max<std::uint32_t>(
+                                            static_cast<std::uint32_t>(
+                                                destination),
+                                            glowContribution));
+                            };
+
+                        add(
+                            glowPixel.red);
+
+                        add(
+                            glowPixel.green);
+
+                        add(
+                            glowPixel.blue);
+                    };
+
+                addVerticalGlow(
+                    -1,
+                    0.55);
+
+                addVerticalGlow(
+                    1,
+                    0.55);
+
+                addVerticalGlow(
+                    -2,
+                    0.28);
+
+                addVerticalGlow(
+                    2,
+                    0.28);
+
+                addVerticalGlow(
+                    -4,
+                    0.12);
+
+                addVerticalGlow(
+                    4,
+                    0.12);
+            }
         }
     }
 }
@@ -2086,7 +2286,17 @@ void WaveformRenderer::setPersistence(
         std::clamp(
             persistence,
             0,
-            255);
+            200);
+}
+
+void WaveformRenderer::setGlow(
+    int glow)
+{
+    glow_ =
+        std::clamp(
+            glow,
+            0,
+            100);
 }
 
 const QImage& WaveformRenderer::image() const

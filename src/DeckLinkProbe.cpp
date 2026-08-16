@@ -6,6 +6,7 @@
 #include "Video/V210ToYuv444Converter.h"
 
 #include <QDebug>
+#include <QMessageBox>
 #include <QString>
 
 static Uyvy422ToYuv444Converter uyvyConverter;
@@ -230,6 +231,15 @@ void deckLinkProbe(VideoEngine* videoEngine)
             << QString::number(
                 static_cast<unsigned long>(result),
                 16);
+
+        QMessageBox::warning(
+            nullptr,
+            "Blackmagic Desktop Video not found",
+            "OpenScope requires Blackmagic Desktop Video 16.2 or later "
+            "for DeckLink video capture.\n\n"
+            "Please install Desktop Video 16.2 or later.\n\n"
+            "OpenScope will continue without video capture.");
+
         return;
     }
 
@@ -248,7 +258,16 @@ void deckLinkProbe(VideoEngine* videoEngine)
     iterator->Release();
 
     if (index == 0)
+    {
         qDebug() << "No DeckLink devices found.";
+
+        QMessageBox::warning(
+            nullptr,
+            "No Blackmagic DeckLink device found",
+            "Blackmagic Desktop Video is installed, but no compatible "
+            "DeckLink capture device was detected.\n\n"
+            "OpenScope will continue without video capture.");
+    }
 }
 
 void deckLinkStop()

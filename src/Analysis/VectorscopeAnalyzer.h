@@ -17,6 +17,12 @@ public:
         int width,
         int height);
     void setScale(double scale);
+    void setPersistence(int persistence);
+    void setGlow(int glow);
+
+    void setHorizontalWindow(
+        int zoomFactor,
+        double scrollPosition);
     void analyze(const Yuv444Frame& frame);
 
     const QImage& image() const;
@@ -26,6 +32,7 @@ private:
     static constexpr int kAllLinesHeight = 384;
     void renderSingleLine(const Yuv444Frame& frame);
     void renderAllLines(const Yuv444Frame& frame);
+    void applyPersistence();
     std::uint32_t accumulateLineSegment(
         double x0,
         double y0,
@@ -43,8 +50,13 @@ private:
         std::vector<std::uint32_t>& density);
     std::vector<std::uint32_t> density_;
     QImage image_;
+    QImage persistenceImage_;
     QImage allLinesImage_;
     std::vector<std::uint32_t> allLinesDensity_;
     int selectedLine_ = -1;
     double scale_ = 1.0;
+    int persistence_ = 0;
+    int glow_ = 50;
+    int horizontalZoomFactor_ = 1;
+    double horizontalScrollPosition_ = 0.0;
 };

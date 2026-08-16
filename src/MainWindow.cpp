@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Version.h"
 #include "ScopeWorkspace.h"
 #include "VideoEngine.h"
 #include "widgets/VideoWidget.h"
@@ -27,7 +28,7 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V0.4");
+    setWindowTitle("OpenScope V" OPENSCOPE_VERSION);
 
     SetThreadPriority(
         GetCurrentThread(),
@@ -364,6 +365,12 @@ MainWindow::MainWindow(QWidget* parent)
             .waveform
             .persistenceFrames);
 
+    videoEngine_->setVectorscopeGlow(
+        initialSettings.control
+            .instrument
+            .vectorscope
+            .glow);
+
     videoEngine_->setWaveformScrollPosition(
         initialSettings.control
             .instrument
@@ -481,6 +488,26 @@ MainWindow::MainWindow(QWidget* parent)
 
             videoEngine_->setWaveformPersistence(
                 persistence);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::vectorscopeGlowChanged,
+        this,
+        [this](int glow)
+        {
+            settingsService_->update(
+                [glow](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .vectorscope
+                        .glow =
+                        glow;
+                });
+
+            videoEngine_->setVectorscopeGlow(
+                glow);
         });
 
     connect(
@@ -627,15 +654,40 @@ MainWindow::MainWindow(QWidget* parent)
         {
             workspace_->setPerformanceVisible(
                 visible);
+
+            settingsService_->update(
+                [visible](OpenScopeSettings& settings)
+                {
+                    settings.local
+                        .floaties
+                        .performanceVisible =
+                        visible;
+                });
         });
 
     connect(
         workspace_,
         &ScopeWorkspace::performanceVisibilityChanged,
-        performanceWidget_,
-        &PerformanceWidget::setVisible);
+        this,
+        [this](bool visible)
+        {
+            settingsService_->update(
+                [visible](OpenScopeSettings& settings)
+                {
+                    settings.local
+                        .floaties
+                        .performanceVisible =
+                        visible;
+                });
 
-    performanceWidget_->show();
+            performanceWidget_->setVisible(
+                visible);
+        });
+
+    performanceWidget_->setVisible(
+        initialSettings.local
+            .floaties
+            .performanceVisible);
 
     connect(
         workspace_,
@@ -938,14 +990,14 @@ void MainWindow::updateRenderResolutionTitle()
     {
         setWindowTitle(
             QString(
-                "OpenScope V0.31 - %1x%2")
+                "OpenScope V" OPENSCOPE_VERSION " - %1x%2")
             .arg(renderSize.width())
             .arg(renderSize.height()));
     }
     else
     {
         setWindowTitle(
-            "OpenScope V0.31");
+            "OpenScope V" OPENSCOPE_VERSION);
     }
 }
 

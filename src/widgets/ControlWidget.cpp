@@ -9,6 +9,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStyle>
@@ -31,7 +32,10 @@ namespace
                 parent)
         {
             setMinimumHeight(
-                26);
+                22);
+
+            setMaximumHeight(
+                22);
         }
 
     protected:
@@ -225,12 +229,18 @@ namespace
             0,
             0);
 
-        layout->setSpacing(12);
+        layout->setSpacing(8);
 
         auto* label =
             new QLabel(
                 labelText,
                 row);
+
+        // Keep every user-facing slider on the same horizontal ruler.
+        // Longest current label ("Color carrier intensity") fits here,
+        // while still leaving useful slider travel in a 380 px matrix cell.
+        label->setFixedWidth(
+            150);
 
         slider =
             new ValueSlider(
@@ -264,10 +274,10 @@ ControlWidget::ControlWidget(
         new QVBoxLayout(this);
 
     outerLayout->setContentsMargins(
-        8,
-        8,
-        8,
-        8);
+        4,
+        4,
+        4,
+        4);
 
     outerLayout->setSpacing(0);
 
@@ -286,12 +296,12 @@ ControlWidget::ControlWidget(
         new QVBoxLayout(displayTab);
 
     displayLayout->setContentsMargins(
-        16,
-        16,
-        16,
-        16);
+        6,
+        4,
+        6,
+        4);
 
-    displayLayout->setSpacing(12);
+    displayLayout->setSpacing(4);
 
     auto* noiseReductionCheckBox =
         new QCheckBox(
@@ -315,10 +325,13 @@ ControlWidget::ControlWidget(
             noiseReductionSlider,
             0,
             100,
-            settings.control
-                .processing
-                .noiseFilter
-                .strength,
+            std::clamp(
+                settings.control
+                    .processing
+                    .noiseFilter
+                    .strength,
+                0,
+                100),
             displayTab);
 
     noiseReductionSlider->setEnabled(
@@ -361,12 +374,12 @@ ControlWidget::ControlWidget(
         new QVBoxLayout(instrumentTab);
 
     instrumentLayout->setContentsMargins(
-        16,
-        16,
-        16,
-        16);
+        6,
+        4,
+        6,
+        4);
 
-    instrumentLayout->setSpacing(12);
+    instrumentLayout->setSpacing(4);
 
     auto* lineRow =
         new QWidget(instrumentTab);
@@ -379,6 +392,9 @@ ControlWidget::ControlWidget(
         0,
         0,
         0);
+
+    lineLayout->setSpacing(
+        8);
 
     lineLayout->addWidget(
         new QLabel(
@@ -394,6 +410,9 @@ ControlWidget::ControlWidget(
 
     lineSelector_->setSpecialValueText(
         "All");
+
+    lineSelector_->setFixedHeight(
+        22);
 
     lineSelector_->setValue(
         settings.control
@@ -418,6 +437,9 @@ ControlWidget::ControlWidget(
         0,
         0,
         0);
+
+    zoomLayout->setSpacing(
+        4);
 
     zoomLayout->addWidget(
         new QLabel(
@@ -447,6 +469,15 @@ ControlWidget::ControlWidget(
 
     waveformZoom10Button_->setText(
         "X10");
+
+    waveformZoom1Button_->setFixedHeight(
+        22);
+
+    waveformZoom5Button_->setFixedHeight(
+        22);
+
+    waveformZoom10Button_->setFixedHeight(
+        22);
 
     waveformZoom1Button_->setCheckable(
         true);
@@ -509,33 +540,13 @@ ControlWidget::ControlWidget(
     zoomLayout->addWidget(
         waveformZoom10Button_);
 
-    zoomLayout->addStretch(
-        1);
-
-    instrumentLayout->addWidget(
-        zoomRow);
-
-    QSlider* persistenceSlider = nullptr;
-
-    QWidget* persistenceRow =
-        createSliderRow(
-            "Scopephor",
-            persistenceSlider,
-            0,
-            255,
-            settings.control
-                .instrument
-                .waveform
-                .persistenceFrames,
-            instrumentTab);
-
-    instrumentLayout->addWidget(
-        persistenceRow);
+    zoomLayout->addSpacing(
+        32);
 
     auto* vintageCheckBox =
         new QCheckBox(
             "Vintage look",
-            instrumentTab);
+            zoomRow);
 
     vintageCheckBox->setChecked(
         settings.control
@@ -543,8 +554,14 @@ ControlWidget::ControlWidget(
             .waveform
             .vintageLook);
 
-    instrumentLayout->addWidget(
+    zoomLayout->addWidget(
         vintageCheckBox);
+
+    zoomLayout->addStretch(
+        1);
+
+    instrumentLayout->addWidget(
+        zoomRow);
 
     QSlider* chromaIntensitySlider = nullptr;
 
@@ -553,15 +570,97 @@ ControlWidget::ControlWidget(
             "Color carrier intensity",
             chromaIntensitySlider,
             0,
-            200,
-            settings.control
-                .instrument
-                .waveform
-                .chromaRenderIntensity,
+            100,
+            std::clamp(
+                settings.control
+                    .instrument
+                    .waveform
+                    .chromaRenderIntensity,
+                0,
+                200) /
+                2,
             instrumentTab);
 
     instrumentLayout->addWidget(
         chromaIntensityRow);
+
+    QSlider* persistenceSlider = nullptr;
+
+    QWidget* persistenceRow =
+        createSliderRow(
+            "Scopephor",
+            persistenceSlider,
+            0,
+            100,
+            std::clamp(
+                settings.control
+                    .instrument
+                    .waveform
+                    .persistenceFrames,
+                0,
+                200) /
+                2,
+            instrumentTab);
+
+    instrumentLayout->addWidget(
+        persistenceRow);
+
+    QSlider* vectorscopeGlowSlider = nullptr;
+
+    QWidget* vectorscopeGlowRow =
+        createSliderRow(
+            "Beam Glow",
+            vectorscopeGlowSlider,
+            0,
+            100,
+            std::clamp(
+                settings.control
+                    .instrument
+                    .vectorscope
+                    .glow,
+                0,
+                100),
+            instrumentTab);
+
+    instrumentLayout->addWidget(
+        vectorscopeGlowRow);
+
+    auto* defaultsRow =
+        new QWidget(
+            instrumentTab);
+
+    auto* defaultsLayout =
+        new QHBoxLayout(
+            defaultsRow);
+
+    defaultsLayout->setContentsMargins(
+        0,
+        0,
+        0,
+        0);
+
+    defaultsLayout->setSpacing(
+        0);
+
+    defaultsLayout->addStretch(
+        1);
+
+    auto* defaultsButton =
+        new QPushButton(
+            "Defaults",
+            defaultsRow);
+
+    defaultsButton->setFixedHeight(
+        22);
+
+    defaultsButton->setToolTip(
+        "Set Color carrier intensity, Scopephor and Beam Glow to 50");
+
+    defaultsLayout->addWidget(
+        defaultsButton);
+
+    instrumentLayout->addWidget(
+        defaultsRow);
 
     instrumentLayout->addStretch();
 
@@ -611,7 +710,24 @@ ControlWidget::ControlWidget(
         persistenceSlider,
         &QSlider::valueChanged,
         this,
-        &ControlWidget::waveformPersistenceChanged);
+        [this](int value)
+        {
+            const int normalizedValue =
+                std::clamp(
+                    value,
+                    0,
+                    100);
+
+            emit waveformPersistenceChanged(
+                normalizedValue *
+                2);
+        });
+
+    connect(
+        vectorscopeGlowSlider,
+        &QSlider::valueChanged,
+        this,
+        &ControlWidget::vectorscopeGlowChanged);
 
     connect(
         vintageCheckBox,
@@ -623,7 +739,42 @@ ControlWidget::ControlWidget(
         chromaIntensitySlider,
         &QSlider::valueChanged,
         this,
-        &ControlWidget::chromaRenderIntensityChanged);
+        [this](int value)
+        {
+            const int normalizedValue =
+                std::clamp(
+                    value,
+                    0,
+                    100);
+
+            emit chromaRenderIntensityChanged(
+                normalizedValue *
+                2);
+        });
+
+    connect(
+        defaultsButton,
+        &QPushButton::clicked,
+        this,
+        [chromaIntensitySlider,
+         persistenceSlider,
+         vectorscopeGlowSlider,
+         vintageCheckBox]()
+        {
+            constexpr int defaultValue = 50;
+
+            chromaIntensitySlider->setValue(
+                defaultValue);
+
+            persistenceSlider->setValue(
+                defaultValue);
+
+            vectorscopeGlowSlider->setValue(
+                defaultValue);
+
+            vintageCheckBox->setChecked(
+                false);
+        });
 
     tabs->addTab(
         instrumentTab,
@@ -639,12 +790,12 @@ ControlWidget::ControlWidget(
         new QVBoxLayout(miscTab);
 
     miscLayout->setContentsMargins(
-        16,
-        16,
-        16,
-        16);
+        6,
+        4,
+        6,
+        4);
 
-    miscLayout->setSpacing(12);
+    miscLayout->setSpacing(4);
 
     legacyAspectRatioCheckBox_ =
         new QCheckBox(
@@ -666,7 +817,9 @@ ControlWidget::ControlWidget(
             miscTab);
 
     performanceCheckBox_->setChecked(
-        true);
+        settings.local
+            .floaties
+            .performanceVisible);
 
     miscLayout->addWidget(
         performanceCheckBox_);
