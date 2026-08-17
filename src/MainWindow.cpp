@@ -9,6 +9,7 @@
 #include "settings/SettingsService.h"
 #include "widgets/PerformanceWidget.h"
 #include "standards/VideoStandard.h"
+#include "output/SpoutOutput.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -597,6 +598,20 @@ MainWindow::MainWindow(QWidget* parent)
         {
             waveformVideoPreview->setImage(image);
         });
+
+    // Spout output is deliberately independent of the preview widget.
+    // The first received waveform frame lazily opens the sender.
+    auto* waveformSpoutOutput =
+        new SpoutOutput(
+            QStringLiteral("OpenScope Waveform"),
+            this);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformVideoChanged,
+        waveformSpoutOutput,
+        &SpoutOutput::submitImage,
+        Qt::QueuedConnection);
 
     waveformVideoPreview->setVisible(
         initialSettings.local

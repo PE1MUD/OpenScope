@@ -1,6 +1,12 @@
 {
   "dependencies": [
     "qtbase",
-    "qttools"
+    "qttools",
+    {
+      "name": "spout2",
+      "features": [
+        "dx"
+      ]
+    }
   ]
 }

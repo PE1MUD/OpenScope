@@ -29,6 +29,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Spout2 CONFIG REQUIRED)
+
+# Prefer the static DirectX Spout target so OpenScope does not gain
+# an extra runtime DLL. Fall back to the dynamic target when needed.
+if(TARGET Spout2::SpoutDX_static)
+    set(OPENSCOPE_SPOUT_TARGET Spout2::SpoutDX_static)
+elseif(TARGET Spout2::SpoutDX)
+    set(OPENSCOPE_SPOUT_TARGET Spout2::SpoutDX)
+else()
+    message(FATAL_ERROR
+        "Spout2 was found, but no SpoutDX target is available. "
+        "Install vcpkg port spout2[dx]."
+    )
+endif()
 
 qt_standard_project_setup()
 
@@ -122,6 +136,9 @@ src/DeckLinkInputCallback.cpp
 src/analysis/Analyzer.h
 src/analysis/VectorscopeAnalyzer.h
 src/analysis/VectorscopeAnalyzer.cpp
+
+src/output/SpoutOutput.h
+src/output/SpoutOutput.cpp
 
 src/processing/SignalReconstructor.h
 src/processing/SignalReconstructor.cpp
@@ -222,6 +239,9 @@ target_include_directories(OpenScope
 target_link_libraries(OpenScope
     PRIVATE
         Qt6::Widgets
+        ${OPENSCOPE_SPOUT_TARGET}
+        d3d11
+        dxgi
         ole32
         comsuppw
 )
