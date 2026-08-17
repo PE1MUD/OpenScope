@@ -340,6 +340,24 @@ OpenScopeSettings SettingsStorage::load() const
             .deinterlace)
         .toBool();
 
+    result.local.spout.videoEnabled =
+        settings.value(
+            "Local/Spout/Video/Enabled",
+            result.local.spout.videoEnabled)
+        .toBool();
+
+    result.local.spout.waveformEnabled =
+        settings.value(
+            "Local/Spout/Waveform/Enabled",
+            result.local.spout.waveformEnabled)
+        .toBool();
+
+    result.local.spout.vectorscopeEnabled =
+        settings.value(
+            "Local/Spout/Vectorscope/Enabled",
+            result.local.spout.vectorscopeEnabled)
+        .toBool();
+
     result.local.window.x =
         settings.value(
             "Local/Window/X",
@@ -572,6 +590,18 @@ void SettingsStorage::save(
         settings.control
         .videoOut
         .deinterlace);
+
+    storage.setValue(
+        "Local/Spout/Video/Enabled",
+        settings.local.spout.videoEnabled);
+
+    storage.setValue(
+        "Local/Spout/Waveform/Enabled",
+        settings.local.spout.waveformEnabled);
+
+    storage.setValue(
+        "Local/Spout/Vectorscope/Enabled",
+        settings.local.spout.vectorscopeEnabled);
 
     storage.setValue(
         "Local/Window/X",

@@ -112,6 +112,12 @@ private:
         QVector<QRectF> burstRects;
     };
 
+    struct MultiburstValidityFingerprint
+    {
+        QVector<double> mean;
+        QVector<double> rms;
+    };
+
     QRect imageRect() const;
     QRectF scopeRect(const QRect& displayRect) const;
     void updateHover(const QPointF& position);
@@ -120,6 +126,12 @@ private:
     void processTemporalMeasurements();
     void advanceMultiburstDebugStep();
     MultiburstLayout detectMultiburstLayout() const;
+    MultiburstValidityFingerprint makeMultiburstValidityFingerprint() const;
+    void resetMultiburstValidity();
+    void beginMultiburstValidityCapture();
+    void accumulateMultiburstValidityFingerprint();
+    void finalizeMultiburstValidityCapture();
+    bool multiburstValidityChanged();
     AreaAnalysisResult analyzeSelection(const QRectF& selectionRect) const;
     ReferenceAnalysisResult analyzeReferenceSelection(const QRectF& selectionRect) const;
     int referenceLevelHit(const QPointF& position) const;
@@ -191,4 +203,12 @@ private:
     mutable int multiburstDebugCandidateCount_ = 0;
     QVector<AreaAnalysisResult> multiburstAnalyses_;
     QVector<TemporalAreaMeasurement> temporalMultiburst_;
+
+    bool multiburstValidityCollecting_ = false;
+    bool multiburstValidityActive_ = false;
+    int multiburstValidityBaselineFrames_ = 0;
+    int multiburstValidityChangedFrames_ = 0;
+    QVector<double> multiburstValidityMeanSum_;
+    QVector<double> multiburstValidityRmsSum_;
+    MultiburstValidityFingerprint multiburstValidityBaseline_;
 };

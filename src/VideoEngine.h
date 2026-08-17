@@ -48,6 +48,9 @@ public:
     void setDisplayGamma(
         double gamma);
 
+    void setSpoutVideoEnabled(
+        bool enabled);
+
     void setVideoHighlightEnabled(
         bool enabled);
 
@@ -103,6 +106,9 @@ signals:
     void frameChanged(
         const QImage& image);
 
+    void videoSpoutChanged(
+        const QImage& image);
+
     void waveformChanged(
         const QImage& image);
 
@@ -146,6 +152,8 @@ private:
     {
         QImage first;
         QImage second;
+        QImage spoutFirst;
+        QImage spoutSecond;
         std::uint64_t generation = 0;
         bool firstReady = false;
         bool secondReady = false;
@@ -194,6 +202,10 @@ private:
 
     std::atomic<int> noiseReductionIntensity_{
         50
+    };
+
+    std::atomic<bool> spoutVideoEnabled_{
+        false
     };
 
     // Output sizes
@@ -327,6 +339,7 @@ private:
     std::array<
         DisplayConverter,
         2> displayConverters_;
+    DisplayConverter spoutVideoConverter_;
     WaveformRenderer waveformScreenRenderer_;
     WaveformRenderer waveformVideoRenderer_;
     VectorscopeAnalyzer vectorscopeAnalyzer_;

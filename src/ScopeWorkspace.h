@@ -54,6 +54,8 @@ signals:
         OpenScopeSettings::WorkspaceView view);
 
     void performanceVisibilityChanged(bool visible);
+    void spoutVideoEnabledChanged(bool enabled);
+    void spoutWaveformEnabledChanged(bool enabled);
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);

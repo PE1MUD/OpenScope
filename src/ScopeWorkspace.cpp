@@ -183,6 +183,18 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::spoutVideoEnabledChanged,
+        this,
+        &ScopeWorkspace::spoutVideoEnabledChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::spoutWaveformEnabledChanged,
+        this,
+        &ScopeWorkspace::spoutWaveformEnabledChanged);
+
+    connect(
+        controlWidget_,
         &ControlWidget::noiseReductionChanged,
         this,
         &ScopeWorkspace::noiseReductionChanged);

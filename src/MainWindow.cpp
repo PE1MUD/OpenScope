@@ -22,6 +22,8 @@
 #include <windows.h>
 
 #include <QTimer>
+
+#include <memory>
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QImage>
@@ -575,6 +577,54 @@ MainWindow::MainWindow(QWidget* parent)
         videoWidget_,
         &VideoWidget::setImage);
 
+    auto* videoSpoutOutput =
+        new SpoutOutput(
+            QStringLiteral("OpenScope Video"),
+            this);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::videoSpoutChanged,
+        videoSpoutOutput,
+        &SpoutOutput::submitImage,
+        Qt::QueuedConnection);
+
+    const auto setVideoSpoutEnabled =
+        [this, videoSpoutOutput](bool enabled)
+        {
+            videoEngine_->setSpoutVideoEnabled(
+                enabled);
+
+            if (!enabled)
+            {
+                videoSpoutOutput->stop();
+            }
+        };
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::spoutVideoEnabledChanged,
+        this,
+        [this, setVideoSpoutEnabled](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local
+                        .spout
+                        .videoEnabled =
+                        enabled;
+                });
+
+            setVideoSpoutEnabled(
+                enabled);
+        });
+
+    setVideoSpoutEnabled(
+        initialSettings.local
+            .spout
+            .videoEnabled);
+
     connect(
         videoEngine_,
         &VideoEngine::waveformChanged,
@@ -599,19 +649,66 @@ MainWindow::MainWindow(QWidget* parent)
             waveformVideoPreview->setImage(image);
         });
 
-    // Spout output is deliberately independent of the preview widget.
-    // The first received waveform frame lazily opens the sender.
+    // Spout is opt-in. When disabled there is no waveform -> Spout
+    // connection at all, so no image upload or sender work is performed.
     auto* waveformSpoutOutput =
         new SpoutOutput(
             QStringLiteral("OpenScope Waveform"),
             this);
 
+    auto waveformSpoutConnection =
+        std::make_shared<QMetaObject::Connection>();
+
+    const auto setWaveformSpoutEnabled =
+        [this,
+         waveformSpoutOutput,
+         waveformSpoutConnection](bool enabled)
+        {
+            QObject::disconnect(
+                *waveformSpoutConnection);
+
+            *waveformSpoutConnection =
+                QMetaObject::Connection();
+
+            if (enabled)
+            {
+                *waveformSpoutConnection =
+                    connect(
+                        videoEngine_,
+                        &VideoEngine::waveformVideoChanged,
+                        waveformSpoutOutput,
+                        &SpoutOutput::submitImage,
+                        Qt::QueuedConnection);
+            }
+            else
+            {
+                waveformSpoutOutput->stop();
+            }
+        };
+
     connect(
-        videoEngine_,
-        &VideoEngine::waveformVideoChanged,
-        waveformSpoutOutput,
-        &SpoutOutput::submitImage,
-        Qt::QueuedConnection);
+        workspace_,
+        &ScopeWorkspace::spoutWaveformEnabledChanged,
+        this,
+        [this, setWaveformSpoutEnabled](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local
+                        .spout
+                        .waveformEnabled =
+                        enabled;
+                });
+
+            setWaveformSpoutEnabled(
+                enabled);
+        });
+
+    setWaveformSpoutEnabled(
+        initialSettings.local
+            .spout
+            .waveformEnabled);
 
     waveformVideoPreview->setVisible(
         initialSettings.local

@@ -828,6 +828,56 @@ ControlWidget::ControlWidget(
     miscLayout->addWidget(
         performanceCheckBox_);
 
+    auto* spoutLabel =
+        new QLabel(
+            "Spout output",
+            miscTab);
+
+    miscLayout->addWidget(
+        spoutLabel);
+
+    auto* spoutVideoCheckBox =
+        new QCheckBox(
+            "Video",
+            miscTab);
+
+    spoutVideoCheckBox->setChecked(
+        settings.local
+            .spout
+            .videoEnabled);
+
+    miscLayout->addWidget(
+        spoutVideoCheckBox);
+
+    auto* spoutWaveformCheckBox =
+        new QCheckBox(
+            "Waveform",
+            miscTab);
+
+    spoutWaveformCheckBox->setChecked(
+        settings.local
+            .spout
+            .waveformEnabled);
+
+    miscLayout->addWidget(
+        spoutWaveformCheckBox);
+
+    auto* spoutVectorscopeCheckBox =
+        new QCheckBox(
+            "Vectorscope",
+            miscTab);
+
+    spoutVectorscopeCheckBox->setChecked(
+        settings.local
+            .spout
+            .vectorscopeEnabled);
+
+    spoutVectorscopeCheckBox->setEnabled(
+        false);
+
+    miscLayout->addWidget(
+        spoutVectorscopeCheckBox);
+
     auto* exportHighResolutionPngButton =
         new QPushButton(
             "Export high-res PNG...",
@@ -863,6 +913,18 @@ ControlWidget::ControlWidget(
         &QCheckBox::toggled,
         this,
         &ControlWidget::performanceVisibilityChanged);
+
+    connect(
+        spoutVideoCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::spoutVideoEnabledChanged);
+
+    connect(
+        spoutWaveformCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::spoutWaveformEnabledChanged);
 
     connect(
         exportHighResolutionPngButton,

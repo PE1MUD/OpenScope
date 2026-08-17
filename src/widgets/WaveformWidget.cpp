@@ -35,6 +35,21 @@ constexpr int kExpectedMultiburstBursts = 6;
 constexpr int kMinimumMultiburstBursts = 4;
 constexpr int kMultiburstSearchFrames = 8;
 
+// Multiburst validity is deliberately conservative.  Use many LOCAL reference
+// windows instead of coarse whole-line bins: a different picture line can have
+// almost the same mean/RMS statistics when averaged over large regions.
+// Each reference window stores local mean + RMS, so analogue noise is averaged
+// out while gross spatial changes remain very obvious.
+constexpr int kMultiburstValidityBins = 96;
+constexpr int kMultiburstValidityWindowRadius = 24;
+constexpr int kMultiburstValidityMinimumBaselineFrames = 2;
+constexpr int kMultiburstValidityRequiredChangedBins = 10;
+constexpr int kMultiburstValidityConfirmFrames = 4;
+// measurementLuma_ is expressed in VOLTS (the same domain used by the
+// waveform analyser: black ~= 0.3 V, white ~= 1.0 V), not 16-bit code values.
+constexpr double kMultiburstValidityMeanThreshold = 0.035; // 35 mV
+constexpr double kMultiburstValidityRmsThreshold = 0.045;  // 45 mV
+
 struct WaveformGeometry
 {
     QRect displayRect;
@@ -799,7 +814,228 @@ void WaveformWidget::clearMeasurements()
     }
     multiburstAnalyses_.clear();
     temporalMultiburst_.clear();
+    resetMultiburstValidity();
     update();
+}
+
+WaveformWidget::MultiburstValidityFingerprint
+WaveformWidget::makeMultiburstValidityFingerprint() const
+{
+    MultiburstValidityFingerprint fingerprint;
+
+    const int sampleCount =
+        static_cast<int>(measurementLuma_.size());
+
+    if (sampleCount < kMultiburstValidityBins)
+    {
+        return fingerprint;
+    }
+
+    fingerprint.mean.resize(kMultiburstValidityBins);
+    fingerprint.rms.resize(kMultiburstValidityBins);
+
+    for (int bin = 0; bin < kMultiburstValidityBins; ++bin)
+    {
+        // Evenly distributed reference points across the complete line.
+        // Around every point we average a small local window.  This is much
+        // more spatially selective than the old 32 large bins, but still
+        // rejects normal analogue/sample noise very effectively.
+        const int center =
+            ((2 * bin + 1) * sampleCount) /
+            (2 * kMultiburstValidityBins);
+
+        const int first =
+            (std::max)(
+                0,
+                center - kMultiburstValidityWindowRadius);
+
+        const int last =
+            (std::min)(
+                sampleCount,
+                center + kMultiburstValidityWindowRadius + 1);
+
+        if (last <= first)
+        {
+            continue;
+        }
+
+        double sum = 0.0;
+
+        for (int index = first; index < last; ++index)
+        {
+            sum += measurementLuma_[index];
+        }
+
+        const double mean =
+            sum / static_cast<double>(last - first);
+
+        double sumSquares = 0.0;
+
+        for (int index = first; index < last; ++index)
+        {
+            const double difference =
+                static_cast<double>(measurementLuma_[index]) - mean;
+
+            sumSquares +=
+                difference * difference;
+        }
+
+        fingerprint.mean[bin] =
+            mean;
+
+        fingerprint.rms[bin] =
+            std::sqrt(
+                sumSquares /
+                static_cast<double>(last - first));
+    }
+
+    return fingerprint;
+}
+
+void WaveformWidget::resetMultiburstValidity()
+{
+    multiburstValidityCollecting_ = false;
+    multiburstValidityActive_ = false;
+    multiburstValidityBaselineFrames_ = 0;
+    multiburstValidityChangedFrames_ = 0;
+    multiburstValidityMeanSum_.clear();
+    multiburstValidityRmsSum_.clear();
+    multiburstValidityBaseline_ = {};
+}
+
+void WaveformWidget::beginMultiburstValidityCapture()
+{
+    resetMultiburstValidity();
+
+    multiburstValidityCollecting_ = true;
+    multiburstValidityMeanSum_.fill(
+        0.0,
+        kMultiburstValidityBins);
+    multiburstValidityRmsSum_.fill(
+        0.0,
+        kMultiburstValidityBins);
+
+    // Include the frame on which M found the pattern.  Following frames are
+    // accumulated while the normal temporal M measurement is running.
+    accumulateMultiburstValidityFingerprint();
+}
+
+void WaveformWidget::accumulateMultiburstValidityFingerprint()
+{
+    if (!multiburstValidityCollecting_)
+    {
+        return;
+    }
+
+    const MultiburstValidityFingerprint fingerprint =
+        makeMultiburstValidityFingerprint();
+
+    if (fingerprint.mean.size() != kMultiburstValidityBins ||
+        fingerprint.rms.size() != kMultiburstValidityBins)
+    {
+        return;
+    }
+
+    for (int bin = 0; bin < kMultiburstValidityBins; ++bin)
+    {
+        multiburstValidityMeanSum_[bin] += fingerprint.mean[bin];
+        multiburstValidityRmsSum_[bin] += fingerprint.rms[bin];
+    }
+
+    ++multiburstValidityBaselineFrames_;
+}
+
+void WaveformWidget::finalizeMultiburstValidityCapture()
+{
+    if (!multiburstValidityCollecting_)
+    {
+        return;
+    }
+
+    multiburstValidityCollecting_ = false;
+
+    if (multiburstValidityBaselineFrames_ <
+        kMultiburstValidityMinimumBaselineFrames)
+    {
+        resetMultiburstValidity();
+        return;
+    }
+
+    multiburstValidityBaseline_.mean.resize(
+        kMultiburstValidityBins);
+    multiburstValidityBaseline_.rms.resize(
+        kMultiburstValidityBins);
+
+    const double divisor =
+        static_cast<double>(multiburstValidityBaselineFrames_);
+
+    for (int bin = 0; bin < kMultiburstValidityBins; ++bin)
+    {
+        multiburstValidityBaseline_.mean[bin] =
+            multiburstValidityMeanSum_[bin] / divisor;
+        multiburstValidityBaseline_.rms[bin] =
+            multiburstValidityRmsSum_[bin] / divisor;
+    }
+
+    multiburstValidityMeanSum_.clear();
+    multiburstValidityRmsSum_.clear();
+    multiburstValidityChangedFrames_ = 0;
+    multiburstValidityActive_ = true;
+}
+
+bool WaveformWidget::multiburstValidityChanged()
+{
+    if (!multiburstValidityActive_)
+    {
+        return false;
+    }
+
+    const MultiburstValidityFingerprint current =
+        makeMultiburstValidityFingerprint();
+
+    if (current.mean.size() != kMultiburstValidityBins ||
+        current.rms.size() != kMultiburstValidityBins ||
+        multiburstValidityBaseline_.mean.size() != kMultiburstValidityBins ||
+        multiburstValidityBaseline_.rms.size() != kMultiburstValidityBins)
+    {
+        return false;
+    }
+
+    int changedBins = 0;
+
+    for (int bin = 0; bin < kMultiburstValidityBins; ++bin)
+    {
+        const double meanDifference =
+            std::abs(
+                current.mean[bin] -
+                multiburstValidityBaseline_.mean[bin]);
+
+        const double rmsDifference =
+            std::abs(
+                current.rms[bin] -
+                multiburstValidityBaseline_.rms[bin]);
+
+        if (meanDifference >= kMultiburstValidityMeanThreshold ||
+            rmsDifference >= kMultiburstValidityRmsThreshold)
+        {
+            ++changedBins;
+        }
+    }
+
+    if (changedBins >= kMultiburstValidityRequiredChangedBins)
+    {
+        ++multiburstValidityChangedFrames_;
+    }
+    else
+    {
+        // Require consecutive evidence.  One noisy or damaged frame is not
+        // enough to disturb a valid measurement.
+        multiburstValidityChangedFrames_ = 0;
+    }
+
+    return
+        multiburstValidityChangedFrames_ >=
+        kMultiburstValidityConfirmFrames;
 }
 
 void WaveformWidget::advanceMultiburstDebugStep()
@@ -919,6 +1155,7 @@ void WaveformWidget::processTemporalMeasurements()
                 temporalMultiburst_[i].selectionRect = layout.burstRects[i];
             }
 
+            beginMultiburstValidityCapture();
             return;
         }
         else if (multiburstSearchFrames_ >= kMultiburstSearchFrames)
@@ -1220,7 +1457,30 @@ void WaveformWidget::setMeasurementLuma(
     const QVector<float>& samples)
 {
     measurementLuma_ = samples;
+
+    if (multiburstValidityCollecting_)
+    {
+        accumulateMultiburstValidityFingerprint();
+    }
+
     processTemporalMeasurements();
+
+    if (multiburstValidityCollecting_ &&
+        !multiburstMeasurementActive_)
+    {
+        finalizeMultiburstValidityCapture();
+        return;
+    }
+
+    if (multiburstValidityActive_ &&
+        !multiburstMeasurementActive_ &&
+        multiburstValidityChanged())
+    {
+        // Clear only after a substantial line-content change has persisted.
+        // The fingerprint is based solely on measurementLuma_; dragging Ref
+        // or MB level markers cannot influence this decision.
+        clearMeasurements();
+    }
 }
 
 void WaveformWidget::keyPressEvent(QKeyEvent* event)
@@ -1243,6 +1503,7 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
     {
         multiburstMeasurementActive_ = false;
         multiburstStatus_.clear();
+        resetMultiburstValidity();
         referenceAnalysis_.frequencyMHz = 0.0;
 
         referenceMode_ = true;
@@ -1312,6 +1573,8 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
                 temporalMultiburst_[i].active = true;
                 temporalMultiburst_[i].selectionRect = layout.burstRects[i];
             }
+
+            beginMultiburstValidityCapture();
 
             multiburstStatus_ =
                 QStringLiteral("MULTIBURST  MEASURE  0/%1")

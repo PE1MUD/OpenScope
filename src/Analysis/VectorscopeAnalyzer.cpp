@@ -740,14 +740,34 @@ void VectorscopeAnalyzer::renderAllLines(
         }
     }
 
-    const QSize outputSize =
-        image_.size();
+    const int outputWidth =
+        image_.width();
 
-    image_ =
+    const int outputHeight =
+        image_.height();
+
+    const int scopeSize =
+        std::min(
+            outputWidth,
+            outputHeight);
+
+    const QImage scaledScope =
         allLinesImage_.scaled(
-            outputSize,
+            scopeSize,
+            scopeSize,
             Qt::IgnoreAspectRatio,
             Qt::FastTransformation);
+
+    image_.fill(
+        Qt::black);
+
+    QPainter painter(
+        &image_);
+
+    painter.drawImage(
+        (outputWidth - scopeSize) / 2,
+        (outputHeight - scopeSize) / 2,
+        scaledScope);
 }
 
 void VectorscopeAnalyzer::accumulateLineSegmentInteger(

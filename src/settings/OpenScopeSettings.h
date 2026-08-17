@@ -134,10 +134,18 @@ struct OpenScopeSettings
             bool waveformVideoVisible = false;
         };
 
+        struct Spout
+        {
+            bool videoEnabled = false;
+            bool waveformEnabled = false;
+            bool vectorscopeEnabled = false;
+        };
+
         Display display;
         Window window;
         Workspace workspace;
         Floaties floaties;
+        Spout spout;
     };
 
     Control control;

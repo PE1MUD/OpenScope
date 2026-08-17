@@ -29,6 +29,9 @@ VideoEngine::VideoEngine(QObject* parent)
             DisplayConversionImplementation::Avx2);
     }
 
+    spoutVideoConverter_.setImplementation(
+        DisplayConversionImplementation::Avx2);
+
     for (CapturedFrameSlot& slot : captureSlots_)
     {
         slot.frame.resize(
@@ -953,6 +956,12 @@ void VideoEngine::displayWorkerLoop()
             slot.second =
                 QImage{};
 
+            slot.spoutFirst =
+                QImage{};
+
+            slot.spoutSecond =
+                QImage{};
+
             slot.generation =
                 generation;
 
@@ -965,6 +974,35 @@ void VideoEngine::displayWorkerLoop()
 
         displayPresenterCondition_.
             notify_one();
+
+        if (spoutVideoEnabled_.load(
+            std::memory_order_acquire))
+        {
+            DisplayPerformance spoutPerformance;
+
+            QImage firstSpoutImage =
+                spoutVideoConverter_.convert(
+                    *displayFrame,
+                    progressiveLuma_.first.y.data(),
+                    kCaptureWidth,
+                    kCaptureHeight,
+                    spoutPerformance);
+
+            std::lock_guard<std::mutex> lock(
+                displayPresenterMutex_);
+
+            DisplayFrameSlot& slot =
+                displayFrameSlots_[
+                    static_cast<std::size_t>(
+                        generation %
+                        kFrameSlotCount)];
+
+            if (slot.generation == generation)
+            {
+                slot.spoutFirst =
+                    std::move(firstSpoutImage);
+            }
+        }
 
         const auto firstPerformance =
             displayPhasePerformance_;
@@ -1031,6 +1069,35 @@ void VideoEngine::displayWorkerLoop()
 
         displayPresenterCondition_.
             notify_one();
+
+        if (spoutVideoEnabled_.load(
+            std::memory_order_acquire))
+        {
+            DisplayPerformance spoutPerformance;
+
+            QImage secondSpoutImage =
+                spoutVideoConverter_.convert(
+                    *displayFrame,
+                    progressiveLuma_.second.y.data(),
+                    kCaptureWidth,
+                    kCaptureHeight,
+                    spoutPerformance);
+
+            std::lock_guard<std::mutex> lock(
+                displayPresenterMutex_);
+
+            DisplayFrameSlot& slot =
+                displayFrameSlots_[
+                    static_cast<std::size_t>(
+                        generation %
+                        kFrameSlotCount)];
+
+            if (slot.generation == generation)
+            {
+                slot.spoutSecond =
+                    std::move(secondSpoutImage);
+            }
+        }
 
         const auto secondPerformance =
             displayPhasePerformance_;
@@ -1315,6 +1382,8 @@ void VideoEngine::displayPresenterLoop()
 
         QImage firstImage;
         QImage secondImage;
+        QImage firstSpoutImage;
+        QImage secondSpoutImage;
 
         std::uint64_t presentedGeneration = 0;
         bool presentingNewGeneration = false;
@@ -1366,6 +1435,9 @@ void VideoEngine::displayPresenterLoop()
                 {
                     firstImage =
                         slot.first;
+
+                    firstSpoutImage =
+                        slot.spoutFirst;
 
                     presentedGeneration =
                         expectedGeneration;
@@ -1425,6 +1497,14 @@ void VideoEngine::displayPresenterLoop()
         emit frameChanged(
             firstImage);
 
+        if (spoutVideoEnabled_.load(
+            std::memory_order_acquire) &&
+            !firstSpoutImage.isNull())
+        {
+            emit videoSpoutChanged(
+                firstSpoutImage);
+        }
+
         const Clock::time_point secondFieldTime =
             captureTickTime +
             fieldPeriod;
@@ -1455,6 +1535,9 @@ void VideoEngine::displayPresenterLoop()
                 {
                     secondImage =
                         slot.second;
+
+                    secondSpoutImage =
+                        slot.spoutSecond;
 
                     lastPresentedSecond_ =
                         secondImage;
@@ -1503,6 +1586,14 @@ void VideoEngine::displayPresenterLoop()
 
             emit frameChanged(
                 secondImage);
+
+            if (spoutVideoEnabled_.load(
+                std::memory_order_acquire) &&
+                !secondSpoutImage.isNull())
+            {
+                emit videoSpoutChanged(
+                    secondSpoutImage);
+            }
         }
     }
 
@@ -1968,6 +2059,15 @@ void VideoEngine::setWaveformColor(bool enabled)
     waveformScreenRenderer_.setColor(enabled);
     waveformVideoRenderer_.setColor(enabled);
 }
+
+void VideoEngine::setSpoutVideoEnabled(
+    bool enabled)
+{
+    spoutVideoEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
 
 void VideoEngine::setDisplayGamma(double gamma)
 {
