@@ -7,6 +7,8 @@
 #include <QRect>
 #include <QSize>
 
+#include <memory>
+
 class QTimer;
 
 class VectorscopeWidget;
@@ -16,6 +18,8 @@ class WaveformWidget;
 class ScopeWorkspace;
 class SettingsService;
 class PerformanceWidget;
+class QAction;
+class PhilipsPatternRomSource;
 
 class MainWindow : public QMainWindow
 {
@@ -58,6 +62,13 @@ private:
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
 
+    std::unique_ptr<PhilipsPatternRomSource>
+        philipsPatternRomSource_;
+
+    QAction* blackmagicSourceAction_ = nullptr;
+    QAction* philipsPatternRomSourceAction_ = nullptr;
+    QAction* reloadPhilipsPatternRomAction_ = nullptr;
+
     QSize videoRenderSize_;
     QSize waveformRenderSize_;
     QSize vectorscopeRenderSize_;
@@ -79,4 +90,9 @@ private:
         bool fullscreen);
 
     void updateRenderResolutionTitle();
+
+    void createSourceMenu();
+    void selectBlackmagicSource();
+    void selectPhilipsPatternRomSource();
+    void reloadPhilipsPatternRomSource();
 };

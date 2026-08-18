@@ -10,6 +10,7 @@
 #include "widgets/PerformanceWidget.h"
 #include "standards/VideoStandard.h"
 #include "output/SpoutOutput.h"
+#include "sources/philips/PhilipsPatternRomSource.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,6 +23,10 @@
 #include <windows.h>
 
 #include <QTimer>
+#include <QAction>
+#include <QActionGroup>
+#include <QMenu>
+#include <QMenuBar>
 
 #include <memory>
 #include <QFileDialog>
@@ -146,6 +151,12 @@ MainWindow::MainWindow(QWidget* parent)
             this);
 
     setCentralWidget(workspace_);
+
+    philipsPatternRomSource_ =
+        std::make_unique<PhilipsPatternRomSource>(
+            videoEngine_);
+
+    createSourceMenu();
 
     connect(
         workspace_,
@@ -1197,6 +1208,204 @@ MainWindow::MainWindow(QWidget* parent)
     updateRenderResolutionTitle();
 }
 
+
+void MainWindow::createSourceMenu()
+{
+    QMenu* sourceMenu =
+        menuBar()->addMenu(
+            tr("Source"));
+
+    QActionGroup* sourceGroup =
+        new QActionGroup(this);
+
+    sourceGroup->setExclusive(true);
+
+    blackmagicSourceAction_ =
+        sourceMenu->addAction(
+            tr("Blackmagic"));
+
+    blackmagicSourceAction_->setCheckable(true);
+    blackmagicSourceAction_->setChecked(true);
+    sourceGroup->addAction(
+        blackmagicSourceAction_);
+
+    philipsPatternRomSourceAction_ =
+        sourceMenu->addAction(
+            tr("Philips Pattern ROM..."));
+
+    philipsPatternRomSourceAction_->setCheckable(true);
+    sourceGroup->addAction(
+        philipsPatternRomSourceAction_);
+
+    sourceMenu->addSeparator();
+
+    reloadPhilipsPatternRomAction_ =
+        sourceMenu->addAction(
+            tr("Reload Philips ROM set"));
+
+    reloadPhilipsPatternRomAction_->setEnabled(false);
+
+    connect(
+        blackmagicSourceAction_,
+        &QAction::triggered,
+        this,
+        [this]()
+        {
+            selectBlackmagicSource();
+        });
+
+    connect(
+        philipsPatternRomSourceAction_,
+        &QAction::triggered,
+        this,
+        [this]()
+        {
+            selectPhilipsPatternRomSource();
+        });
+
+    connect(
+        reloadPhilipsPatternRomAction_,
+        &QAction::triggered,
+        this,
+        [this]()
+        {
+            reloadPhilipsPatternRomSource();
+        });
+}
+
+void MainWindow::selectBlackmagicSource()
+{
+    if (philipsPatternRomSource_ != nullptr)
+    {
+        philipsPatternRomSource_->stop();
+    }
+
+    waveformWidget_->setInputSampleClockHz(13'500'000.0);
+
+    deckLinkStop();
+    deckLinkProbe(videoEngine_);
+
+    if (blackmagicSourceAction_ != nullptr)
+    {
+        blackmagicSourceAction_->setChecked(true);
+    }
+}
+
+void MainWindow::selectPhilipsPatternRomSource()
+{
+    const QString settingsFileName =
+        QDir(
+            QCoreApplication::applicationDirPath())
+            .filePath(
+                QStringLiteral("OpenScope.ini"));
+
+    QSettings settings(
+        settingsFileName,
+        QSettings::IniFormat);
+
+    QString initialPath =
+        settings.value(
+            QStringLiteral(
+                "Local/PhilipsPatternRom/LastIni"))
+            .toString();
+
+    if (initialPath.isEmpty())
+    {
+        initialPath =
+            QCoreApplication::applicationDirPath();
+    }
+
+    const QString iniFileName =
+        QFileDialog::getOpenFileName(
+            this,
+            tr("Open Philips Pattern ROM set"),
+            initialPath,
+            tr("ROM set (rom.ini *.ini);;INI files (*.ini);;All files (*.*)"));
+
+    if (iniFileName.isEmpty())
+    {
+        if (philipsPatternRomSource_ == nullptr ||
+            !philipsPatternRomSource_->isRunning())
+        {
+            blackmagicSourceAction_->setChecked(true);
+        }
+
+        return;
+    }
+
+    QString errorMessage;
+
+    if (!philipsPatternRomSource_->load(
+            iniFileName,
+            &errorMessage))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Philips Pattern ROM"),
+            errorMessage);
+
+        blackmagicSourceAction_->setChecked(true);
+        deckLinkStop();
+        deckLinkProbe(videoEngine_);
+        return;
+    }
+
+    settings.setValue(
+        QStringLiteral(
+            "Local/PhilipsPatternRom/LastIni"),
+        iniFileName);
+
+    waveformWidget_->setInputSampleClockHz(
+        philipsPatternRomSource_->lumaSampleRateHz());
+
+    deckLinkStop();
+    philipsPatternRomSource_->start();
+
+    philipsPatternRomSourceAction_->setText(
+        tr("Philips Pattern ROM - %1")
+            .arg(
+                philipsPatternRomSource_->setName()));
+
+    philipsPatternRomSourceAction_->setChecked(true);
+    reloadPhilipsPatternRomAction_->setEnabled(true);
+}
+
+void MainWindow::reloadPhilipsPatternRomSource()
+{
+    if (philipsPatternRomSource_ == nullptr ||
+        philipsPatternRomSource_->iniFileName().isEmpty())
+    {
+        return;
+    }
+
+    const QString iniFileName =
+        philipsPatternRomSource_->iniFileName();
+
+    QString errorMessage;
+
+    if (!philipsPatternRomSource_->load(
+            iniFileName,
+            &errorMessage))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Philips Pattern ROM"),
+            errorMessage);
+
+        blackmagicSourceAction_->setChecked(true);
+        deckLinkProbe(videoEngine_);
+        return;
+    }
+
+    waveformWidget_->setInputSampleClockHz(
+        philipsPatternRomSource_->lumaSampleRateHz());
+
+    deckLinkStop();
+    philipsPatternRomSource_->start();
+
+    philipsPatternRomSourceAction_->setChecked(true);
+}
+
 double MainWindow::windowAspectRatio() const
 {
     if (settingsService_ != nullptr &&
@@ -1415,6 +1624,11 @@ VideoWidget* MainWindow::videoWidget() const
 
 MainWindow::~MainWindow()
 {
+    if (philipsPatternRomSource_ != nullptr)
+    {
+        philipsPatternRomSource_->stop();
+    }
+
     deckLinkStop();
 }
 

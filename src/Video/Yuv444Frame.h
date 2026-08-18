@@ -31,6 +31,10 @@ struct Yuv444Frame
     int width = 0;
     int height = 0;
 
+    // Horizontal sample clock of the source raster.
+    // Blackmagic PAL/NTSC D1 uses 13.5 MHz; some Philips ROM sets use 20 MHz.
+    double sampleClockHz = 13'500'000.0;
+
     // Each plane contains width * height samples.
     std::vector<std::uint16_t> y;
     std::vector<std::uint16_t> u;

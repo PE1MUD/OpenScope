@@ -30,6 +30,7 @@ public:
     void setZoomEnabled(bool enabled);
     void setScrollPosition(double position);
     void setMeasurementLuma(const QVector<float>& samples);
+    void setInputSampleClockHz(double sampleClockHz);
     void clearMeasurements();
 
 signals:
@@ -95,6 +96,7 @@ private:
     struct TemporalReferenceMeasurement
     {
         bool active = false;
+        bool usePlateauAnalysis = false;
         QRectF selectionRect;
         int framesSeen = 0;
         int validFrames = 0;
@@ -109,6 +111,7 @@ private:
         bool valid = false;
         QRectF referenceRect;
         double referenceFrequencyMHz = 0.0;
+        bool referenceUsesPlateau = false;
         QVector<QRectF> burstRects;
     };
 
@@ -125,7 +128,8 @@ private:
     void clearAreaAnalysis();
     void processTemporalMeasurements();
     void advanceMultiburstDebugStep();
-    MultiburstLayout detectMultiburstLayout() const;
+    MultiburstLayout detectMultiburstLayout(
+        const QRectF* manualReferenceRect = nullptr) const;
     MultiburstValidityFingerprint makeMultiburstValidityFingerprint() const;
     void resetMultiburstValidity();
     void beginMultiburstValidityCapture();
@@ -133,7 +137,9 @@ private:
     void finalizeMultiburstValidityCapture();
     bool multiburstValidityChanged();
     AreaAnalysisResult analyzeSelection(const QRectF& selectionRect) const;
-    ReferenceAnalysisResult analyzeReferenceSelection(const QRectF& selectionRect) const;
+    ReferenceAnalysisResult analyzeReferenceSelection(
+        const QRectF& selectionRect,
+        double preferredVppVolts = 0.0) const;
     int referenceLevelHit(const QPointF& position) const;
     int areaLevelHit(const QPointF& position) const;
     int multiburstLevelHit(
@@ -145,6 +151,7 @@ private:
     int zoomFactor_ = 1;
     bool zoomEnabled_ = true;
     double scrollPosition_ = 0.0;
+    double inputSampleClockHz_ = 13'500'000.0;
 
     bool panActive_ = false;
     double panStartX_ = 0.0;
@@ -171,6 +178,7 @@ private:
     QPointF referenceStartPosition_;
     QPointF referenceCurrentPosition_;
     ReferenceAnalysisResult referenceAnalysis_;
+    bool referenceIsManual_ = false;
     bool referenceLevelDragging_ = false;
     int referenceLevelDragIndex_ = -1; // 0 = LOW, 1 = HIGH
     bool areaLevelDragging_ = false;

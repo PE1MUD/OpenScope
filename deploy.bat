@@ -37,6 +37,15 @@ cmake --install out\build\release --prefix out\deploy
 if errorlevel 1 goto :error
 
 echo.
+echo === Copy ROM set definitions ===
+if exist "romsets" (
+    robocopy "romsets" "out\deploy\bin\romsets" /E /NFL /NDL /NJH /NJS /NP
+    if errorlevel 8 goto :error
+) else (
+    echo WARNING: romsets directory not found.
+)
+
+echo.
 echo === OpenScope deploy ready ===
 echo %CD%\out\deploy\bin
 echo.

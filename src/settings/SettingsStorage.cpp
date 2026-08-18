@@ -421,11 +421,10 @@ OpenScopeSettings SettingsStorage::load() const
             result.local.floaties.performanceVisible)
         .toBool();
 
-    result.local.floaties.waveformVideoVisible =
-        settings.value(
-            "Local/Floaties/WaveformVideo/Visible",
-            result.local.floaties.waveformVideoVisible)
-        .toBool();
+    // Waveform Video Out is diagnostic and must start disabled.
+    // Ignore stale Visible=true values from older OpenScope.ini files; the
+    // next settings save writes false back to the ini.
+    result.local.floaties.waveformVideoVisible = false;
 
     result.local.floaties.settings.x =
         settings.value(

@@ -795,6 +795,7 @@ void WaveformWidget::clearMeasurements()
     measureActive_ = false;
     areaAnalysis_ = {};
     referenceAnalysis_ = {};
+    referenceIsManual_ = false;
     temporalArea_ = {};
     temporalReference_ = {};
     multiburstMeasurementActive_ = false;
@@ -1333,13 +1334,22 @@ void WaveformWidget::processTemporalMeasurements()
     {
         ++temporalReference_.framesSeen;
 
-        ReferenceAnalysisResult result =
-            analyzeReferenceSelection(temporalReference_.selectionRect);
+        ReferenceAnalysisResult result;
 
-        result.frequencyMHz =
+        const double discoveredReferenceFrequencyMHz =
             temporalReference_.representative.frequencyMHz;
 
-        if (!result.valid)
+        // Automatic Ref normally uses the stable-sinus fitter.  If discovery
+        // identified the first group as a valid two-plateau/tabletop Ref, use
+        // the plateau analyser instead while preserving its discovered
+        // repetition frequency for display.
+        if (temporalReference_.usePlateauAnalysis)
+        {
+            result =
+                analyzeReferenceSelection(temporalReference_.selectionRect);
+            result.frequencyMHz = discoveredReferenceFrequencyMHz;
+        }
+        else if (discoveredReferenceFrequencyMHz > 0.0)
         {
             const AreaAnalysisResult sinusResult =
                 analyzeSelection(temporalReference_.selectionRect);
@@ -1350,20 +1360,44 @@ void WaveformWidget::processTemporalMeasurements()
                 result.valid = true;
                 result.vppMillivolts = sinusResult.vppMillivolts;
                 result.vppVolts =
-                    static_cast<double>(sinusResult.vppMillivolts) /
-                    1000.0;
+                    static_cast<double>(sinusResult.vppMillivolts) / 1000.0;
                 result.selectionRect = sinusResult.selectionRect;
                 result.lowVolts = sinusResult.lowVolts;
                 result.highVolts = sinusResult.highVolts;
-
-                if (result.frequencyMHz <= 0.0)
-                {
-                    result.frequencyMHz =
-                        sinusResult.frequencyMHz;
-                }
-
+                result.frequencyMHz = discoveredReferenceFrequencyMHz;
                 result.message =
-                    QStringLiteral("Reference set from sinus");
+                    QStringLiteral("Automatic reference set from sinus");
+            }
+        }
+        else
+        {
+            result =
+                analyzeReferenceSelection(temporalReference_.selectionRect);
+
+            result.frequencyMHz = 0.0;
+
+            // Manual Ref selections may also happen to contain a clean
+            // sinus. Preserve the historic fallback without making it the
+            // primary path for manual plateau references.
+            if (!result.valid)
+            {
+                const AreaAnalysisResult sinusResult =
+                    analyzeSelection(temporalReference_.selectionRect);
+
+                if (sinusResult.valid &&
+                    sinusResult.vppMillivolts > 0)
+                {
+                    result.valid = true;
+                    result.vppMillivolts = sinusResult.vppMillivolts;
+                    result.vppVolts =
+                    static_cast<double>(sinusResult.vppMillivolts) / 1000.0;
+                    result.selectionRect = sinusResult.selectionRect;
+                    result.lowVolts = sinusResult.lowVolts;
+                    result.highVolts = sinusResult.highVolts;
+                    result.frequencyMHz = 0.0;
+                    result.message =
+                        QStringLiteral("Manual reference set from sinus");
+                }
             }
         }
 
@@ -1404,6 +1438,61 @@ void WaveformWidget::processTemporalMeasurements()
                     QStringLiteral("Reference temporal average %1/%2")
                         .arg(temporalReference_.validFrames)
                         .arg(kTemporalMeasurementFrames);
+
+                // Preserve the existing analogue-friendly detector. Only
+                // intervene when the chosen Ref amplitude is grossly
+                // inconsistent with the independently detected MB bursts.
+                QVector<double> burstVpp;
+                burstVpp.reserve(multiburstAnalyses_.size());
+
+                for (const AreaAnalysisResult& burst : multiburstAnalyses_)
+                {
+                    if (burst.valid && burst.vppMillivolts > 0)
+                    {
+                        burstVpp.push_back(
+                            static_cast<double>(burst.vppMillivolts) / 1000.0);
+                    }
+                }
+
+                if (burstVpp.size() >= kMinimumMultiburstBursts &&
+                    averaged.vppVolts > 0.0)
+                {
+                    std::sort(burstVpp.begin(), burstVpp.end());
+
+                    const int middle = burstVpp.size() / 2;
+                    const double medianBurstVpp =
+                        (burstVpp.size() & 1) != 0
+                        ? burstVpp[middle]
+                        : 0.5 * (burstVpp[middle - 1] + burstVpp[middle]);
+
+                    const double referenceRatio =
+                        averaged.vppVolts / medianBurstVpp;
+
+                    constexpr double kMinimumSaneReferenceRatio = 0.70;
+                    constexpr double kMaximumSaneReferenceRatio = 1.30;
+
+                    if (medianBurstVpp >= 0.1 &&
+                        (referenceRatio < kMinimumSaneReferenceRatio ||
+                         referenceRatio > kMaximumSaneReferenceRatio))
+                    {
+                        ReferenceAnalysisResult fallback =
+                            analyzeReferenceSelection(
+                                temporalReference_.selectionRect,
+                                medianBurstVpp);
+
+                        if (fallback.valid)
+                        {
+                            fallback.frequencyMHz = averaged.frequencyMHz;
+                            fallback.message =
+                                QStringLiteral(
+                                    "Reference plateau fallback (%1 mV MB median)")
+                                    .arg(
+                                        static_cast<int>(
+                                            std::lround(medianBurstVpp * 1000.0)));
+                            averaged = fallback;
+                        }
+                    }
+                }
 
                 referenceAnalysis_ = averaged;
             }
@@ -1483,6 +1572,14 @@ void WaveformWidget::setMeasurementLuma(
     }
 }
 
+void WaveformWidget::setInputSampleClockHz(double sampleClockHz)
+{
+    if (sampleClockHz > 0.0)
+    {
+        inputSampleClockHz_ = sampleClockHz;
+    }
+}
+
 void WaveformWidget::keyPressEvent(QKeyEvent* event)
 {
     if (event->key() == Qt::Key_A && !event->isAutoRepeat())
@@ -1504,7 +1601,6 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
         multiburstMeasurementActive_ = false;
         multiburstStatus_.clear();
         resetMultiburstValidity();
-        referenceAnalysis_.frequencyMHz = 0.0;
 
         referenceMode_ = true;
         referenceModeLabelMuted_ = false;
@@ -1529,7 +1625,25 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
 
     if (event->key() == Qt::Key_M && !event->isAutoRepeat())
     {
+        // M is always a fresh run. Only an explicitly user-drawn Ref is
+        // authoritative and survives the reset. Never infer manual/auto state
+        // from frequency or from the presence of a selection rectangle.
+        const bool hasManualReference =
+            referenceIsManual_ &&
+            referenceAnalysis_.valid &&
+            !referenceAnalysis_.selectionRect.isEmpty();
+
+        const ReferenceAnalysisResult manualReference =
+            referenceAnalysis_;
+
         clearMeasurements();
+
+        if (hasManualReference)
+        {
+            referenceAnalysis_ = manualReference;
+            referenceIsManual_ = true;
+        }
+
         areaMode_ = false;
         referenceMode_ = false;
         areaModeLabelMuted_ = false;
@@ -1546,8 +1660,21 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
         multiburstDebugCandidateRects_.clear();
         multiburstDebugCandidateCount_ = 0;
 
+        const QRectF* manualReferenceRect =
+            hasManualReference
+            ? &referenceAnalysis_.selectionRect
+            : nullptr;
+
         const MultiburstLayout layout =
-            detectMultiburstLayout();
+            detectMultiburstLayout(manualReferenceRect);
+
+        // A user-drawn Ref is a one-shot override for exactly this M run.
+        // Keep the Ref visible as a measurement result, but do not protect it
+        // from the next M press. The next M must perform a full automatic run.
+        if (hasManualReference)
+        {
+            referenceIsManual_ = false;
+        }
 
         if (layout.valid &&
             layout.burstRects.size() >= kMinimumMultiburstBursts)
@@ -1555,10 +1682,17 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
             multiburstMeasurementActive_ = true;
 
             temporalReference_ = {};
-            temporalReference_.active = true;
-            temporalReference_.selectionRect = layout.referenceRect;
-            temporalReference_.representative.frequencyMHz =
-                layout.referenceFrequencyMHz;
+
+            if (!hasManualReference &&
+                !layout.referenceRect.isEmpty())
+            {
+                temporalReference_.active = true;
+                temporalReference_.usePlateauAnalysis =
+                    layout.referenceUsesPlateau;
+                temporalReference_.selectionRect = layout.referenceRect;
+                temporalReference_.representative.frequencyMHz =
+                    layout.referenceFrequencyMHz;
+            }
 
             const int burstCount =
                 static_cast<int>(layout.burstRects.size());
@@ -1749,6 +1883,11 @@ void WaveformWidget::mousePressEvent(QMouseEvent* event)
         event->button() == Qt::LeftButton &&
         scope.contains(event->position()))
     {
+        // Starting a new manual Ref is an explicit destructive edit: remove
+        // the old Ref and every old M result immediately on the first LMB.
+        clearMeasurements();
+        referenceIsManual_ = true;
+        referenceMode_ = true;
         referenceSelecting_ = true;
         referenceStartPosition_ = clampPointToRect(event->position(), scope);
         referenceCurrentPosition_ = referenceStartPosition_;
@@ -2122,9 +2261,11 @@ void WaveformWidget::mouseDoubleClickEvent(QMouseEvent* event)
     VideoWidget::mouseDoubleClickEvent(event);
 }
 
-WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
+WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
+    const QRectF* manualReferenceRect) const
 {
     MultiburstLayout layout;
+
 
     // The old FIR / residual-energy detector deliberately disappears here.
     // Multiburst is centred around 50 % video level, so discover periodic
@@ -2138,6 +2279,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
 
     const int sampleCount =
         static_cast<int>(measurementLuma_.size());
+
 
     if (sampleCount < 512)
     {
@@ -2159,8 +2301,11 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
     constexpr int kMinimumLobeSamples = 3;
     constexpr int kMaximumSignalCount =
         kExpectedMultiburstBursts + 1; // Ref + up to six bursts.
+    // Preserve the original analogue-friendly discovery threshold.
+    // A separate, stricter bursts-only fallback is tried below only when
+    // the normal Ref + MB route does not have enough groups.
     constexpr int kMinimumSignalCount =
-        kMinimumMultiburstBursts + 1; // Ref + at least four bursts.
+        kMinimumMultiburstBursts + 1;
 
     struct Lobe
     {
@@ -2284,6 +2429,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
         }
     }
 
+
     if (lobes.size() < 2)
     {
         return layout;
@@ -2399,13 +2545,18 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
             group.lastSample = lobes[groupEnd].last;
             group.halfPeriodSamples = meanHalfPeriod;
             group.frequencyHz =
-                geometry.standard.sampleClockHz * 4.0 /
+                inputSampleClockHz_ * 4.0 /
                 (2.0 * meanHalfPeriod);
             group.lobeCount = groupEnd - groupStart + 1;
             groups.push_back(group);
         }
 
         lobeIndex = groupEnd + 1;
+    }
+
+    for (int gi = 0; gi < groups.size() && gi < 8; ++gi)
+    {
+        const SignalGroup& g = groups[gi];
     }
 
     const auto indexToDisplayX =
@@ -2438,58 +2589,526 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
                 .normalized());
     }
 
+    // The normal detector remains the primary path.  Only when it has fewer
+    // than Ref + four groups do we try a stricter burst-only recovery pass.
+    // This recovery deliberately uses tighter period continuity so adjacent
+    // multiburst blocks (for example 2.8 and 3.8 MHz) cannot silently merge.
+    bool burstOnlyFallback = false;
+
     if (groups.size() < kMinimumSignalCount)
     {
-        return layout;
-    }
+        constexpr double kFallbackMaximumHalfPeriodVariation = 0.14;
+        QVector<SignalGroup> refinedGroups;
 
-    // If noise produced harmless extra periodic groups, keep at most the
-    // reference plus six strongest structures. Lobe count is the primary
-    // quality measure; horizontal duration breaks ties and favours the
-    // actual multiburst blocks.
-    if (groups.size() > kMaximumSignalCount)
-    {
-        std::sort(
-            groups.begin(),
-            groups.end(),
-            [](const SignalGroup& a,
-                const SignalGroup& b)
+        const auto appendStableSubgroups =
+            [&](const SignalGroup& sourceGroup)
             {
-                if (a.lobeCount != b.lobeCount)
+                int subgroupStart = sourceGroup.firstLobe;
+                QVector<double> subgroupHalfPeriods;
+
+                const auto flushSubgroup =
+                    [&](int subgroupEnd)
+                    {
+                        if (subgroupEnd <= subgroupStart ||
+                            subgroupHalfPeriods.isEmpty())
+                        {
+                            return;
+                        }
+
+                        const double meanHalfPeriod =
+                            std::accumulate(
+                                subgroupHalfPeriods.cbegin(),
+                                subgroupHalfPeriods.cend(),
+                                0.0) /
+                            static_cast<double>(subgroupHalfPeriods.size());
+
+                        if (meanHalfPeriod <= 1.0)
+                        {
+                            return;
+                        }
+
+                        SignalGroup subgroup;
+                        subgroup.firstLobe = subgroupStart;
+                        subgroup.lastLobe = subgroupEnd;
+                        subgroup.firstSample = lobes[subgroupStart].first;
+                        subgroup.lastSample = lobes[subgroupEnd].last;
+                        subgroup.halfPeriodSamples = meanHalfPeriod;
+                        subgroup.frequencyHz =
+                            inputSampleClockHz_ * 4.0 /
+                            (2.0 * meanHalfPeriod);
+                        subgroup.lobeCount =
+                            subgroupEnd - subgroupStart + 1;
+
+                        refinedGroups.push_back(subgroup);
+                    };
+
+                for (int currentLobe = sourceGroup.firstLobe + 1;
+                    currentLobe <= sourceGroup.lastLobe;
+                    ++currentLobe)
                 {
-                    return a.lobeCount > b.lobeCount;
+                    const double halfPeriod =
+                        lobes[currentLobe].center() -
+                        lobes[currentLobe - 1].center();
+
+                    if (!subgroupHalfPeriods.isEmpty())
+                    {
+                        const double meanHalfPeriod =
+                            std::accumulate(
+                                subgroupHalfPeriods.cbegin(),
+                                subgroupHalfPeriods.cend(),
+                                0.0) /
+                            static_cast<double>(subgroupHalfPeriods.size());
+
+                        if (relativeVariation(
+                                halfPeriod,
+                                meanHalfPeriod) >
+                            kFallbackMaximumHalfPeriodVariation)
+                        {
+                            flushSubgroup(currentLobe - 1);
+                            subgroupStart = currentLobe - 1;
+                            subgroupHalfPeriods.clear();
+                        }
+                    }
+
+                    subgroupHalfPeriods.push_back(halfPeriod);
                 }
 
-                return a.length() > b.length();
-            });
+                flushSubgroup(sourceGroup.lastLobe);
+            };
 
-        groups.resize(kMaximumSignalCount);
-    }
-
-    // The reference is not hard-coded to a location or nominal frequency:
-    // measure the discovered periodic groups and take the slowest one.
-    int referenceGroupIndex = 0;
-
-    for (int i = 1; i < groups.size(); ++i)
-    {
-        if (groups[i].frequencyHz <
-            groups[referenceGroupIndex].frequencyHz)
+        for (const SignalGroup& group : groups)
         {
-            referenceGroupIndex = i;
+            appendStableSubgroups(group);
+        }
+
+        if (refinedGroups.size() >= kMinimumMultiburstBursts)
+        {
+            groups = refinedGroups;
+            burstOnlyFallback = true;
+        }
+        else
+        {
+            return layout;
         }
     }
 
-    const SignalGroup referenceGroup =
-        groups[referenceGroupIndex];
+    // Manual Ref is an explicit user override: it is never reclassified.
+    // Keep only periodic groups to the right of the drawn Ref and treat those
+    // as MB candidates.  This deliberately bypasses automatic Ref discovery.
+    if (manualReferenceRect != nullptr &&
+        !manualReferenceRect->isEmpty())
+    {
+        QVector<SignalGroup> manualBurstGroups;
+        manualBurstGroups.reserve(groups.size());
+
+        const double referenceRightX =
+            manualReferenceRect->right();
+
+        for (const SignalGroup& group : groups)
+        {
+            const double centerX =
+                indexToDisplayX(
+                    static_cast<int>(std::lround(
+                        0.5 *
+                        (static_cast<double>(group.firstSample) +
+                         static_cast<double>(group.lastSample)))));
+
+            if (centerX > referenceRightX)
+            {
+                manualBurstGroups.push_back(group);
+            }
+        }
+
+        std::sort(
+            manualBurstGroups.begin(),
+            manualBurstGroups.end(),
+            [](const SignalGroup& a, const SignalGroup& b)
+            {
+                return a.firstSample < b.firstSample;
+            });
+
+        if (manualBurstGroups.size() > kExpectedMultiburstBursts)
+        {
+            // Keep the same conservative quality preference as automatic
+            // discovery, but never reinterpret the manual Ref itself.
+            std::sort(
+                manualBurstGroups.begin(),
+                manualBurstGroups.end(),
+                [](const SignalGroup& a, const SignalGroup& b)
+                {
+                    if (a.lobeCount != b.lobeCount)
+                    {
+                        return a.lobeCount > b.lobeCount;
+                    }
+
+                    return a.length() > b.length();
+                });
+
+            manualBurstGroups.resize(kExpectedMultiburstBursts);
+
+            std::sort(
+                manualBurstGroups.begin(),
+                manualBurstGroups.end(),
+                [](const SignalGroup& a, const SignalGroup& b)
+                {
+                    return a.firstSample < b.firstSample;
+                });
+        }
+
+        if (manualBurstGroups.size() < kMinimumMultiburstBursts)
+        {
+            return layout;
+        }
+
+        layout.referenceRect = *manualReferenceRect;
+        layout.referenceFrequencyMHz = 0.0;
+        groups = manualBurstGroups;
+    }
+    else
+    {
+        // If noise produced harmless extra periodic groups, keep at most the
+        // reference plus six strongest structures. Lobe count is the primary
+        // quality measure; horizontal duration breaks ties and favours the
+        // actual multiburst blocks.
+        if (groups.size() > kMaximumSignalCount)
+        {
+            std::sort(
+                groups.begin(),
+                groups.end(),
+                [](const SignalGroup& a,
+                    const SignalGroup& b)
+                {
+                    if (a.lobeCount != b.lobeCount)
+                    {
+                        return a.lobeCount > b.lobeCount;
+                    }
+
+                    return a.length() > b.length();
+                });
+
+            groups.resize(kMaximumSignalCount);
+        }
+    }
 
     QVector<SignalGroup> burstGroups;
     burstGroups.reserve(kExpectedMultiburstBursts);
 
-    for (int i = 0; i < groups.size(); ++i)
+    bool automaticReference =
+        manualReferenceRect == nullptr ||
+        manualReferenceRect->isEmpty();
+
+    // Ref-only geometry aid: find the real five-block train *after* a local
+    // tighter re-split and sinus validation.  The normal analogue detector is
+    // not changed; this only prevents unrelated periodic structures far to the
+    // left/right from being chosen as Ref and prevents a merged 2.8/3.8 MHz
+    // group from hiding the equidistant five-block sequence.
+    bool equidistantSequenceSelected = false;
+
+    if (automaticReference)
     {
-        if (i != referenceGroupIndex)
+        constexpr double kSequenceMaximumHalfPeriodVariation = 0.14;
+        constexpr int kSequenceGroupCount = 5; // Ref + four MB blocks
+        constexpr double kMaximumSpacingVariation = 0.25;
+        constexpr double kMaximumFrequencyStepVariation = 0.35;
+        constexpr double kMaximumDiscoveryFrequencyError = 0.15;
+
+        QVector<SignalGroup> sequenceGroups;
+
+        const auto appendSequenceSubgroups =
+            [&](const SignalGroup& sourceGroup)
+            {
+                int subgroupStart = sourceGroup.firstLobe;
+                QVector<double> subgroupHalfPeriods;
+
+                const auto flushSubgroup =
+                    [&](int subgroupEnd)
+                    {
+                        if (subgroupEnd <= subgroupStart ||
+                            subgroupHalfPeriods.isEmpty())
+                        {
+                            return;
+                        }
+
+                        const double meanHalfPeriod =
+                            std::accumulate(
+                                subgroupHalfPeriods.cbegin(),
+                                subgroupHalfPeriods.cend(),
+                                0.0) /
+                            static_cast<double>(subgroupHalfPeriods.size());
+
+                        if (meanHalfPeriod <= 1.0)
+                        {
+                            return;
+                        }
+
+                        SignalGroup subgroup;
+                        subgroup.firstLobe = subgroupStart;
+                        subgroup.lastLobe = subgroupEnd;
+                        subgroup.firstSample = lobes[subgroupStart].first;
+                        subgroup.lastSample = lobes[subgroupEnd].last;
+                        subgroup.halfPeriodSamples = meanHalfPeriod;
+                        subgroup.frequencyHz =
+                            inputSampleClockHz_ * 4.0 /
+                            (2.0 * meanHalfPeriod);
+                        subgroup.lobeCount =
+                            subgroupEnd - subgroupStart + 1;
+
+                        sequenceGroups.push_back(subgroup);
+                    };
+
+                for (int currentLobe = sourceGroup.firstLobe + 1;
+                    currentLobe <= sourceGroup.lastLobe;
+                    ++currentLobe)
+                {
+                    const double halfPeriod =
+                        lobes[currentLobe].center() -
+                        lobes[currentLobe - 1].center();
+
+                    if (!subgroupHalfPeriods.isEmpty())
+                    {
+                        const double meanHalfPeriod =
+                            std::accumulate(
+                                subgroupHalfPeriods.cbegin(),
+                                subgroupHalfPeriods.cend(),
+                                0.0) /
+                            static_cast<double>(subgroupHalfPeriods.size());
+
+                        if (relativeVariation(
+                                halfPeriod,
+                                meanHalfPeriod) >
+                            kSequenceMaximumHalfPeriodVariation)
+                        {
+                            flushSubgroup(currentLobe - 1);
+                            subgroupStart = currentLobe - 1;
+                            subgroupHalfPeriods.clear();
+                        }
+                    }
+
+                    subgroupHalfPeriods.push_back(halfPeriod);
+                }
+
+                flushSubgroup(sourceGroup.lastLobe);
+            };
+
+        for (const SignalGroup& group : groups)
         {
-            burstGroups.push_back(groups[i]);
+            appendSequenceSubgroups(group);
+        }
+
+        struct SequenceCandidate
+        {
+            SignalGroup group;
+            double frequencyMHz = 0.0;
+        };
+
+        QVector<SequenceCandidate> candidates;
+        candidates.reserve(sequenceGroups.size());
+
+
+        for (const SignalGroup& group : sequenceGroups)
+        {
+            const QRectF compactRect(
+                QPointF(
+                    indexToDisplayX(group.firstSample),
+                    geometry.scopeRect.top()),
+                QPointF(
+                    indexToDisplayX(group.lastSample),
+                    geometry.scopeRect.bottom()));
+
+            const AreaAnalysisResult sinus =
+                analyzeSelection(compactRect.normalized());
+
+            if (!sinus.valid || sinus.frequencyMHz <= 0.0)
+            {
+                continue;
+            }
+
+            const double discoveryFrequencyMHz =
+                group.frequencyHz / 1.0e6;
+
+            if (relativeVariation(
+                    sinus.frequencyMHz,
+                    discoveryFrequencyMHz) >
+                kMaximumDiscoveryFrequencyError)
+            {
+                continue;
+            }
+
+            candidates.push_back(
+                SequenceCandidate{ group, sinus.frequencyMHz });
+        }
+
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](const SequenceCandidate& a,
+               const SequenceCandidate& b)
+            {
+                return a.group.firstSample < b.group.firstSample;
+            });
+
+        const auto center =
+            [](const SignalGroup& group)
+            {
+                return 0.5 *
+                    (static_cast<double>(group.firstSample) +
+                     static_cast<double>(group.lastSample));
+            };
+
+        int bestStart = -1;
+        double bestScore = std::numeric_limits<double>::infinity();
+
+        for (int start = 0;
+            start + kSequenceGroupCount <= candidates.size();
+            ++start)
+        {
+            QVector<double> spacings;
+            QVector<double> frequencySteps;
+            spacings.reserve(kSequenceGroupCount - 1);
+            frequencySteps.reserve(kSequenceGroupCount - 1);
+
+            bool usable = true;
+
+            for (int i = 1; i < kSequenceGroupCount; ++i)
+            {
+                const auto& previous = candidates[start + i - 1];
+                const auto& current = candidates[start + i];
+
+                const double spacing =
+                    center(current.group) - center(previous.group);
+                const double frequencyStep =
+                    current.frequencyMHz - previous.frequencyMHz;
+
+                if (spacing <= 1.0 || frequencyStep <= 0.0)
+                {
+                    usable = false;
+                    break;
+                }
+
+                spacings.push_back(spacing);
+                frequencySteps.push_back(frequencyStep);
+            }
+
+            if (!usable)
+            {
+                continue;
+            }
+
+            const auto median =
+                [](QVector<double> values)
+                {
+                    std::sort(values.begin(), values.end());
+                    const int middle = values.size() / 2;
+                    return
+                        (values.size() & 1) != 0
+                        ? values[middle]
+                        : 0.5 * (values[middle - 1] + values[middle]);
+                };
+
+            const double medianSpacing = median(spacings);
+            const double medianFrequencyStep = median(frequencySteps);
+
+            if (medianSpacing <= 1.0 || medianFrequencyStep <= 0.0)
+            {
+                continue;
+            }
+
+            double maximumSpacingVariation = 0.0;
+            for (double spacing : spacings)
+            {
+                maximumSpacingVariation =
+                    (std::max)(
+                        maximumSpacingVariation,
+                        relativeVariation(spacing, medianSpacing));
+            }
+
+            if (maximumSpacingVariation > kMaximumSpacingVariation)
+            {
+                continue;
+            }
+
+            double maximumFrequencyStepVariation = 0.0;
+            for (double step : frequencySteps)
+            {
+                maximumFrequencyStepVariation =
+                    (std::max)(
+                        maximumFrequencyStepVariation,
+                        relativeVariation(step, medianFrequencyStep));
+            }
+
+            if (maximumFrequencyStepVariation >
+                kMaximumFrequencyStepVariation)
+            {
+                continue;
+            }
+
+            const double score =
+                maximumSpacingVariation +
+                0.5 * maximumFrequencyStepVariation;
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestStart = start;
+            }
+        }
+
+        if (bestStart >= 0)
+        {
+            QVector<SignalGroup> sequence;
+            sequence.reserve(kSequenceGroupCount);
+
+            for (int i = 0; i < kSequenceGroupCount; ++i)
+            {
+                sequence.push_back(
+                    candidates[bestStart + i].group);
+            }
+
+            groups = sequence;
+            equidistantSequenceSelected = true;
+
+            // This is a complete Ref + MB train, not a Ref-less fallback.
+            burstOnlyFallback = false;
+        }
+    }
+
+    bool havePeriodicReference = false;
+    SignalGroup referenceGroup;
+
+    if (!automaticReference)
+    {
+        burstGroups = groups;
+    }
+    else if (burstOnlyFallback)
+    {
+        // Strict recovery path: Ref was not discovered as a periodic group.
+        // These groups were re-split with tighter period continuity above.
+        burstGroups = groups;
+    }
+    else
+    {
+        // Existing analogue-friendly rule: start with the slowest periodic
+        // group as Ref.  A geometry sanity check below may reject only Ref.
+        int referenceGroupIndex = 0;
+
+        for (int i = 1; i < groups.size(); ++i)
+        {
+            if (groups[i].frequencyHz <
+                groups[referenceGroupIndex].frequencyHz)
+            {
+                referenceGroupIndex = i;
+            }
+        }
+
+        referenceGroup = groups[referenceGroupIndex];
+        havePeriodicReference = true;
+
+        for (int i = 0; i < groups.size(); ++i)
+        {
+            if (i != referenceGroupIndex)
+            {
+                burstGroups.push_back(groups[i]);
+            }
         }
     }
 
@@ -2506,6 +3125,422 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
     {
         return layout;
     }
+
+    double firstValidatedBurstVppVolts = 0.0;
+    bool referenceUsesPlateau = false;
+
+    // Every candidate that is going to be labelled MB must actually be a
+    // stable sinus. Discovery lobes are only candidates; they are not proof.
+    // This prevents plateaus/edges beside the multiburst from becoming MB
+    // zones. The discovery frequency must also agree with the actual sinus
+    // analysis.
+    {
+        QVector<SignalGroup> validatedBursts;
+        QVector<double> validatedFrequenciesMHz;
+
+        for (const SignalGroup& group : burstGroups)
+        {
+            const QRectF compactRect(
+                QPointF(
+                    indexToDisplayX(group.firstSample),
+                    geometry.scopeRect.top()),
+                QPointF(
+                    indexToDisplayX(group.lastSample),
+                    geometry.scopeRect.bottom()));
+
+            const AreaAnalysisResult sinus =
+                analyzeSelection(compactRect.normalized());
+
+            const double discoveryFrequencyMHz =
+                group.frequencyHz / 1.0e6;
+
+            constexpr double kMaximumDiscoveryFrequencyError = 0.15;
+
+            bool burstValid =
+                sinus.valid &&
+                sinus.frequencyMHz > 0.0;
+
+            double burstFrequencyMHz =
+                burstValid ? sinus.frequencyMHz : 0.0;
+
+            double burstVppVolts =
+                burstValid && sinus.vppMillivolts > 0
+                ? static_cast<double>(sinus.vppMillivolts) / 1000.0
+                : 0.0;
+
+            // Short multiburst blocks can contain more than two cycles in
+            // total while exposing only one complete rising-edge-to-rising-edge
+            // cycle to analyzeSelection().  In that case the general-purpose
+            // two-stable-cycle rule is overly conservative.  Keep that rule
+            // unchanged globally, but allow this MB-only fallback when:
+            //   * one complete cycle can be measured,
+            //   * the full discovered block is wider than two such cycles,
+            //   * a sine fit over the complete block succeeds, and
+            //   * the measured frequency agrees with discovery.
+            if (!burstValid)
+            {
+                const int first = std::clamp(
+                    group.firstSample, 0, sampleCount - 1);
+                const int last = std::clamp(
+                    group.lastSample, 0, sampleCount - 1);
+
+                if (last - first >= 12)
+                {
+                    QVector<double> selected;
+                    selected.reserve(last - first + 1);
+
+                    for (int i = first; i <= last; ++i)
+                    {
+                        selected.push_back(
+                            static_cast<double>(measurementLuma_[i]));
+                    }
+
+                    const double mean =
+                        std::accumulate(
+                            selected.cbegin(),
+                            selected.cend(),
+                            0.0) /
+                        static_cast<double>(selected.size());
+
+                    QVector<double> crossings;
+                    for (int i = 0; i + 1 < selected.size(); ++i)
+                    {
+                        const double a = selected[i] - mean;
+                        const double b = selected[i + 1] - mean;
+
+                        if (a <= 0.0 && b > 0.0)
+                        {
+                            const double denominator = b - a;
+                            const double fraction =
+                                std::abs(denominator) > 1.0e-12
+                                ? -a / denominator
+                                : 0.0;
+
+                            crossings.push_back(
+                                static_cast<double>(i) +
+                                std::clamp(fraction, 0.0, 1.0));
+                        }
+                    }
+
+                    double measuredPeriod = 0.0;
+                    if (crossings.size() >= 2)
+                    {
+                        // With only one complete cycle this is simply its
+                        // period. If more are present, average them; the
+                        // normal validator would usually already have passed.
+                        double periodSum = 0.0;
+                        int periodCount = 0;
+
+                        for (int i = 0; i + 1 < crossings.size(); ++i)
+                        {
+                            const double period =
+                                crossings[i + 1] - crossings[i];
+
+                            if (period >= 4.0)
+                            {
+                                periodSum += period;
+                                ++periodCount;
+                            }
+                        }
+
+                        if (periodCount > 0)
+                        {
+                            measuredPeriod =
+                                periodSum /
+                                static_cast<double>(periodCount);
+                        }
+                    }
+
+                    if (measuredPeriod > 0.0)
+                    {
+                        const double estimatedCycles =
+                            static_cast<double>(selected.size()) /
+                            measuredPeriod;
+
+                        const double reconstructedSampleClockHz =
+                            inputSampleClockHz_ * 4.0;
+
+                        const double measuredFrequencyMHz =
+                            reconstructedSampleClockHz /
+                            measuredPeriod /
+                            1.0e6;
+
+                        const SineFitResult fit =
+                            fitSineAtMeasuredPeriod(
+                                selected,
+                                0,
+                                static_cast<int>(selected.size()) - 1,
+                                measuredPeriod);
+
+                        if (estimatedCycles > 2.0 &&
+                            fit.valid &&
+                            fit.peak >= kMinimumPeakVolts &&
+                            relativeVariation(
+                                measuredFrequencyMHz,
+                                discoveryFrequencyMHz) <=
+                                kMaximumDiscoveryFrequencyError)
+                        {
+                            burstValid = true;
+                            burstFrequencyMHz = measuredFrequencyMHz;
+                            burstVppVolts = fit.vpp;
+
+                        }
+                    }
+                }
+            }
+
+            if (!burstValid)
+            {
+                continue;
+            }
+
+            if (relativeVariation(
+                    burstFrequencyMHz,
+                    discoveryFrequencyMHz) >
+                kMaximumDiscoveryFrequencyError)
+            {
+                continue;
+            }
+
+            validatedBursts.push_back(group);
+            validatedFrequenciesMHz.push_back(burstFrequencyMHz);
+
+            if (firstValidatedBurstVppVolts <= 0.0 &&
+                burstVppVolts > 0.0)
+            {
+                firstValidatedBurstVppVolts = burstVppVolts;
+            }
+        }
+
+        if (validatedBursts.size() < kMinimumMultiburstBursts)
+        {
+            return layout;
+        }
+
+        // A missing middle burst must not be silently relabelled.
+        if (validatedFrequenciesMHz.size() >= 4)
+        {
+            QVector<double> frequencySteps;
+            frequencySteps.reserve(validatedFrequenciesMHz.size() - 1);
+
+            for (int i = 1; i < validatedFrequenciesMHz.size(); ++i)
+            {
+                const double step =
+                    validatedFrequenciesMHz[i] -
+                    validatedFrequenciesMHz[i - 1];
+
+                if (step <= 0.0)
+                {
+                    return layout;
+                }
+
+                frequencySteps.push_back(step);
+            }
+
+            QVector<double> sortedSteps = frequencySteps;
+            std::sort(sortedSteps.begin(), sortedSteps.end());
+
+            const int middle = sortedSteps.size() / 2;
+            const double medianStep =
+                (sortedSteps.size() & 1) != 0
+                ? sortedSteps[middle]
+                : 0.5 *
+                    (sortedSteps[middle - 1] + sortedSteps[middle]);
+
+            constexpr double kMaximumNormalStepRatio = 1.55;
+            constexpr double kMaximumSingleMissingStepRatio = 2.50;
+
+            if (medianStep > 0.0)
+            {
+                int missingBurstJumps = 0;
+
+                for (double step : frequencySteps)
+                {
+                    const double stepRatio =
+                        step / medianStep;
+
+                    if (stepRatio <= kMaximumNormalStepRatio)
+                    {
+                        continue;
+                    }
+
+                    // Some generators intentionally omit one position in the
+                    // otherwise regular multiburst sequence. Allow exactly one
+                    // such approximately-double frequency jump.
+                    if (stepRatio <= kMaximumSingleMissingStepRatio &&
+                        missingBurstJumps == 0)
+                    {
+                        ++missingBurstJumps;
+
+
+                        continue;
+                    }
+
+                    return layout;
+                }
+            }
+        }
+
+        burstGroups = validatedBursts;
+    }
+
+    // Ref-only geometry sanity check. A periodic Ref should sit roughly one
+    // normal MB-block spacing before MB1. An automatic Ref that is far away
+    // is not a Ref; do not manufacture a replacement window.
+    if (automaticReference)
+    {
+        // Ref is optional.  A valid multiburst sequence must not become
+        // MULTIBURST NOT FOUND merely because this line contains no separate
+        // periodic reference burst.
+        if (!havePeriodicReference || burstOnlyFallback)
+        {
+            havePeriodicReference = false;
+        }
+
+        if (havePeriodicReference)
+        {
+            const QRectF compactReferenceRect(
+                QPointF(
+                    indexToDisplayX(referenceGroup.firstSample),
+                    geometry.scopeRect.top()),
+                QPointF(
+                    indexToDisplayX(referenceGroup.lastSample),
+                    geometry.scopeRect.bottom()));
+
+            const AreaAnalysisResult referenceSinus =
+                analyzeSelection(compactReferenceRect.normalized());
+
+            if (!referenceSinus.valid ||
+                referenceSinus.frequencyMHz <= 0.0)
+            {
+                bool referenceIsFirstGroup = true;
+                for (const SignalGroup& group : groups)
+                {
+                    if (group.firstSample < referenceGroup.firstSample)
+                    {
+                        referenceIsFirstGroup = false;
+                        break;
+                    }
+                }
+
+                // A slow square/tabletop reference is periodic enough for
+                // discovery but intentionally fails the sine fit.  In that
+                // case try the existing dominant-plateau analyser.  Accept it
+                // only when its Vpp agrees with MB1 within +/-3 dB; this keeps
+                // the common half-amplitude/wrong-tabletop edge case out.
+                const ReferenceAnalysisResult tabletop =
+                    analyzeReferenceSelection(
+                        compactReferenceRect.normalized());
+
+                if (referenceIsFirstGroup &&
+                    tabletop.valid &&
+                    tabletop.vppVolts > 0.0 &&
+                    firstValidatedBurstVppVolts > 0.0)
+                {
+                    const double levelDifferenceDb =
+                        20.0 * std::log10(
+                            tabletop.vppVolts /
+                            firstValidatedBurstVppVolts);
+
+                    constexpr double kMaximumTabletopLevelDifferenceDb = 3.0;
+
+                    if (std::abs(levelDifferenceDb) <=
+                        kMaximumTabletopLevelDifferenceDb)
+                    {
+                        referenceUsesPlateau = true;
+                    }
+                    else
+                    {
+                        havePeriodicReference = false;
+                    }
+                }
+                else
+                {
+                    // The MB sequence may still be perfectly valid.
+                    havePeriodicReference = false;
+                }
+            }
+            else
+            {
+                constexpr double kMaximumReferenceFrequencyError = 0.15;
+                const double discoveredReferenceMHz =
+                    referenceGroup.frequencyHz / 1.0e6;
+
+                if (relativeVariation(
+                        referenceSinus.frequencyMHz,
+                        discoveredReferenceMHz) >
+                    kMaximumReferenceFrequencyError)
+                {
+                    havePeriodicReference = false;
+                }
+            }
+        }
+    }
+
+    if (automaticReference && havePeriodicReference &&
+        !referenceUsesPlateau &&
+        burstGroups.size() >= 3)
+    {
+        QVector<double> spacings;
+        spacings.reserve(burstGroups.size() - 1);
+
+        const auto groupCenter =
+            [](const SignalGroup& group)
+            {
+                return 0.5 *
+                    (static_cast<double>(group.firstSample) +
+                     static_cast<double>(group.lastSample));
+            };
+
+        for (int i = 1; i < burstGroups.size(); ++i)
+        {
+            spacings.push_back(
+                groupCenter(burstGroups[i]) -
+                groupCenter(burstGroups[i - 1]));
+        }
+
+        std::sort(spacings.begin(), spacings.end());
+        const int middle = spacings.size() / 2;
+        const double normalSpacing =
+            (spacings.size() & 1) != 0
+            ? spacings[middle]
+            : 0.5 * (spacings[middle - 1] + spacings[middle]);
+
+        const double refSpacing =
+            groupCenter(burstGroups.front()) -
+            groupCenter(referenceGroup);
+
+        constexpr double kMinimumRefSpacingRatio = 0.60;
+        constexpr double kMaximumRefSpacingRatio = 1.40;
+
+        if (normalSpacing > 1.0)
+        {
+            const double ratio = refSpacing / normalSpacing;
+
+            if (ratio < kMinimumRefSpacingRatio ||
+                ratio > kMaximumRefSpacingRatio)
+            {
+                // This periodic group is not geometrically a Ref. Put it
+                // back into the MB candidate sequence instead of rejecting
+                // an otherwise valid multiburst.
+                burstGroups.push_back(referenceGroup);
+                std::sort(
+                    burstGroups.begin(),
+                    burstGroups.end(),
+                    [](const SignalGroup& a, const SignalGroup& b)
+                    {
+                        return a.firstSample < b.firstSample;
+                    });
+                havePeriodicReference = false;
+            }
+        }
+    }
+
+    // Ref selection is geometric here: when five valid periodic blocks form
+    // the multiburst train at the expected spacing, the leftmost/lowest
+    // frequency block is the reference.  Do not demote it merely because
+    // Ref->MB1 has the same frequency step as the MB sequence; that is
+    // exactly the layout used by the PM5644 multiburst.
 
     const auto expandedGroupRect =
         [&](const SignalGroup& group,
@@ -2538,31 +3573,32 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
                 .normalized();
         };
 
-    // Reference gets a generous window around its two dominant lobes.  The
-    // existing reference analyser then determines the actual HIGH/LOW levels
-    // over four frames; discovery does not invent the Ref amplitude.
-    int referenceLeftLimit = 0;
-    int referenceRightLimit = sampleCount - 1;
-
-    for (const SignalGroup& group : groups)
+    if (automaticReference && havePeriodicReference)
     {
-        if (group.firstSample > referenceGroup.lastSample)
-        {
-            referenceRightLimit =
-                referenceGroup.lastSample +
-                (group.firstSample - referenceGroup.lastSample) / 2;
-            break;
-        }
+        // Automatic Ref is itself a discovered periodic signal.  Keep the
+        // selection close to that sinus so unrelated picture content to the
+        // left/right can never influence the Ref level measurement.
+        const int refPad =
+            (std::max)(
+                2,
+                static_cast<int>(
+                    std::lround(referenceGroup.halfPeriodSamples * 0.5)));
+
+        const int first =
+            (std::max)(0, referenceGroup.firstSample - refPad);
+        const int last =
+            (std::min)(sampleCount - 1, referenceGroup.lastSample + refPad);
+
+        layout.referenceRect =
+            QRectF(
+                QPointF(indexToDisplayX(first), geometry.scopeRect.top()),
+                QPointF(indexToDisplayX(last), geometry.scopeRect.bottom()))
+                .normalized();
+
+        layout.referenceFrequencyMHz =
+            referenceGroup.frequencyHz / 1.0e6;
+        layout.referenceUsesPlateau = referenceUsesPlateau;
     }
-
-    layout.referenceRect =
-        expandedGroupRect(
-            referenceGroup,
-            referenceLeftLimit,
-            referenceRightLimit);
-
-    layout.referenceFrequencyMHz =
-        referenceGroup.frequencyHz / 1.0e6;
 
     layout.burstRects.clear();
     layout.burstRects.reserve(kExpectedMultiburstBursts);
@@ -2581,11 +3617,26 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
                 previous.lastSample +
                 (group.firstSample - previous.lastSample) / 2;
         }
-        else if (referenceGroup.firstSample < group.firstSample)
+        else if (automaticReference &&
+            havePeriodicReference &&
+            referenceGroup.firstSample < group.firstSample)
         {
             leftLimit =
                 referenceGroup.lastSample +
                 (group.firstSample - referenceGroup.lastSample) / 2;
+        }
+        else if (!automaticReference)
+        {
+            // Respect the user's explicit Ref boundary.
+            const double normalized =
+                (manualReferenceRect->right() - geometry.scopeRect.left()) /
+                (std::max)(1.0, geometry.scopeRect.width());
+            leftLimit =
+                std::clamp(
+                    static_cast<int>(std::lround(normalized *
+                        static_cast<double>(sampleCount - 1))),
+                    0,
+                    sampleCount - 1);
         }
 
         if (i + 1 < burstGroups.size())
@@ -2596,11 +3647,30 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout() const
                 (next.firstSample - group.lastSample) / 2;
         }
 
+        // Keep the measurement zone tight around the actual periodic group.
+        // The old half-gap expansion pulled non-sinus content into MB1/MBn.
+        const int burstPad =
+            (std::max)(
+                2,
+                static_cast<int>(
+                    std::lround(group.halfPeriodSamples * 0.5)));
+
+        int first =
+            (std::max)(leftLimit, group.firstSample - burstPad);
+        int last =
+            (std::min)(rightLimit, group.lastSample + burstPad);
+
+        if (last <= first)
+        {
+            first = group.firstSample;
+            last = group.lastSample;
+        }
+
         layout.burstRects.push_back(
-            expandedGroupRect(
-                group,
-                leftLimit,
-                rightLimit));
+            QRectF(
+                QPointF(indexToDisplayX(first), geometry.scopeRect.top()),
+                QPointF(indexToDisplayX(last), geometry.scopeRect.bottom()))
+                .normalized());
     }
 
     layout.valid = true;
@@ -2886,7 +3956,7 @@ WaveformWidget::AreaAnalysisResult WaveformWidget::analyzeSelection(
         cycles[representativeCycleIndex];
 
     const double reconstructedSampleClockHz =
-        geometry.standard.sampleClockHz * 4.0;
+        inputSampleClockHz_ * 4.0;
 
     result.valid = true;
     result.frequencyMHz =
@@ -2996,7 +4066,8 @@ WaveformWidget::AreaAnalysisResult WaveformWidget::analyzeSelection(
 }
 
 WaveformWidget::ReferenceAnalysisResult WaveformWidget::analyzeReferenceSelection(
-    const QRectF& selectionRect) const
+    const QRectF& selectionRect,
+    double preferredVppVolts) const
 {
     ReferenceAnalysisResult result;
 
@@ -3222,8 +4293,12 @@ WaveformWidget::ReferenceAnalysisResult WaveformWidget::analyzeReferenceSelectio
             int bestSecond = -1;
             int bestCombinedSamples = -1;
             int bestSmallerPlateau = -1;
+            double bestPreferredSpanError =
+                std::numeric_limits<double>::infinity();
 
             constexpr double kMinimumReferenceSpanVolts = 0.1;
+            const bool preferExpectedSpan =
+                preferredVppVolts >= kMinimumReferenceSpanVolts;
 
             for (int first = 0;
                 first < static_cast<int>(clusters.size());
@@ -3251,17 +4326,42 @@ WaveformWidget::ReferenceAnalysisResult WaveformWidget::analyzeReferenceSelectio
                             clusters[first].sampleCount,
                             clusters[second].sampleCount);
 
-                    // Primary score: how much of the selected X-range is
-                    // explained by the pair. Tie-breaker: prefer a pair in
-                    // which BOTH plateaus have substantial occupancy.
-                    if (combinedSamples > bestCombinedSamples ||
-                        (combinedSamples == bestCombinedSamples &&
-                            smallerPlateau > bestSmallerPlateau))
+                    if (preferExpectedSpan)
                     {
-                        bestCombinedSamples = combinedSamples;
-                        bestSmallerPlateau = smallerPlateau;
-                        bestFirst = first;
-                        bestSecond = second;
+                        // Multiburst fallback only: the normal reference
+                        // analyser already picked a plausible pair, but its
+                        // Vpp was grossly inconsistent with the measured
+                        // burst amplitudes. In that exceptional case prefer
+                        // the plateau pair whose separation best matches the
+                        // independently measured multiburst Vpp.
+                        const double spanError =
+                            std::abs(span - preferredVppVolts);
+
+                        if (spanError < bestPreferredSpanError ||
+                            (std::abs(spanError - bestPreferredSpanError) < 1.0e-9 &&
+                                combinedSamples > bestCombinedSamples))
+                        {
+                            bestPreferredSpanError = spanError;
+                            bestCombinedSamples = combinedSamples;
+                            bestSmallerPlateau = smallerPlateau;
+                            bestFirst = first;
+                            bestSecond = second;
+                        }
+                    }
+                    else
+                    {
+                        // Normal behaviour stays exactly as before: primary
+                        // score is horizontal occupancy, with both-plateau
+                        // occupancy as tie-breaker.
+                        if (combinedSamples > bestCombinedSamples ||
+                            (combinedSamples == bestCombinedSamples &&
+                                smallerPlateau > bestSmallerPlateau))
+                        {
+                            bestCombinedSamples = combinedSamples;
+                            bestSmallerPlateau = smallerPlateau;
+                            bestFirst = first;
+                            bestSecond = second;
+                        }
                     }
                 }
             }
@@ -3560,6 +4660,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
         painter.restore();
     }
+
 
     if (!multiburstStatus_.isEmpty())
     {
@@ -4487,7 +5588,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         const double startSourcePixels = displayXToSourcePixels(startPoint.x());
         const double endSourcePixels = displayXToSourcePixels(endPoint.x());
         const double deltaSourcePixels = std::abs(endSourcePixels - startSourcePixels);
-        const double deltaSeconds = deltaSourcePixels / sampleClockHz(geometry.standard);
+        const double deltaSeconds = deltaSourcePixels / inputSampleClockHz_;
 
         QString frequencyText = QStringLiteral("∞ MHz");
         if (deltaSeconds > 1.0e-12)
@@ -4565,7 +5666,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
         const double lineTimeMicroseconds =
             static_cast<double>(sourcePixel) /
-            sampleClockHz(geometry.standard) *
+            inputSampleClockHz_ *
             1.0e6;
 
         text +=

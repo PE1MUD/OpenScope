@@ -25,6 +25,9 @@ bool Uyvy422ToYuv444Converter::convert(
         destination.resize(width, height);
     }
 
+    destination.sampleClockHz =
+        13'500'000.0;
+
     for (int line = 0; line < height; ++line)
     {
         const auto* src =

@@ -151,6 +151,9 @@ private:
     bool fitAspectRatio_ = true;
     int chromaFillIntensity_ = 64;
 
+    double inputSampleClockHz_ = 13'500'000.0;
+    int inputSampleWidth_ = 720;
+
     WaveformSettings settings_;
 
     OpenScopeSettings::AspectRatio aspectRatio_ =

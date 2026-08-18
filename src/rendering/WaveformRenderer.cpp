@@ -446,6 +446,14 @@ void WaveformRenderer::setScrollPosition(
 void WaveformRenderer::analyze(
     const Yuv444Frame& frame)
 {
+    inputSampleClockHz_ =
+        frame.sampleClockHz > 0.0
+        ? frame.sampleClockHz
+        : 13'500'000.0;
+
+    inputSampleWidth_ =
+        std::max(frame.width, 1);
+
     const std::size_t requiredSamples =
         frame.width > 0 &&
         frame.height > 0
@@ -2354,15 +2362,14 @@ const std::vector<float>& WaveformRenderer::visibleLumaVolts() const noexcept
 
 double WaveformRenderer::traceBandwidthMHz() const
 {
-    constexpr double captureSampleRateMHz = 13.5;
-    constexpr double captureSamplesPerLine = 720.0;
+    const double captureSampleRateMHz =
+        inputSampleClockHz_ / 1'000'000.0;
 
     return
         captureSampleRateMHz *
-        static_cast<double>(
-            image_.width()) /
+        static_cast<double>(image_.width()) /
         (
-            captureSamplesPerLine *
+            static_cast<double>(inputSampleWidth_) *
             kPixelsPerCycleForTraceBW);
 }
 

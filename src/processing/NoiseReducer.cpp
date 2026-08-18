@@ -143,6 +143,8 @@ void NoiseReducer::process(
             source.height);
     }
 
+    destination.sampleClockHz = source.sampleClockHz;
+
     const int clampedIntensity =
         std::clamp(
             intensity,

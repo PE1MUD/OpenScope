@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.6.2
+    VERSION 0.6.3
     LANGUAGES C CXX
 )
 
@@ -128,6 +128,11 @@ src/VideoEngine.h
 src/VideoEngine.cpp
 src/VideoSource.h
 src/VideoSource.cpp
+
+    src/sources/philips/PhilipsPatternRomDecoder.h
+    src/sources/philips/PhilipsPatternRomDecoder.cpp
+    src/sources/philips/PhilipsPatternRomSource.h
+    src/sources/philips/PhilipsPatternRomSource.cpp
 src/DeckLinkProbe.h
 src/DeckLinkProbe.cpp
 src/DeckLinkInputCallback.h
