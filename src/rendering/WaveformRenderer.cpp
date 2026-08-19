@@ -730,6 +730,9 @@ void WaveformRenderer::renderSingleLine(
     sourceY_.resize(
         reconstructedViewWidth);
 
+    fullLumaVolts_.resize(
+        reconstructedWidth);
+
     const auto digitalLevels =
         levels(VideoStandard::pal625());
 
@@ -744,24 +747,31 @@ void WaveformRenderer::renderSingleLine(
             digitalLevels.yBlack);
 
     for (std::size_t x = 0;
-        x < reconstructedViewWidth;
+        x < reconstructedWidth;
         ++x)
     {
         const double y16 =
             static_cast<double>(
-                singleLineReconstructed_[
-                    reconstructedViewOffset +
-                        x]);
+                singleLineReconstructed_[x]);
 
         const double y10 =
             y16 /
             64.0;
 
-        sourceY_[x] =
+        fullLumaVolts_[x] =
             static_cast<float>(
                 analog.blackVolts +
                 (y10 - digitalLevels.yBlack) *
                 voltsPerCode);
+    }
+
+    for (std::size_t x = 0;
+        x < reconstructedViewWidth;
+        ++x)
+    {
+        sourceY_[x] =
+            fullLumaVolts_[
+                reconstructedViewOffset + x];
     }    /*
      * U/V are still native 720-sample data.
      * Map the same visible interval from the
@@ -2358,6 +2368,11 @@ const QImage& WaveformRenderer::image() const
 const std::vector<float>& WaveformRenderer::visibleLumaVolts() const noexcept
 {
     return sourceY_;
+}
+
+const std::vector<float>& WaveformRenderer::fullLumaVolts() const noexcept
+{
+    return fullLumaVolts_;
 }
 
 double WaveformRenderer::traceBandwidthMHz() const

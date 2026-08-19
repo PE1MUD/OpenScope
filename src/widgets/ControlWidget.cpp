@@ -828,6 +828,17 @@ ControlWidget::ControlWidget(
     miscLayout->addWidget(
         performanceCheckBox_);
 
+    auto* floatiesHomeButton =
+        new QPushButton(
+            "Floaties 2 Home",
+            miscTab);
+
+    floatiesHomeButton->setToolTip(
+        "Bring OpenScope floating windows back to visible positions on the current screen");
+
+    miscLayout->addWidget(
+        floatiesHomeButton);
+
     auto* spoutLabel =
         new QLabel(
             "Spout output",
@@ -913,6 +924,12 @@ ControlWidget::ControlWidget(
         &QCheckBox::toggled,
         this,
         &ControlWidget::performanceVisibilityChanged);
+
+    connect(
+        floatiesHomeButton,
+        &QPushButton::clicked,
+        this,
+        &ControlWidget::floatiesHomeRequested);
 
     connect(
         spoutVideoCheckBox,

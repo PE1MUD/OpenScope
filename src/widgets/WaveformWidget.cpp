@@ -24,389 +24,389 @@
 
 namespace
 {
-constexpr double kBlackLevelVolts = 0.3;
-constexpr double kWhiteLevelVolts = 1.0;
-constexpr double kMinimumPeakVolts = 0.1;
-constexpr double kMaximumVariation = 0.10;
-constexpr int kMinimumStableCycles = 2;
-constexpr int kTemporalMeasurementFrames = 4;
-constexpr int kMinimumTemporalValidFrames = 2;
-constexpr int kExpectedMultiburstBursts = 6;
-constexpr int kMinimumMultiburstBursts = 4;
-constexpr int kMultiburstSearchFrames = 8;
+    constexpr double kBlackLevelVolts = 0.3;
+    constexpr double kWhiteLevelVolts = 1.0;
+    constexpr double kMinimumPeakVolts = 0.1;
+    constexpr double kMaximumVariation = 0.10;
+    constexpr int kMinimumStableCycles = 2;
+    constexpr int kTemporalMeasurementFrames = 4;
+    constexpr int kMinimumTemporalValidFrames = 2;
+    constexpr int kExpectedMultiburstBursts = 6;
+    constexpr int kMinimumMultiburstBursts = 4;
+    constexpr int kMultiburstSearchFrames = 8;
 
-// Multiburst validity is deliberately conservative.  Use many LOCAL reference
-// windows instead of coarse whole-line bins: a different picture line can have
-// almost the same mean/RMS statistics when averaged over large regions.
-// Each reference window stores local mean + RMS, so analogue noise is averaged
-// out while gross spatial changes remain very obvious.
-constexpr int kMultiburstValidityBins = 96;
-constexpr int kMultiburstValidityWindowRadius = 24;
-constexpr int kMultiburstValidityMinimumBaselineFrames = 2;
-constexpr int kMultiburstValidityRequiredChangedBins = 10;
-constexpr int kMultiburstValidityConfirmFrames = 4;
-// measurementLuma_ is expressed in VOLTS (the same domain used by the
-// waveform analyser: black ~= 0.3 V, white ~= 1.0 V), not 16-bit code values.
-constexpr double kMultiburstValidityMeanThreshold = 0.035; // 35 mV
-constexpr double kMultiburstValidityRmsThreshold = 0.045;  // 45 mV
+    // Multiburst validity is deliberately conservative.  Use many LOCAL reference
+    // windows instead of coarse whole-line bins: a different picture line can have
+    // almost the same mean/RMS statistics when averaged over large regions.
+    // Each reference window stores local mean + RMS, so analogue noise is averaged
+    // out while gross spatial changes remain very obvious.
+    constexpr int kMultiburstValidityBins = 96;
+    constexpr int kMultiburstValidityWindowRadius = 24;
+    constexpr int kMultiburstValidityMinimumBaselineFrames = 2;
+    constexpr int kMultiburstValidityRequiredChangedBins = 10;
+    constexpr int kMultiburstValidityConfirmFrames = 4;
+    // measurementLuma_ is expressed in VOLTS (the same domain used by the
+    // waveform analyser: black ~= 0.3 V, white ~= 1.0 V), not 16-bit code values.
+    constexpr double kMultiburstValidityMeanThreshold = 0.035; // 35 mV
+    constexpr double kMultiburstValidityRmsThreshold = 0.045;  // 45 mV
 
-struct WaveformGeometry
-{
-    QRect displayRect;
-    QRectF scopeRect;
-    double zeroVoltY = 0.0;
-    double oneVoltY = 0.0;
-    double voltsPerDisplayPixel = 0.0;
-    VideoStandard standard = VideoStandard::pal625();
-};
-
-struct SamplePoint
-{
-    double displayX = 0.0;
-    double displayY = 0.0;
-    double volts = 0.0;
-    double sourceSamples = 0.0;
-    bool valid = false;
-};
-
-struct CandidateCycle
-{
-    int startIndex = 0;
-    int endIndex = 0;
-    int troughIndex = 0;
-    double periodSamples = 0.0;
-    double vppVolts = 0.0;
-};
-
-QPointF clampPointToRect(
-    const QPointF& point,
-    const QRectF& rect)
-{
-    return
+    struct WaveformGeometry
     {
-        std::clamp(
-            point.x(),
-            rect.left(),
-            rect.right()),
-        std::clamp(
-            point.y(),
-            rect.top(),
-            rect.bottom())
+        QRect displayRect;
+        QRectF scopeRect;
+        double zeroVoltY = 0.0;
+        double oneVoltY = 0.0;
+        double voltsPerDisplayPixel = 0.0;
+        VideoStandard standard = VideoStandard::pal625();
     };
-}
 
-QRectF normalizedRect(
-    const QPointF& a,
-    const QPointF& b)
-{
-    return QRectF(a, b).normalized();
-}
-
-double sampleClockHz(
-    const VideoStandard& standard)
-{
-    switch (standard.colorStandard)
+    struct SamplePoint
     {
-    case VideoColorStandard::Rec601_625:
-    case VideoColorStandard::Rec601_525:
-        return 13.5e6;
+        double displayX = 0.0;
+        double displayY = 0.0;
+        double volts = 0.0;
+        double sourceSamples = 0.0;
+        bool valid = false;
+    };
 
-    default:
-        return 13.5e6;
-    }
-}
-
-QString formatPercent(
-    double percent)
-{
-    if (std::abs(percent) < 0.05)
+    struct CandidateCycle
     {
-        percent = 0.0;
+        int startIndex = 0;
+        int endIndex = 0;
+        int troughIndex = 0;
+        double periodSamples = 0.0;
+        double vppVolts = 0.0;
+    };
+
+    QPointF clampPointToRect(
+        const QPointF& point,
+        const QRectF& rect)
+    {
+        return
+        {
+            std::clamp(
+                point.x(),
+                rect.left(),
+                rect.right()),
+            std::clamp(
+                point.y(),
+                rect.top(),
+                rect.bottom())
+        };
     }
 
-    return QStringLiteral("%1%").arg(percent, 0, 'f', 1);
-}
+    QRectF normalizedRect(
+        const QPointF& a,
+        const QPointF& b)
+    {
+        return QRectF(a, b).normalized();
+    }
 
-void drawArrowHead(
-    QPainter& painter,
-    const QPointF& tip,
-    const QPointF& direction,
-    double length,
-    double width)
-{
-    const QPointF baseCenter =
-        tip - direction * length;
+    double sampleClockHz(
+        const VideoStandard& standard)
+    {
+        switch (standard.colorStandard)
+        {
+        case VideoColorStandard::Rec601_625:
+        case VideoColorStandard::Rec601_525:
+            return 13.5e6;
 
-    const QPointF perpendicular(
-        -direction.y(),
-        direction.x());
+        default:
+            return 13.5e6;
+        }
+    }
 
-    const QPointF sideA =
-        baseCenter + perpendicular * width;
+    QString formatPercent(
+        double percent)
+    {
+        if (std::abs(percent) < 0.05)
+        {
+            percent = 0.0;
+        }
 
-    const QPointF sideB =
-        baseCenter - perpendicular * width;
+        return QStringLiteral("%1%").arg(percent, 0, 'f', 1);
+    }
 
-    painter.drawLine(tip, sideA);
-    painter.drawLine(tip, sideB);
-}
+    void drawArrowHead(
+        QPainter& painter,
+        const QPointF& tip,
+        const QPointF& direction,
+        double length,
+        double width)
+    {
+        const QPointF baseCenter =
+            tip - direction * length;
 
-WaveformGeometry makeGeometry(
-    const QImage& image,
-    const QRect& displayRect,
-    const QWidget* widget)
-{
-    WaveformGeometry geometry;
-    geometry.displayRect = displayRect;
-    geometry.standard = VideoStandard::pal625();
+        const QPointF perpendicular(
+            -direction.y(),
+            direction.x());
 
-    const WaveformGraticule graticule;
-    const double leftInset =
-        graticule.leftInset(
-            QApplication::font(),
-            widget,
+        const QPointF sideA =
+            baseCenter + perpendicular * width;
+
+        const QPointF sideB =
+            baseCenter - perpendicular * width;
+
+        painter.drawLine(tip, sideA);
+        painter.drawLine(tip, sideB);
+    }
+
+    WaveformGeometry makeGeometry(
+        const QImage& image,
+        const QRect& displayRect,
+        const QWidget* widget)
+    {
+        WaveformGeometry geometry;
+        geometry.displayRect = displayRect;
+        geometry.standard = VideoStandard::pal625();
+
+        const WaveformGraticule graticule;
+        const double leftInset =
+            graticule.leftInset(
+                QApplication::font(),
+                widget,
+                static_cast<double>(displayRect.height()));
+
+        const QRectF scopeRect(
+            static_cast<double>(displayRect.left()) + leftInset,
+            static_cast<double>(displayRect.top()),
+            static_cast<double>(displayRect.width()) - leftInset,
             static_cast<double>(displayRect.height()));
 
-    const QRectF scopeRect(
-        static_cast<double>(displayRect.left()) + leftInset,
-        static_cast<double>(displayRect.top()),
-        static_cast<double>(displayRect.width()) - leftInset,
-        static_cast<double>(displayRect.height()));
+        const QFont font =
+            graticule.labelFont(
+                QApplication::font(),
+                scopeRect.height());
 
-    const QFont font =
-        graticule.labelFont(
-            QApplication::font(),
-            scopeRect.height());
+        const QFontMetricsF metrics(font, widget);
+        const double labelHeight = metrics.height();
 
-    const QFontMetricsF metrics(font, widget);
-    const double labelHeight = metrics.height();
+        geometry.scopeRect = QRectF(
+            scopeRect.left(),
+            scopeRect.top() + labelHeight * 0.5,
+            scopeRect.width(),
+            scopeRect.height() - labelHeight);
 
-    geometry.scopeRect = QRectF(
-        scopeRect.left(),
-        scopeRect.top() + labelHeight * 0.5,
-        scopeRect.width(),
-        scopeRect.height() - labelHeight);
+        const AnalogVideoLevels analog =
+            analogLevels(geometry.standard.colorStandard);
 
-    const AnalogVideoLevels analog =
-        analogLevels(geometry.standard.colorStandard);
+        const auto voltsToDisplayY =
+            [&](double volts)
+            {
+                return
+                    geometry.scopeRect.bottom() -
+                    volts * geometry.scopeRect.height() /
+                    analog.graticuleMaxVolts;
+            };
 
-    const auto voltsToDisplayY =
-        [&](double volts)
-        {
-            return
-                geometry.scopeRect.bottom() -
-                volts * geometry.scopeRect.height() /
-                analog.graticuleMaxVolts;
-        };
+        geometry.zeroVoltY = voltsToDisplayY(0.0);
+        geometry.oneVoltY = voltsToDisplayY(1.0);
+        geometry.voltsPerDisplayPixel =
+            1.0 / (geometry.zeroVoltY - geometry.oneVoltY);
 
-    geometry.zeroVoltY = voltsToDisplayY(0.0);
-    geometry.oneVoltY = voltsToDisplayY(1.0);
-    geometry.voltsPerDisplayPixel =
-        1.0 / (geometry.zeroVoltY - geometry.oneVoltY);
-
-    Q_UNUSED(image);
-    return geometry;
-}
-
-int whitenessScore(QRgb pixel)
-{
-    const int red = qRed(pixel);
-    const int green = qGreen(pixel);
-    const int blue = qBlue(pixel);
-    const int maximum = (std::max)({ red, green, blue });
-    const int minimum = (std::min)({ red, green, blue });
-    const int delta = maximum - minimum;
-    return minimum - delta / 2;
-}
-
-double relativeVariation(
-    double value,
-    double reference)
-{
-    if (std::abs(reference) < 1.0e-12)
-    {
-        return std::numeric_limits<double>::infinity();
+        Q_UNUSED(image);
+        return geometry;
     }
 
-    return std::abs(value - reference) / std::abs(reference);
-}
-
-
-struct SineFitResult
-{
-    bool valid = false;
-    double dc = 0.0;
-    double sine = 0.0;
-    double cosine = 0.0;
-    double peak = 0.0;
-    double vpp = 0.0;
-};
-
-bool solve3x3(
-    double matrix[3][4])
-{
-    for (int pivot = 0; pivot < 3; ++pivot)
+    int whitenessScore(QRgb pixel)
     {
-        int bestRow = pivot;
-        double bestMagnitude = std::abs(matrix[pivot][pivot]);
-
-        for (int row = pivot + 1; row < 3; ++row)
-        {
-            const double magnitude = std::abs(matrix[row][pivot]);
-            if (magnitude > bestMagnitude)
-            {
-                bestMagnitude = magnitude;
-                bestRow = row;
-            }
-        }
-
-        if (bestMagnitude < 1.0e-12)
-        {
-            return false;
-        }
-
-        if (bestRow != pivot)
-        {
-            for (int column = pivot; column < 4; ++column)
-            {
-                std::swap(matrix[pivot][column], matrix[bestRow][column]);
-            }
-        }
-
-        const double divisor = matrix[pivot][pivot];
-        for (int column = pivot; column < 4; ++column)
-        {
-            matrix[pivot][column] /= divisor;
-        }
-
-        for (int row = 0; row < 3; ++row)
-        {
-            if (row == pivot)
-            {
-                continue;
-            }
-
-            const double factor = matrix[row][pivot];
-            for (int column = pivot; column < 4; ++column)
-            {
-                matrix[row][column] -= factor * matrix[pivot][column];
-            }
-        }
+        const int red = qRed(pixel);
+        const int green = qGreen(pixel);
+        const int blue = qBlue(pixel);
+        const int maximum = (std::max)({ red, green, blue });
+        const int minimum = (std::min)({ red, green, blue });
+        const int delta = maximum - minimum;
+        return minimum - delta / 2;
     }
 
-    return true;
-}
-
-SineFitResult fitSineAtMeasuredPeriod(
-    const QVector<double>& samples,
-    int firstIndex,
-    int lastIndex,
-    double periodSamples)
-{
-    SineFitResult result;
-
-    if (periodSamples <= 0.0 ||
-        firstIndex < 0 ||
-        lastIndex < firstIndex ||
-        lastIndex >= static_cast<int>(samples.size()))
+    double relativeVariation(
+        double value,
+        double reference)
     {
-        return result;
+        if (std::abs(reference) < 1.0e-12)
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+
+        return std::abs(value - reference) / std::abs(reference);
     }
 
-    const double omega =
-        2.0 * std::acos(-1.0) /
-        periodSamples;
 
-    double sumOne = 0.0;
-    double sumSin = 0.0;
-    double sumCos = 0.0;
-    double sumSinSin = 0.0;
-    double sumCosCos = 0.0;
-    double sumSinCos = 0.0;
-    double sumY = 0.0;
-    double sumYSin = 0.0;
-    double sumYCos = 0.0;
-
-    for (int index = firstIndex; index <= lastIndex; ++index)
+    struct SineFitResult
     {
-        const double phase =
-            omega *
-            static_cast<double>(index - firstIndex);
-        const double sine = std::sin(phase);
-        const double cosine = std::cos(phase);
-        const double value = samples[index];
-
-        sumOne += 1.0;
-        sumSin += sine;
-        sumCos += cosine;
-        sumSinSin += sine * sine;
-        sumCosCos += cosine * cosine;
-        sumSinCos += sine * cosine;
-        sumY += value;
-        sumYSin += value * sine;
-        sumYCos += value * cosine;
-    }
-
-    double matrix[3][4]
-    {
-        { sumOne, sumSin,    sumCos,    sumY    },
-        { sumSin, sumSinSin, sumSinCos, sumYSin },
-        { sumCos, sumSinCos, sumCosCos, sumYCos }
+        bool valid = false;
+        double dc = 0.0;
+        double sine = 0.0;
+        double cosine = 0.0;
+        double peak = 0.0;
+        double vpp = 0.0;
     };
 
-    if (!solve3x3(matrix))
+    bool solve3x3(
+        double matrix[3][4])
     {
+        for (int pivot = 0; pivot < 3; ++pivot)
+        {
+            int bestRow = pivot;
+            double bestMagnitude = std::abs(matrix[pivot][pivot]);
+
+            for (int row = pivot + 1; row < 3; ++row)
+            {
+                const double magnitude = std::abs(matrix[row][pivot]);
+                if (magnitude > bestMagnitude)
+                {
+                    bestMagnitude = magnitude;
+                    bestRow = row;
+                }
+            }
+
+            if (bestMagnitude < 1.0e-12)
+            {
+                return false;
+            }
+
+            if (bestRow != pivot)
+            {
+                for (int column = pivot; column < 4; ++column)
+                {
+                    std::swap(matrix[pivot][column], matrix[bestRow][column]);
+                }
+            }
+
+            const double divisor = matrix[pivot][pivot];
+            for (int column = pivot; column < 4; ++column)
+            {
+                matrix[pivot][column] /= divisor;
+            }
+
+            for (int row = 0; row < 3; ++row)
+            {
+                if (row == pivot)
+                {
+                    continue;
+                }
+
+                const double factor = matrix[row][pivot];
+                for (int column = pivot; column < 4; ++column)
+                {
+                    matrix[row][column] -= factor * matrix[pivot][column];
+                }
+            }
+        }
+
+        return true;
+    }
+
+    SineFitResult fitSineAtMeasuredPeriod(
+        const QVector<double>& samples,
+        int firstIndex,
+        int lastIndex,
+        double periodSamples)
+    {
+        SineFitResult result;
+
+        if (periodSamples <= 0.0 ||
+            firstIndex < 0 ||
+            lastIndex < firstIndex ||
+            lastIndex >= static_cast<int>(samples.size()))
+        {
+            return result;
+        }
+
+        const double omega =
+            2.0 * std::acos(-1.0) /
+            periodSamples;
+
+        double sumOne = 0.0;
+        double sumSin = 0.0;
+        double sumCos = 0.0;
+        double sumSinSin = 0.0;
+        double sumCosCos = 0.0;
+        double sumSinCos = 0.0;
+        double sumY = 0.0;
+        double sumYSin = 0.0;
+        double sumYCos = 0.0;
+
+        for (int index = firstIndex; index <= lastIndex; ++index)
+        {
+            const double phase =
+                omega *
+                static_cast<double>(index - firstIndex);
+            const double sine = std::sin(phase);
+            const double cosine = std::cos(phase);
+            const double value = samples[index];
+
+            sumOne += 1.0;
+            sumSin += sine;
+            sumCos += cosine;
+            sumSinSin += sine * sine;
+            sumCosCos += cosine * cosine;
+            sumSinCos += sine * cosine;
+            sumY += value;
+            sumYSin += value * sine;
+            sumYCos += value * cosine;
+        }
+
+        double matrix[3][4]
+        {
+            { sumOne, sumSin,    sumCos,    sumY    },
+            { sumSin, sumSinSin, sumSinCos, sumYSin },
+            { sumCos, sumSinCos, sumCosCos, sumYCos }
+        };
+
+        if (!solve3x3(matrix))
+        {
+            return result;
+        }
+
+        result.dc = matrix[0][3];
+        result.sine = matrix[1][3];
+        result.cosine = matrix[2][3];
+        result.peak = std::hypot(result.sine, result.cosine);
+        result.vpp = 2.0 * result.peak;
+        result.valid = std::isfinite(result.vpp) && result.vpp > 0.0;
         return result;
     }
 
-    result.dc = matrix[0][3];
-    result.sine = matrix[1][3];
-    result.cosine = matrix[2][3];
-    result.peak = std::hypot(result.sine, result.cosine);
-    result.vpp = 2.0 * result.peak;
-    result.valid = std::isfinite(result.vpp) && result.vpp > 0.0;
-    return result;
-}
 
-
-double rms(const QVector<double>& values)
-{
-    if (values.isEmpty())
+    double rms(const QVector<double>& values)
     {
-        return 0.0;
+        if (values.isEmpty())
+        {
+            return 0.0;
+        }
+
+        double sumSquares = 0.0;
+        for (double value : values)
+        {
+            sumSquares += value * value;
+        }
+
+        return std::sqrt(
+            sumSquares /
+            static_cast<double>(values.size()));
     }
 
-    double sumSquares = 0.0;
-    for (double value : values)
+    double standardDeviation(
+        const QVector<double>& values,
+        double mean)
     {
-        sumSquares += value * value;
+        if (values.isEmpty())
+        {
+            return 0.0;
+        }
+
+        double sumSquares = 0.0;
+        for (double value : values)
+        {
+            const double difference = value - mean;
+            sumSquares += difference * difference;
+        }
+
+        return std::sqrt(
+            sumSquares /
+            static_cast<double>(values.size()));
     }
-
-    return std::sqrt(
-        sumSquares /
-        static_cast<double>(values.size()));
-}
-
-double standardDeviation(
-    const QVector<double>& values,
-    double mean)
-{
-    if (values.isEmpty())
-    {
-        return 0.0;
-    }
-
-    double sumSquares = 0.0;
-    for (double value : values)
-    {
-        const double difference = value - mean;
-        sumSquares += difference * difference;
-    }
-
-    return std::sqrt(
-        sumSquares /
-        static_cast<double>(values.size()));
-}
 }
 
 WaveformWidget::WaveformWidget(QWidget* parent)
@@ -1051,16 +1051,16 @@ void WaveformWidget::advanceMultiburstDebugStep()
             {
                 multiburstStatus_ =
                     QStringLiteral("MULTIBURST  NOT FOUND   CANDIDATES %1")
-                        .arg(multiburstDebugCandidateCount_);
+                    .arg(multiburstDebugCandidateCount_);
                 multiburstDebugTimer_->stop();
             }
             else
             {
                 multiburstStatus_ =
                     QStringLiteral("MULTIBURST  SEARCH  %1/%2   CANDIDATES %3")
-                        .arg(multiburstSearchFrames_ + 1)
-                        .arg(kMultiburstSearchFrames)
-                        .arg(multiburstDebugCandidateCount_);
+                    .arg(multiburstSearchFrames_ + 1)
+                    .arg(kMultiburstSearchFrames)
+                    .arg(multiburstDebugCandidateCount_);
             }
         }
         else if (!temporalMultiburst_.isEmpty())
@@ -1068,13 +1068,13 @@ void WaveformWidget::advanceMultiburstDebugStep()
             multiburstMeasureStep_ = 0;
             multiburstStatus_ =
                 QStringLiteral("MULTIBURST  MEASURE  1/%1")
-                    .arg(kTemporalMeasurementFrames);
+                .arg(kTemporalMeasurementFrames);
         }
         else
         {
             multiburstStatus_ =
                 QStringLiteral("MULTIBURST  NOT FOUND   CANDIDATES %1")
-                    .arg(multiburstDebugCandidateCount_);
+                .arg(multiburstDebugCandidateCount_);
             multiburstDebugTimer_->stop();
         }
 
@@ -1106,16 +1106,16 @@ void WaveformWidget::advanceMultiburstDebugStep()
 
         multiburstStatus_ =
             QStringLiteral("MULTIBURST  DONE  %1/%2")
-                .arg(validBursts)
-                .arg(kExpectedMultiburstBursts);
+            .arg(validBursts)
+            .arg(kExpectedMultiburstBursts);
         multiburstDebugTimer_->stop();
     }
     else
     {
         multiburstStatus_ =
             QStringLiteral("MULTIBURST  MEASURE  %1/%2")
-                .arg(multiburstMeasureStep_ + 1)
-                .arg(kTemporalMeasurementFrames);
+            .arg(multiburstMeasureStep_ + 1)
+            .arg(kTemporalMeasurementFrames);
     }
 
     update();
@@ -1220,8 +1220,8 @@ void WaveformWidget::processTemporalMeasurements()
                     temporalArea_.sumVppBottomY / divisor);
                 averaged.message =
                     QStringLiteral("Temporal average %1/%2")
-                        .arg(temporalArea_.validFrames)
-                        .arg(kTemporalMeasurementFrames);
+                    .arg(temporalArea_.validFrames)
+                    .arg(kTemporalMeasurementFrames);
 
                 areaAnalysis_ = averaged;
             }
@@ -1233,8 +1233,8 @@ void WaveformWidget::processTemporalMeasurements()
                 failed.selectionRect = temporalArea_.selectionRect;
                 failed.message =
                     QStringLiteral("Unstable measurement (%1/%2 valid)")
-                        .arg(temporalArea_.validFrames)
-                        .arg(kTemporalMeasurementFrames);
+                    .arg(temporalArea_.validFrames)
+                    .arg(kTemporalMeasurementFrames);
                 areaAnalysis_ = failed;
             }
 
@@ -1308,16 +1308,16 @@ void WaveformWidget::processTemporalMeasurements()
                     temporal.sumVppBottomY / divisor);
                 averaged.message =
                     QStringLiteral("Multiburst temporal average %1/%2")
-                        .arg(temporal.validFrames)
-                        .arg(kTemporalMeasurementFrames);
+                    .arg(temporal.validFrames)
+                    .arg(kTemporalMeasurementFrames);
             }
             else
             {
                 averaged.valid = false;
                 averaged.message =
                     QStringLiteral("Multiburst unstable (%1/%2 valid)")
-                        .arg(temporal.validFrames)
-                        .arg(kTemporalMeasurementFrames);
+                    .arg(temporal.validFrames)
+                    .arg(kTemporalMeasurementFrames);
             }
 
             if (burstIndex >= multiburstAnalyses_.size())
@@ -1390,7 +1390,7 @@ void WaveformWidget::processTemporalMeasurements()
                     result.valid = true;
                     result.vppMillivolts = sinusResult.vppMillivolts;
                     result.vppVolts =
-                    static_cast<double>(sinusResult.vppMillivolts) / 1000.0;
+                        static_cast<double>(sinusResult.vppMillivolts) / 1000.0;
                     result.selectionRect = sinusResult.selectionRect;
                     result.lowVolts = sinusResult.lowVolts;
                     result.highVolts = sinusResult.highVolts;
@@ -1436,8 +1436,8 @@ void WaveformWidget::processTemporalMeasurements()
                     temporalReference_.representative.frequencyMHz;
                 averaged.message =
                     QStringLiteral("Reference temporal average %1/%2")
-                        .arg(temporalReference_.validFrames)
-                        .arg(kTemporalMeasurementFrames);
+                    .arg(temporalReference_.validFrames)
+                    .arg(kTemporalMeasurementFrames);
 
                 // Preserve the existing analogue-friendly detector. Only
                 // intervene when the chosen Ref amplitude is grossly
@@ -1473,7 +1473,7 @@ void WaveformWidget::processTemporalMeasurements()
 
                     if (medianBurstVpp >= 0.1 &&
                         (referenceRatio < kMinimumSaneReferenceRatio ||
-                         referenceRatio > kMaximumSaneReferenceRatio))
+                            referenceRatio > kMaximumSaneReferenceRatio))
                     {
                         ReferenceAnalysisResult fallback =
                             analyzeReferenceSelection(
@@ -1486,9 +1486,9 @@ void WaveformWidget::processTemporalMeasurements()
                             fallback.message =
                                 QStringLiteral(
                                     "Reference plateau fallback (%1 mV MB median)")
-                                    .arg(
-                                        static_cast<int>(
-                                            std::lround(medianBurstVpp * 1000.0)));
+                                .arg(
+                                    static_cast<int>(
+                                        std::lround(medianBurstVpp * 1000.0)));
                             averaged = fallback;
                         }
                     }
@@ -1530,8 +1530,8 @@ void WaveformWidget::processTemporalMeasurements()
         {
             multiburstStatus_ =
                 QStringLiteral("MULTIBURST  MEASURE  %1/%2")
-                    .arg(multiburstMeasureStep_)
-                    .arg(kTemporalMeasurementFrames);
+                .arg(multiburstMeasureStep_)
+                .arg(kTemporalMeasurementFrames);
         }
         else
         {
@@ -1580,6 +1580,108 @@ void WaveformWidget::setInputSampleClockHz(double sampleClockHz)
     }
 }
 
+void WaveformWidget::triggerMultiburstMeasurement()
+{
+    // M is always a fresh run. Only an explicitly user-drawn Ref is
+    // authoritative and survives the reset. Never infer manual/auto state
+    // from frequency or from the presence of a selection rectangle.
+    const bool hasManualReference =
+        referenceIsManual_ &&
+        referenceAnalysis_.valid &&
+        !referenceAnalysis_.selectionRect.isEmpty();
+
+    const ReferenceAnalysisResult manualReference =
+        referenceAnalysis_;
+
+    clearMeasurements();
+
+    if (hasManualReference)
+    {
+        referenceAnalysis_ = manualReference;
+        referenceIsManual_ = true;
+    }
+
+    areaMode_ = false;
+    referenceMode_ = false;
+    areaModeLabelMuted_ = false;
+    referenceModeLabelMuted_ = false;
+    hoverActive_ = false;
+    measureActive_ = false;
+    multiburstSearchFrames_ = 0;
+    multiburstMeasureStep_ = 0;
+    multiburstPending_ = false;
+    multiburstDebugActivity_.clear();
+    multiburstDebugBaseline_.clear();
+    multiburstDebugThreshold_ = 0.0;
+    multiburstDebugMaximum_ = 0.0;
+    multiburstDebugCandidateRects_.clear();
+    multiburstDebugCandidateCount_ = 0;
+
+    const QRectF* manualReferenceRect =
+        hasManualReference
+        ? &referenceAnalysis_.selectionRect
+        : nullptr;
+
+    const MultiburstLayout layout =
+        detectMultiburstLayout(manualReferenceRect);
+
+    // A user-drawn Ref is a one-shot override for exactly this M run.
+    // Keep the Ref visible as a measurement result, but do not protect it
+    // from the next M press. The next M must perform a full automatic run.
+    if (hasManualReference)
+    {
+        referenceIsManual_ = false;
+    }
+
+    if (layout.valid &&
+        layout.burstRects.size() >= kMinimumMultiburstBursts)
+    {
+        multiburstMeasurementActive_ = true;
+
+        temporalReference_ = {};
+
+        if (!hasManualReference &&
+            !layout.referenceRect.isEmpty())
+        {
+            temporalReference_.active = true;
+            temporalReference_.usePlateauAnalysis =
+                layout.referenceUsesPlateau;
+            temporalReference_.selectionRect = layout.referenceRect;
+            temporalReference_.representative.frequencyMHz =
+                layout.referenceFrequencyMHz;
+        }
+
+        const int burstCount =
+            static_cast<int>(layout.burstRects.size());
+
+        temporalMultiburst_.clear();
+        temporalMultiburst_.resize(burstCount);
+        multiburstAnalyses_.clear();
+        multiburstAnalyses_.resize(burstCount);
+
+        for (int i = 0; i < burstCount; ++i)
+        {
+            temporalMultiburst_[i].active = true;
+            temporalMultiburst_[i].selectionRect = layout.burstRects[i];
+        }
+
+        beginMultiburstValidityCapture();
+
+        multiburstStatus_ =
+            QStringLiteral("MULTIBURST  MEASURE  0/%1")
+            .arg(kTemporalMeasurementFrames);
+    }
+    else
+    {
+        multiburstMeasurementActive_ = false;
+        multiburstStatus_ =
+            QStringLiteral("MULTIBURST  NOT FOUND");
+    }
+
+    updateInteractionCursor();
+    update();
+}
+
 void WaveformWidget::keyPressEvent(QKeyEvent* event)
 {
     if (event->key() == Qt::Key_A && !event->isAutoRepeat())
@@ -1625,104 +1727,7 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
 
     if (event->key() == Qt::Key_M && !event->isAutoRepeat())
     {
-        // M is always a fresh run. Only an explicitly user-drawn Ref is
-        // authoritative and survives the reset. Never infer manual/auto state
-        // from frequency or from the presence of a selection rectangle.
-        const bool hasManualReference =
-            referenceIsManual_ &&
-            referenceAnalysis_.valid &&
-            !referenceAnalysis_.selectionRect.isEmpty();
-
-        const ReferenceAnalysisResult manualReference =
-            referenceAnalysis_;
-
-        clearMeasurements();
-
-        if (hasManualReference)
-        {
-            referenceAnalysis_ = manualReference;
-            referenceIsManual_ = true;
-        }
-
-        areaMode_ = false;
-        referenceMode_ = false;
-        areaModeLabelMuted_ = false;
-        referenceModeLabelMuted_ = false;
-        hoverActive_ = false;
-        measureActive_ = false;
-        multiburstSearchFrames_ = 0;
-        multiburstMeasureStep_ = 0;
-        multiburstPending_ = false;
-        multiburstDebugActivity_.clear();
-        multiburstDebugBaseline_.clear();
-        multiburstDebugThreshold_ = 0.0;
-        multiburstDebugMaximum_ = 0.0;
-        multiburstDebugCandidateRects_.clear();
-        multiburstDebugCandidateCount_ = 0;
-
-        const QRectF* manualReferenceRect =
-            hasManualReference
-            ? &referenceAnalysis_.selectionRect
-            : nullptr;
-
-        const MultiburstLayout layout =
-            detectMultiburstLayout(manualReferenceRect);
-
-        // A user-drawn Ref is a one-shot override for exactly this M run.
-        // Keep the Ref visible as a measurement result, but do not protect it
-        // from the next M press. The next M must perform a full automatic run.
-        if (hasManualReference)
-        {
-            referenceIsManual_ = false;
-        }
-
-        if (layout.valid &&
-            layout.burstRects.size() >= kMinimumMultiburstBursts)
-        {
-            multiburstMeasurementActive_ = true;
-
-            temporalReference_ = {};
-
-            if (!hasManualReference &&
-                !layout.referenceRect.isEmpty())
-            {
-                temporalReference_.active = true;
-                temporalReference_.usePlateauAnalysis =
-                    layout.referenceUsesPlateau;
-                temporalReference_.selectionRect = layout.referenceRect;
-                temporalReference_.representative.frequencyMHz =
-                    layout.referenceFrequencyMHz;
-            }
-
-            const int burstCount =
-                static_cast<int>(layout.burstRects.size());
-
-            temporalMultiburst_.clear();
-            temporalMultiburst_.resize(burstCount);
-            multiburstAnalyses_.clear();
-            multiburstAnalyses_.resize(burstCount);
-
-            for (int i = 0; i < burstCount; ++i)
-            {
-                temporalMultiburst_[i].active = true;
-                temporalMultiburst_[i].selectionRect = layout.burstRects[i];
-            }
-
-            beginMultiburstValidityCapture();
-
-            multiburstStatus_ =
-                QStringLiteral("MULTIBURST  MEASURE  0/%1")
-                    .arg(kTemporalMeasurementFrames);
-        }
-        else
-        {
-            multiburstMeasurementActive_ = false;
-            multiburstStatus_ =
-                QStringLiteral("MULTIBURST  NOT FOUND");
-        }
-
-        updateInteractionCursor();
-        update();
+        triggerMultiburstMeasurement();
         event->accept();
         return;
     }
@@ -1956,13 +1961,13 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
             (std::max)(
                 scope.left(),
                 scope.right() -
-                    measurementTableRect_.width());
+                measurementTableRect_.width());
 
         const double maximumY =
             (std::max)(
                 scope.top(),
                 scope.bottom() -
-                    measurementTableRect_.height());
+                measurementTableRect_.height());
 
         position.setX(
             std::clamp(
@@ -2483,8 +2488,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
     while (lobeIndex + 1 < lobes.size())
     {
         if (!pairLooksPeriodic(
-                lobes[lobeIndex],
-                lobes[lobeIndex + 1]))
+            lobes[lobeIndex],
+            lobes[lobeIndex + 1]))
         {
             ++lobeIndex;
             continue;
@@ -2519,8 +2524,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                 static_cast<double>(halfPeriods.size());
 
             if (relativeVariation(
-                    nextHalfPeriod,
-                    meanHalfPeriod) > 0.30)
+                nextHalfPeriod,
+                meanHalfPeriod) > 0.30)
             {
                 break;
             }
@@ -2586,7 +2591,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                 QPointF(
                     indexToDisplayX(group.lastSample),
                     geometry.scopeRect.bottom()))
-                .normalized());
+            .normalized());
     }
 
     // The normal detector remains the primary path.  Only when it has fewer
@@ -2660,8 +2665,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                             static_cast<double>(subgroupHalfPeriods.size());
 
                         if (relativeVariation(
-                                halfPeriod,
-                                meanHalfPeriod) >
+                            halfPeriod,
+                            meanHalfPeriod) >
                             kFallbackMaximumHalfPeriodVariation)
                         {
                             flushSubgroup(currentLobe - 1);
@@ -2711,7 +2716,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                     static_cast<int>(std::lround(
                         0.5 *
                         (static_cast<double>(group.firstSample) +
-                         static_cast<double>(group.lastSample)))));
+                            static_cast<double>(group.lastSample)))));
 
             if (centerX > referenceRightX)
             {
@@ -2874,8 +2879,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                             static_cast<double>(subgroupHalfPeriods.size());
 
                         if (relativeVariation(
-                                halfPeriod,
-                                meanHalfPeriod) >
+                            halfPeriod,
+                            meanHalfPeriod) >
                             kSequenceMaximumHalfPeriodVariation)
                         {
                             flushSubgroup(currentLobe - 1);
@@ -2927,8 +2932,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                 group.frequencyHz / 1.0e6;
 
             if (relativeVariation(
-                    sinus.frequencyMHz,
-                    discoveryFrequencyMHz) >
+                sinus.frequencyMHz,
+                discoveryFrequencyMHz) >
                 kMaximumDiscoveryFrequencyError)
             {
                 continue;
@@ -2942,7 +2947,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
             candidates.begin(),
             candidates.end(),
             [](const SequenceCandidate& a,
-               const SequenceCandidate& b)
+                const SequenceCandidate& b)
             {
                 return a.group.firstSample < b.group.firstSample;
             });
@@ -2952,7 +2957,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
             {
                 return 0.5 *
                     (static_cast<double>(group.firstSample) +
-                     static_cast<double>(group.lastSample));
+                        static_cast<double>(group.lastSample));
             };
 
         int bestStart = -1;
@@ -3278,7 +3283,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                             relativeVariation(
                                 measuredFrequencyMHz,
                                 discoveryFrequencyMHz) <=
-                                kMaximumDiscoveryFrequencyError)
+                            kMaximumDiscoveryFrequencyError)
                         {
                             burstValid = true;
                             burstFrequencyMHz = measuredFrequencyMHz;
@@ -3295,8 +3300,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
             }
 
             if (relativeVariation(
-                    burstFrequencyMHz,
-                    discoveryFrequencyMHz) >
+                burstFrequencyMHz,
+                discoveryFrequencyMHz) >
                 kMaximumDiscoveryFrequencyError)
             {
                 continue;
@@ -3345,7 +3350,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                 (sortedSteps.size() & 1) != 0
                 ? sortedSteps[middle]
                 : 0.5 *
-                    (sortedSteps[middle - 1] + sortedSteps[middle]);
+                (sortedSteps[middle - 1] + sortedSteps[middle]);
 
             constexpr double kMaximumNormalStepRatio = 1.55;
             constexpr double kMaximumSingleMissingStepRatio = 2.50;
@@ -3467,8 +3472,8 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
                     referenceGroup.frequencyHz / 1.0e6;
 
                 if (relativeVariation(
-                        referenceSinus.frequencyMHz,
-                        discoveredReferenceMHz) >
+                    referenceSinus.frequencyMHz,
+                    discoveredReferenceMHz) >
                     kMaximumReferenceFrequencyError)
                 {
                     havePeriodicReference = false;
@@ -3489,7 +3494,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
             {
                 return 0.5 *
                     (static_cast<double>(group.firstSample) +
-                     static_cast<double>(group.lastSample));
+                        static_cast<double>(group.lastSample));
             };
 
         for (int i = 1; i < burstGroups.size(); ++i)
@@ -3593,7 +3598,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
             QRectF(
                 QPointF(indexToDisplayX(first), geometry.scopeRect.top()),
                 QPointF(indexToDisplayX(last), geometry.scopeRect.bottom()))
-                .normalized();
+            .normalized();
 
         layout.referenceFrequencyMHz =
             referenceGroup.frequencyHz / 1.0e6;
@@ -3670,7 +3675,7 @@ WaveformWidget::MultiburstLayout WaveformWidget::detectMultiburstLayout(
             QRectF(
                 QPointF(indexToDisplayX(first), geometry.scopeRect.top()),
                 QPointF(indexToDisplayX(last), geometry.scopeRect.bottom()))
-                .normalized());
+            .normalized());
     }
 
     layout.valid = true;
@@ -3711,7 +3716,7 @@ WaveformWidget::AreaAnalysisResult WaveformWidget::analyzeSelection(
             const double normalized =
                 std::clamp(
                     (displayX - geometry.scopeRect.left()) /
-                        (std::max)(geometry.scopeRect.width(), 1.0),
+                    (std::max)(geometry.scopeRect.width(), 1.0),
                     0.0,
                     1.0);
 
@@ -3913,8 +3918,8 @@ WaveformWidget::AreaAnalysisResult WaveformWidget::analyzeSelection(
         for (int i = start + 1; i < cycles.size(); ++i)
         {
             if (relativeVariation(
-                    cycles[i].periodSamples,
-                    meanPeriod) > kMaximumVariation ||
+                cycles[i].periodSamples,
+                meanPeriod) > kMaximumVariation ||
                 relativeVariation(
                     cycles[i].vppVolts,
                     meanVpp) > kMaximumVariation)
@@ -4099,7 +4104,7 @@ WaveformWidget::ReferenceAnalysisResult WaveformWidget::analyzeReferenceSelectio
             const double normalized =
                 std::clamp(
                     (displayX - geometry.scopeRect.left()) /
-                        (std::max)(geometry.scopeRect.width(), 1.0),
+                    (std::max)(geometry.scopeRect.width(), 1.0),
                     0.0,
                     1.0);
 
@@ -4542,12 +4547,12 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                 const double y =
                     geometry.zeroVoltY -
                     multiburstDebugBaseline_[i] /
-                        geometry.voltsPerDisplayPixel;
+                    geometry.voltsPerDisplayPixel;
 
                 baselineCurve.push_back(
                     QPointF(
                         geometry.scopeRect.left() +
-                            normalizedX * geometry.scopeRect.width(),
+                        normalizedX * geometry.scopeRect.width(),
                         y));
             }
 
@@ -4600,21 +4605,21 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             const double normalizedX =
                 debugCount > 1
                 ? static_cast<double>(i) /
-                    static_cast<double>(debugCount - 1)
+                static_cast<double>(debugCount - 1)
                 : 0.0;
             const double normalizedActivity =
                 std::clamp(
                     multiburstDebugActivity_[i] /
-                        multiburstDebugMaximum_,
+                    multiburstDebugMaximum_,
                     0.0,
                     1.0);
 
             activityCurve.push_back(
                 QPointF(
                     geometry.scopeRect.left() +
-                        normalizedX * geometry.scopeRect.width(),
+                    normalizedX * geometry.scopeRect.width(),
                     debugBottom -
-                        normalizedActivity * debugBandHeight));
+                    normalizedActivity * debugBandHeight));
         }
 
         painter.setBrush(Qt::NoBrush);
@@ -4624,7 +4629,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         const double normalizedThreshold =
             std::clamp(
                 multiburstDebugThreshold_ /
-                    multiburstDebugMaximum_,
+                multiburstDebugMaximum_,
                 0.0,
                 1.0);
         const double thresholdY =
@@ -4740,13 +4745,13 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
         QRectF modeRect(
             hoverPosition_.x() -
-                kModeGapX -
-                textSize.width() -
-                2.0 * kModePaddingX,
+            kModeGapX -
+            textSize.width() -
+            2.0 * kModePaddingX,
             hoverPosition_.y() -
-                kModeGapY -
-                textSize.height() -
-                2.0 * kModePaddingY,
+            kModeGapY -
+            textSize.height() -
+            2.0 * kModePaddingY,
             textSize.width() + 2.0 * kModePaddingX,
             textSize.height() + 2.0 * kModePaddingY);
 
@@ -4794,7 +4799,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             const double normalized =
                 std::clamp(
                     (displayX - geometry.scopeRect.left()) /
-                        (std::max)(geometry.scopeRect.width(), 1.0),
+                    (std::max)(geometry.scopeRect.width(), 1.0),
                     0.0,
                     1.0);
 
@@ -4820,7 +4825,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             normalizedRect(
                 referenceStartPosition_,
                 referenceCurrentPosition_)
-                .intersected(geometry.scopeRect));
+            .intersected(geometry.scopeRect));
         painter.restore();
     }
 
@@ -4893,12 +4898,12 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         QRectF tagRect(
             tagCenterX - tagWidth * 0.5,
             referenceHighY -
-                tagMetrics.height() -
-                2.0 * kTagPaddingY -
-                kTagGap,
+            tagMetrics.height() -
+            2.0 * kTagPaddingY -
+            kTagGap,
             tagWidth,
             tagMetrics.height() +
-                2.0 * kTagPaddingY);
+            2.0 * kTagPaddingY);
 
         if (tagRect.left() < geometry.scopeRect.left())
         {
@@ -4972,7 +4977,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
                 const QString frequencyLabel =
                     QStringLiteral("%1 MHz")
-                        .arg(areaAnalysis_.frequencyMHz, 0, 'f', 2);
+                    .arg(areaAnalysis_.frequencyMHz, 0, 'f', 2);
 
                 QString amplitudeLabel;
 
@@ -4993,13 +4998,13 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
                     amplitudeLabel =
                         QStringLiteral("%1 dB")
-                            .arg(decibels, 0, 'f', 1);
+                        .arg(decibels, 0, 'f', 1);
                 }
                 else
                 {
                     amplitudeLabel =
                         QStringLiteral("%1 mV")
-                            .arg(areaAnalysis_.vppMillivolts);
+                        .arg(areaAnalysis_.vppMillivolts);
                 }
 
                 painter.setFont(measurementLabelFont);
@@ -5021,7 +5026,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
                         QRectF rect(
                             centerX -
-                                (textSize.width() + 2.0 * kPaddingX) * 0.5,
+                            (textSize.width() + 2.0 * kPaddingX) * 0.5,
                             top,
                             textSize.width() + 2.0 * kPaddingX,
                             textSize.height() + 2.0 * kPaddingY);
@@ -5062,9 +5067,9 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                         amplitudeLabel,
                         labelCenterX,
                         amplitudeAnchorY -
-                            metrics.height() -
-                            2.0 * kPaddingY -
-                            measurementLabelLineGap);
+                        metrics.height() -
+                        2.0 * kPaddingY -
+                        measurementLabelLineGap);
 
                 if (amplitudeRect.top() < geometry.scopeRect.top())
                 {
@@ -5213,7 +5218,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
             const QString tagText =
                 QStringLiteral("MB%1")
-                    .arg(visibleMeasurementNumber);
+                .arg(visibleMeasurementNumber);
 
             painter.setFont(tagFont);
 
@@ -5227,12 +5232,12 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             QRectF tagRect(
                 tagCenterX - tagWidth * 0.5,
                 analysis.vppTop.y() -
-                    tagMetrics.height() -
-                    2.0 * kTagPaddingY -
-                    kTagGap,
+                tagMetrics.height() -
+                2.0 * kTagPaddingY -
+                kTagGap,
                 tagWidth,
                 tagMetrics.height() +
-                    2.0 * kTagPaddingY);
+                2.0 * kTagPaddingY);
 
             if (tagRect.left() < geometry.scopeRect.left())
             {
@@ -5304,11 +5309,11 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             refRow.frequency =
                 referenceAnalysis_.frequencyMHz > 0.0
                 ? QStringLiteral("%1 MHz")
-                    .arg(referenceAnalysis_.frequencyMHz, 0, 'f', 3)
+                .arg(referenceAnalysis_.frequencyMHz, 0, 'f', 3)
                 : QStringLiteral("--");
             refRow.millivolts =
                 QStringLiteral("%1 mV")
-                    .arg(referenceAnalysis_.vppMillivolts);
+                .arg(referenceAnalysis_.vppMillivolts);
             refRow.decibels = QStringLiteral("0.0 dB");
             refRow.color = referenceColor;
             rows.push_back(refRow);
@@ -5328,13 +5333,13 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             TableRow row;
             row.id =
                 QStringLiteral("MB%1")
-                    .arg(tableMeasurementNumber);
+                .arg(tableMeasurementNumber);
             row.frequency =
                 QStringLiteral("%1 MHz")
-                    .arg(analysis.frequencyMHz, 0, 'f', 2);
+                .arg(analysis.frequencyMHz, 0, 'f', 2);
             row.millivolts =
                 QStringLiteral("%1 mV")
-                    .arg(analysis.vppMillivolts);
+                .arg(analysis.vppMillivolts);
 
             if (referenceAnalysis_.valid &&
                 referenceAnalysis_.vppVolts > 0.0 &&
@@ -5354,7 +5359,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
                 row.decibels =
                     QStringLiteral("%1 dB")
-                        .arg(decibels, 0, 'f', 1);
+                    .arg(decibels, 0, 'f', 1);
             }
             else
             {
@@ -5416,16 +5421,16 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
             const double tableHeight =
                 2.0 * kTablePaddingY +
                 rowHeight *
-                    static_cast<double>(rows.size() + 1);
+                static_cast<double>(rows.size() + 1);
 
             constexpr double kDefaultBottomMargin = 12.0;
 
             QPointF tableTopLeft(
                 geometry.scopeRect.center().x() -
-                    tableWidth * 0.5,
+                tableWidth * 0.5,
                 geometry.scopeRect.bottom() -
-                    kDefaultBottomMargin -
-                    tableHeight);
+                kDefaultBottomMargin -
+                tableHeight);
 
             if (measurementTableUserPositioned_)
             {
@@ -5437,13 +5442,13 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
                 (std::max)(
                     geometry.scopeRect.left(),
                     geometry.scopeRect.right() -
-                        tableWidth);
+                    tableWidth);
 
             const double maximumY =
                 (std::max)(
                     geometry.scopeRect.top(),
                     geometry.scopeRect.bottom() -
-                        tableHeight);
+                    tableHeight);
 
             tableTopLeft.setX(
                 std::clamp(
@@ -5585,10 +5590,23 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         const double startVolts = displayYToVolts(startPoint.y());
         const double endVolts = displayYToVolts(endPoint.y());
         const int deltaMillivolts = static_cast<int>(std::lround((endVolts - startVolts) * 1000.0));
-        const double startSourcePixels = displayXToSourcePixels(startPoint.x());
-        const double endSourcePixels = displayXToSourcePixels(endPoint.x());
-        const double deltaSourcePixels = std::abs(endSourcePixels - startSourcePixels);
-        const double deltaSeconds = deltaSourcePixels / inputSampleClockHz_;
+        const double startSourcePixels =
+            displayXToSourcePixels(startPoint.x()) * 4.0;
+
+        const double endSourcePixels =
+            displayXToSourcePixels(endPoint.x()) * 4.0;
+
+        const double deltaSourcePixels =
+            std::abs(
+                endSourcePixels -
+                startSourcePixels);
+
+        const double reconstructedSampleClockHz =
+            inputSampleClockHz_ * 4.0;
+
+        const double deltaSeconds =
+            deltaSourcePixels /
+            reconstructedSampleClockHz;
 
         QString frequencyText = QStringLiteral("∞ MHz");
         if (deltaSeconds > 1.0e-12)
@@ -5648,8 +5666,8 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
     QString text =
         QStringLiteral("%1 mV   %2")
-            .arg(millivolts)
-            .arg(formatPercent(percent));
+        .arg(millivolts)
+        .arg(formatPercent(percent));
 
     if (probeDetailsMode_)
     {
@@ -5671,8 +5689,8 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
         text +=
             QStringLiteral("   %1 us   px %2")
-                .arg(lineTimeMicroseconds, 0, 'f', 2)
-                .arg(sourcePixel);
+            .arg(lineTimeMicroseconds, 0, 'f', 2)
+            .arg(sourcePixel);
     }
 
     painter.save();

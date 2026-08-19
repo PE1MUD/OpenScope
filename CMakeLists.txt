@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.6.3
+    VERSION 0.6.5
     LANGUAGES C CXX
 )
 
@@ -198,7 +198,9 @@ src/widgets/VectorscopeWidget.cpp
 src/widgets/VideoWidget.h
 src/widgets/VideoWidget.cpp
 src/widgets/WaveformWidget.h
-src/widgets/WaveformWidget.cpp    
+src/widgets/WaveformWidget.cpp
+src/widgets/YSpectrumWindow.h
+src/widgets/YSpectrumWindow.cpp
 src/widgets/ControlWidget.h
 src/widgets/ControlWidget.cpp
 

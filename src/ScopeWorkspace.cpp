@@ -183,6 +183,12 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::floatiesHomeRequested,
+        this,
+        &ScopeWorkspace::floatiesHomeRequested);
+
+    connect(
+        controlWidget_,
         &ControlWidget::spoutVideoEnabledChanged,
         this,
         &ScopeWorkspace::spoutVideoEnabledChanged);
@@ -470,6 +476,23 @@ QPoint ScopeWorkspace::floatingSettingsPosition() const
     }
 
     return settingsFloatingPosition_;
+}
+
+void ScopeWorkspace::homeFloatingSettings(
+    const QPoint& position)
+{
+    settingsFloatingPosition_ =
+        position;
+
+    settingsFloatingPositionValid_ =
+        true;
+
+    if (settingsFloating_ &&
+        settingsViewport_ != nullptr)
+    {
+        settingsViewport_->move(
+            position);
+    }
 }
 
 bool ScopeWorkspace::hasFloatingSettingsPosition() const

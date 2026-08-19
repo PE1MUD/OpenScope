@@ -15,6 +15,7 @@ class VectorscopeWidget;
 class VideoEngine;
 class VideoWidget;
 class WaveformWidget;
+class YSpectrumWindow;
 class ScopeWorkspace;
 class SettingsService;
 class PerformanceWidget;
@@ -52,6 +53,7 @@ private:
     VideoWidget* videoWidget_ = nullptr;
     VideoEngine* videoEngine_ = nullptr;
     WaveformWidget* waveformWidget_ = nullptr;
+    YSpectrumWindow* ySpectrumWindow_ = nullptr;
     ScopeWorkspace* workspace_ = nullptr;
     VectorscopeWidget* vectorscopeWidget_ = nullptr;
 
@@ -90,6 +92,7 @@ private:
         bool fullscreen);
 
     void updateRenderResolutionTitle();
+    void homeFloaties();
 
     void createSourceMenu();
     void selectBlackmagicSource();

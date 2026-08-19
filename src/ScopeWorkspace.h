@@ -40,6 +40,7 @@ public:
 
     QPoint floatingSettingsPosition() const;
     bool hasFloatingSettingsPosition() const;
+    void homeFloatingSettings(const QPoint& position);
 
 signals:
     void lineNumberChanged(int lineNumber);
@@ -54,6 +55,7 @@ signals:
         OpenScopeSettings::WorkspaceView view);
 
     void performanceVisibilityChanged(bool visible);
+    void floatiesHomeRequested();
     void spoutVideoEnabledChanged(bool enabled);
     void spoutWaveformEnabledChanged(bool enabled);
 

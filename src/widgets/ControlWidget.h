@@ -47,6 +47,7 @@ signals:
     void noiseReductionIntensityChanged(int intensity);
 
     void performanceVisibilityChanged(bool visible);
+    void floatiesHomeRequested();
     void spoutVideoEnabledChanged(bool enabled);
     void spoutWaveformEnabledChanged(bool enabled);
     void legacyAspectRatioChanged(bool legacyEnabled);

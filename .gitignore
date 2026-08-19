@@ -441,6 +441,7 @@ compile_commands.json
 OpenScope-deploy/
 
 commit.txt
+*.zip
 
 # Leave out Philips ROM dumps
 romsets/**/*.bin

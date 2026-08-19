@@ -4,8 +4,11 @@
 
 #include <QImage>
 #include <QSize>
+#include <QTimer>
 #include <QWidget>
 
+class QFocusEvent;
+class QKeyEvent;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
@@ -36,7 +39,25 @@ signals:
 
     void rightClicked();
 
+    void zoomInRequested();
+    void zoomOutRequested();
+    void lineUpRequested();
+    void lineDownRequested();
+    void panLeftRequested();
+    void panRightRequested();
+    void multiburstRequested();
+    void spectrumRequested();
+
 protected:
+    void focusOutEvent(
+        QFocusEvent* event) override;
+
+    void keyPressEvent(
+        QKeyEvent* event) override;
+
+    void keyReleaseEvent(
+        QKeyEvent* event) override;
+
     const QImage& image() const;
 
     QSize fitAspectSize(
@@ -64,7 +85,17 @@ private:
     bool emitImagePosition(
         const QPointF& position);
 
+    void emitHeldArrowRequests();
+    void stopArrowRepeatIfIdle();
+
     QImage image_;
+
+    QTimer arrowRepeatTimer_;
+
+    bool upHeld_ = false;
+    bool downHeld_ = false;
+    bool leftHeld_ = false;
+    bool rightHeld_ = false;
 
     OpenScopeSettings::AspectRatio aspectRatio_ =
         OpenScopeSettings::AspectRatio::Ratio16x9;

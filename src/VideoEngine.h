@@ -118,6 +118,11 @@ signals:
     void waveformMeasurementDataChanged(
         const QVector<float>& samples);
 
+    void waveformSpectrumDataChanged(
+        const QVector<float>& fullLine,
+        const QVector<float>& visiblePart,
+        bool inputSignalValid);
+
     void vectorscopeChanged(
         const QImage& image);
 

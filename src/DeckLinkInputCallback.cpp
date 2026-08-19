@@ -114,6 +114,12 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
     const int rowBytes =
         static_cast<int>(videoFrame->GetRowBytes());
 
+    const BMDFrameFlags frameFlags =
+        videoFrame->GetFlags();
+
+    const bool inputSignalValid =
+        (frameFlags & bmdFrameHasNoInputSource) == 0;
+
     const auto* source =
         static_cast<const std::uint8_t*>(bytes);
 
@@ -128,9 +134,16 @@ HRESULT STDMETHODCALLTYPE DeckLinkInputCallback::VideoInputFrameArrived(
                 *frame);
 
         if (ok)
+        {
+            frame->inputSignalValid =
+                inputSignalValid;
+
             videoEngine_->submitWriteFrame();
+        }
         else
+        {
             videoEngine_->cancelWriteFrame();
+        }
     }
 
     videoBuffer->EndAccess(bmdBufferAccessRead);

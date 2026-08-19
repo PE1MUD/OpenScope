@@ -1,6 +1,8 @@
 #include "widgets/VideoWidget.h"
 
 #include <QColor>
+#include <QFocusEvent>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QResizeEvent>
@@ -12,6 +14,25 @@ VideoWidget::VideoWidget(QWidget* parent)
     : QWidget(parent)
     , image_(720, 576, QImage::Format_RGB32)
 {
+    setFocusPolicy(Qt::StrongFocus);
+
+    arrowRepeatTimer_.setSingleShot(false);
+    arrowRepeatTimer_.setInterval(180);
+
+    connect(
+        &arrowRepeatTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            // First repeat waits a little, subsequent repeats are smooth.
+            if (arrowRepeatTimer_.interval() != 30)
+            {
+                arrowRepeatTimer_.setInterval(30);
+            }
+
+            emitHeldArrowRequests();
+        });
 }
 
 void VideoWidget::setImage(const QImage& image)
@@ -141,9 +162,207 @@ bool VideoWidget::emitImagePosition(
     return true;
 }
 
+
+void VideoWidget::focusOutEvent(
+    QFocusEvent* event)
+{
+    upHeld_ = false;
+    downHeld_ = false;
+    leftHeld_ = false;
+    rightHeld_ = false;
+
+    arrowRepeatTimer_.stop();
+    arrowRepeatTimer_.setInterval(180);
+
+    QWidget::focusOutEvent(event);
+}
+
+void VideoWidget::emitHeldArrowRequests()
+{
+    // Opposite directions cancel each other. Orthogonal directions
+    // are intentionally emitted together, so e.g. Up+Right works.
+    if (upHeld_ != downHeld_)
+    {
+        if (upHeld_)
+        {
+            emit lineUpRequested();
+        }
+        else
+        {
+            emit lineDownRequested();
+        }
+    }
+
+    if (leftHeld_ != rightHeld_)
+    {
+        if (leftHeld_)
+        {
+            emit panLeftRequested();
+        }
+        else
+        {
+            emit panRightRequested();
+        }
+    }
+}
+
+void VideoWidget::stopArrowRepeatIfIdle()
+{
+    if (!upHeld_ &&
+        !downHeld_ &&
+        !leftHeld_ &&
+        !rightHeld_)
+    {
+        arrowRepeatTimer_.stop();
+        arrowRepeatTimer_.setInterval(180);
+    }
+}
+
+void VideoWidget::keyPressEvent(
+    QKeyEvent* event)
+{
+    switch (event->key())
+    {
+    case Qt::Key_Plus:
+        if (!event->isAutoRepeat())
+        {
+            emit zoomInRequested();
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_Minus:
+        if (!event->isAutoRepeat())
+        {
+            emit zoomOutRequested();
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_M:
+        if (!event->isAutoRepeat())
+        {
+            emit multiburstRequested();
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_F:
+        if (!event->isAutoRepeat())
+        {
+            emit spectrumRequested();
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_Up:
+        if (!event->isAutoRepeat() && !upHeld_)
+        {
+            upHeld_ = true;
+            emit lineUpRequested();
+
+            if (!arrowRepeatTimer_.isActive())
+            {
+                arrowRepeatTimer_.setInterval(180);
+                arrowRepeatTimer_.start();
+            }
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_Down:
+        if (!event->isAutoRepeat() && !downHeld_)
+        {
+            downHeld_ = true;
+            emit lineDownRequested();
+
+            if (!arrowRepeatTimer_.isActive())
+            {
+                arrowRepeatTimer_.setInterval(180);
+                arrowRepeatTimer_.start();
+            }
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_Left:
+        if (!event->isAutoRepeat() && !leftHeld_)
+        {
+            leftHeld_ = true;
+            emit panLeftRequested();
+
+            if (!arrowRepeatTimer_.isActive())
+            {
+                arrowRepeatTimer_.setInterval(180);
+                arrowRepeatTimer_.start();
+            }
+        }
+        event->accept();
+        return;
+
+    case Qt::Key_Right:
+        if (!event->isAutoRepeat() && !rightHeld_)
+        {
+            rightHeld_ = true;
+            emit panRightRequested();
+
+            if (!arrowRepeatTimer_.isActive())
+            {
+                arrowRepeatTimer_.setInterval(180);
+                arrowRepeatTimer_.start();
+            }
+        }
+        event->accept();
+        return;
+
+    default:
+        break;
+    }
+
+    QWidget::keyPressEvent(event);
+}
+
+void VideoWidget::keyReleaseEvent(
+    QKeyEvent* event)
+{
+    if (event->isAutoRepeat())
+    {
+        event->accept();
+        return;
+    }
+
+    switch (event->key())
+    {
+    case Qt::Key_Up:
+        upHeld_ = false;
+        break;
+
+    case Qt::Key_Down:
+        downHeld_ = false;
+        break;
+
+    case Qt::Key_Left:
+        leftHeld_ = false;
+        break;
+
+    case Qt::Key_Right:
+        rightHeld_ = false;
+        break;
+
+    default:
+        QWidget::keyReleaseEvent(event);
+        return;
+    }
+
+    stopArrowRepeatIfIdle();
+    event->accept();
+}
+
 void VideoWidget::mousePressEvent(
     QMouseEvent* event)
 {
+    setFocus(Qt::MouseFocusReason);
+
     if (event->button() == Qt::LeftButton)
     {
         const QSize outputSize =

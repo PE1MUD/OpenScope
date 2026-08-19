@@ -35,6 +35,10 @@ struct Yuv444Frame
     // Blackmagic PAL/NTSC D1 uses 13.5 MHz; some Philips ROM sets use 20 MHz.
     double sampleClockHz = 13'500'000.0;
 
+    // Source/capture validity metadata. Sources are valid by default;
+    // hardware capture may explicitly mark a delivered frame invalid.
+    bool inputSignalValid = true;
+
     // Each plane contains width * height samples.
     std::vector<std::uint16_t> y;
     std::vector<std::uint16_t> u;

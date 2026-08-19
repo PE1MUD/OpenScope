@@ -50,6 +50,7 @@ public:
     [[nodiscard]] double traceBandwidthMHz() const;
     [[nodiscard]] const QImage& image() const;
     [[nodiscard]] const std::vector<float>& visibleLumaVolts() const noexcept;
+    [[nodiscard]] const std::vector<float>& fullLumaVolts() const noexcept;
 
     void setChromaFillIntensity(
         int intensity);
@@ -134,6 +135,7 @@ private:
 
     std::vector<float> singleLineSource_;
     std::vector<float> singleLineReconstructed_;
+    std::vector<float> fullLumaVolts_;
 
     std::array<std::uint8_t, 65536> displayLut_{};
 

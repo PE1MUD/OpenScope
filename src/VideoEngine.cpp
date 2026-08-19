@@ -189,6 +189,11 @@ Yuv444Frame* VideoEngine::tryAcquireWriteFrame()
         true,
         std::memory_order_release);
 
+    // Each producer starts from a valid source state. Hardware capture can
+    // explicitly override this before submitWriteFrame() (for example when
+    // DeckLink reports bmdFrameHasNoInputSource).
+    slot.frame.inputSignalValid = true;
+
     return &slot.frame;
 }
 
@@ -1828,6 +1833,33 @@ void VideoEngine::waveformWorkerLoop()
 
         emit waveformMeasurementDataChanged(
             measurementSamples);
+
+        const auto& fullSpectrumSource =
+            waveformScreenRenderer_.fullLumaVolts();
+
+        QVector<float> fullSpectrumSamples;
+        fullSpectrumSamples.reserve(
+            static_cast<qsizetype>(fullSpectrumSource.size()));
+
+        for (float sample : fullSpectrumSource)
+        {
+            fullSpectrumSamples.append(sample);
+        }
+
+        if (selectedLine >= 0)
+        {
+            emit waveformSpectrumDataChanged(
+                fullSpectrumSamples,
+                measurementSamples,
+                captureSlot.frame.inputSignalValid);
+        }
+        else
+        {
+            emit waveformSpectrumDataChanged(
+                QVector<float>{},
+                QVector<float>{},
+                captureSlot.frame.inputSignalValid);
+        }
 
         emit waveformChanged(
             waveformScreenRenderer_.image());

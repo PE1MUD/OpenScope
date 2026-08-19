@@ -32,6 +32,7 @@ public:
     void setMeasurementLuma(const QVector<float>& samples);
     void setInputSampleClockHz(double sampleClockHz);
     void clearMeasurements();
+    void triggerMultiburstMeasurement();
 
 signals:
     void zoomChanged(bool zoomed);

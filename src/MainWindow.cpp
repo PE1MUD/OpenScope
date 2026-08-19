@@ -4,6 +4,7 @@
 #include "VideoEngine.h"
 #include "widgets/VideoWidget.h"
 #include "widgets/WaveformWidget.h"
+#include "widgets/YSpectrumWindow.h"
 #include "DeckLinkProbe.h"
 #include "widgets/VectorscopeWidget.h"
 #include "settings/SettingsService.h"
@@ -22,6 +23,9 @@
 
 #include <windows.h>
 
+#include <QWindow>
+#include <QScreen>
+#include <QGuiApplication>
 #include <QTimer>
 #include <QAction>
 #include <QActionGroup>
@@ -103,6 +107,11 @@ MainWindow::MainWindow(QWidget* parent)
 
     waveformWidget_ =
         new WaveformWidget;
+
+    ySpectrumWindow_ =
+        new YSpectrumWindow(this);
+
+    ySpectrumWindow_->setSnrMeasurementEnabled(true);
 
     vectorscopeWidget_ =
         new VectorscopeWidget;
@@ -560,6 +569,157 @@ MainWindow::MainWindow(QWidget* parent)
                 nextZoom);
         });
 
+    // Keyboard convenience controls for point-and-measure in the video view.
+    // These deliberately reuse the existing line/zoom/scroll state paths.
+    connect(
+        videoWidget_,
+        &VideoWidget::zoomInRequested,
+        this,
+        [this]()
+        {
+            if (activeRenderView_ != RenderView::Matrix)
+            {
+                return;
+            }
+
+            const int currentZoom = waveformWidget_->zoomFactor();
+            const int nextZoom =
+                currentZoom <= 1 ? 5 : 10;
+
+            workspace_->setWaveformZoomFactor(nextZoom);
+        });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::zoomOutRequested,
+        this,
+        [this]()
+        {
+            if (activeRenderView_ != RenderView::Matrix)
+            {
+                return;
+            }
+
+            const int currentZoom = waveformWidget_->zoomFactor();
+            const int nextZoom =
+                currentZoom >= 10 ? 5 : 1;
+
+            workspace_->setWaveformZoomFactor(nextZoom);
+        });
+
+    const auto stepSelectedLine =
+        [this](int delta)
+        {
+            if (activeRenderView_ != RenderView::Matrix)
+            {
+                return;
+            }
+
+            constexpr int kFirstPalLine = 0;
+            constexpr int kLastPalLine = 575;
+
+            const int currentLine =
+                settingsService_->settings()
+                    .control
+                    .instrument
+                    .lineNumber;
+
+            // Keyboard navigation never enters All Lines (-1).
+            // If All Lines is currently selected, start at the nearest
+            // real edge in the requested direction.
+            const int baseLine =
+                currentLine < kFirstPalLine
+                ? (delta < 0 ? kLastPalLine : kFirstPalLine)
+                : currentLine;
+
+            const int nextLine =
+                std::clamp(
+                    baseLine + (currentLine < kFirstPalLine ? 0 : delta),
+                    kFirstPalLine,
+                    kLastPalLine);
+
+            workspace_->setLineNumber(nextLine);
+        };
+
+    connect(
+        videoWidget_,
+        &VideoWidget::lineUpRequested,
+        this,
+        [stepSelectedLine]() { stepSelectedLine(-1); });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::lineDownRequested,
+        this,
+        [stepSelectedLine]() { stepSelectedLine(+1); });
+
+    const auto panSelectedLine =
+        [this](double delta)
+        {
+            if (activeRenderView_ != RenderView::Matrix ||
+                waveformWidget_->zoomFactor() <= 1)
+            {
+                return;
+            }
+
+            constexpr double kKeyboardPanStep = 0.00625;
+
+            const double currentPosition =
+                settingsService_->settings()
+                    .control
+                    .instrument
+                    .waveform
+                    .scrollPosition;
+
+            waveformWidget_->setScrollPosition(
+                std::clamp(
+                    currentPosition + (delta * kKeyboardPanStep),
+                    0.0,
+                    1.0));
+        };
+
+    connect(
+        videoWidget_,
+        &VideoWidget::panLeftRequested,
+        this,
+        [panSelectedLine]() { panSelectedLine(-1.0); });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::panRightRequested,
+        this,
+        [panSelectedLine]() { panSelectedLine(+1.0); });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::multiburstRequested,
+        this,
+        [this]()
+        {
+            // M behaves identically whether keyboard focus is on the
+            // waveform or on the video view. Keep the implementation in
+            // WaveformWidget so there is only one multiburst code path.
+            waveformWidget_->triggerMultiburstMeasurement();
+        });
+
+    connect(
+        videoWidget_,
+        &VideoWidget::spectrumRequested,
+        this,
+        [this]()
+        {
+            if (ySpectrumWindow_->isVisible())
+            {
+                ySpectrumWindow_->hide();
+            }
+            else
+            {
+                ySpectrumWindow_->show();
+                ySpectrumWindow_->raise();
+                ySpectrumWindow_->activateWindow();
+            }
+        });
+
     connect(
         waveformWidget_,
         &WaveformWidget::outputSizeChanged,
@@ -647,6 +807,26 @@ MainWindow::MainWindow(QWidget* parent)
         &VideoEngine::waveformMeasurementDataChanged,
         waveformWidget_,
         &WaveformWidget::setMeasurementLuma);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformSpectrumDataChanged,
+        this,
+        [this](
+            const QVector<float>& fullLine,
+            const QVector<float>& visiblePart,
+            bool inputSignalValid)
+        {
+            const auto& settings =
+                settingsService_->settings();
+
+            ySpectrumWindow_->setSamples(
+                fullLine,
+                visiblePart,
+                settings.control.instrument.lineNumber,
+                settings.control.instrument.waveform.zoom,
+                inputSignalValid);
+        });
 
     auto* waveformVideoPreview =
         new WaveformVideoPreview(this);
@@ -1109,6 +1289,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(
         workspace_,
+        &ScopeWorkspace::floatiesHomeRequested,
+        this,
+        &MainWindow::homeFloaties);
+
+    connect(
+        workspace_,
         &ScopeWorkspace::workspaceViewChanged,
         this,
         [this](OpenScopeSettings::WorkspaceView view)
@@ -1209,6 +1395,53 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 
+void MainWindow::homeFloaties()
+{
+    QScreen* screen = nullptr;
+
+    if (QWindow* const handle = windowHandle())
+    {
+        screen = handle->screen();
+    }
+
+    if (screen == nullptr)
+    {
+        screen = QGuiApplication::primaryScreen();
+    }
+
+    if (screen == nullptr)
+    {
+        return;
+    }
+
+    const QRect available =
+        screen->availableGeometry();
+
+    const QPoint home =
+        available.topLeft() +
+        QPoint(24, 24);
+
+    // Cascade the floaties slightly so none of them disappears exactly
+    // underneath another. Their sizes and visibility are left untouched.
+    if (ySpectrumWindow_ != nullptr)
+    {
+        ySpectrumWindow_->move(
+            home);
+    }
+
+    if (performanceWidget_ != nullptr)
+    {
+        performanceWidget_->move(
+            home + QPoint(48, 48));
+    }
+
+    if (workspace_ != nullptr)
+    {
+        workspace_->homeFloatingSettings(
+            home + QPoint(96, 96));
+    }
+}
+
 void MainWindow::createSourceMenu()
 {
     QMenu* sourceMenu =
@@ -1281,6 +1514,7 @@ void MainWindow::selectBlackmagicSource()
     }
 
     waveformWidget_->setInputSampleClockHz(13'500'000.0);
+    ySpectrumWindow_->setSnrMeasurementEnabled(true);
 
     deckLinkStop();
     deckLinkProbe(videoEngine_);
@@ -1345,6 +1579,7 @@ void MainWindow::selectPhilipsPatternRomSource()
             errorMessage);
 
         blackmagicSourceAction_->setChecked(true);
+        ySpectrumWindow_->setSnrMeasurementEnabled(true);
         deckLinkStop();
         deckLinkProbe(videoEngine_);
         return;
@@ -1357,6 +1592,10 @@ void MainWindow::selectPhilipsPatternRomSource()
 
     waveformWidget_->setInputSampleClockHz(
         philipsPatternRomSource_->lumaSampleRateHz());
+
+    ySpectrumWindow_->setSnrMeasurementEnabled(
+        false,
+        QStringLiteral("DIGITAL ROM SOURCE   SNR not applicable"));
 
     deckLinkStop();
     philipsPatternRomSource_->start();
@@ -1393,12 +1632,17 @@ void MainWindow::reloadPhilipsPatternRomSource()
             errorMessage);
 
         blackmagicSourceAction_->setChecked(true);
+        ySpectrumWindow_->setSnrMeasurementEnabled(true);
         deckLinkProbe(videoEngine_);
         return;
     }
 
     waveformWidget_->setInputSampleClockHz(
         philipsPatternRomSource_->lumaSampleRateHz());
+
+    ySpectrumWindow_->setSnrMeasurementEnabled(
+        false,
+        QStringLiteral("DIGITAL ROM SOURCE   SNR not applicable"));
 
     deckLinkStop();
     philipsPatternRomSource_->start();
