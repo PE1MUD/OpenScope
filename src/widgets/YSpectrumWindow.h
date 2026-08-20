@@ -28,6 +28,15 @@ public:
         bool enabled,
         const QString& disabledReason = QString());
 
+    void setFlatFieldSamples(
+        const QVector<float>& samples,
+        int lineLength,
+        int lineCount,
+        bool inputSignalValid);
+
+signals:
+    void flatFieldCaptureRequested();
+
 protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -51,6 +60,7 @@ private:
     };
 
     void rebuildSpectrum();
+    void rebuildFlatFieldSpectrum();
     void resetAverage();
     void clearMaxHold();
     void clearPeakMeasurement();
@@ -69,14 +79,20 @@ private:
     QPushButton* maxHoldButton_ = nullptr;
     QPushButton* clearButton_ = nullptr;
     QPushButton* measurePeaksButton_ = nullptr;
+    QPushButton* flatFieldButton_ = nullptr;
 
     QVector<float> fullLine_;
+    QVector<float> safetyArea_;
     QVector<float> visiblePart_;
     QVector<SpectrumPoint> spectrum_;
     QVector<double> averagedAmplitudePower_;
     QVector<double> averagedNoisePower_;
     QVector<double> maxHoldAmplitudePower_;
     QVector<MeasuredPeak> measuredPeaks_;
+    QVector<float> flatFieldSamples_;
+    int flatFieldLineLength_ = 0;
+    int flatFieldLineCount_ = 0;
+    bool flatFieldInputSignalValid_ = true;
 
     int selectedLine_ = -1;
     int zoomFactor_ = 1;
@@ -89,8 +105,11 @@ private:
     int activeMarker_ = 0;
 
     double noiseRmsVolts_ = 0.0;
+    double weightedNoiseRmsVolts_ = 0.0;
     double snrDb_ = 0.0;
+    double weightedSnrDb_ = 0.0;
     bool snrValid_ = false;
+    bool weightedSnrValid_ = false;
     bool snrMeasurementEnabled_ = true;
     QString snrDisabledReason_;
     bool flatRegion_ = false;
@@ -98,6 +117,7 @@ private:
     bool inputSignalValid_ = true;
 
     static constexpr int kFftSize = 4096;
+    static constexpr int kFlatFieldFftSize = 1024;
     static constexpr double kNativeSampleClockHz = 13'500'000.0;
     static constexpr double kReconstructedSampleClockHz =
         kNativeSampleClockHz * 4.0;

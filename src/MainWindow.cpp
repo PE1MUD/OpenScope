@@ -41,6 +41,10 @@
 #include <QFileInfo>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QKeyEvent>
+#include <QEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <algorithm>
@@ -100,6 +104,10 @@ MainWindow::MainWindow(QWidget* parent)
     , videoEngine_(new VideoEngine(this))
 {
     setWindowTitle("OpenScope V" OPENSCOPE_VERSION);
+
+    // Catch plain F at the QApplication level so the spectrum shortcut
+    // also works while focus is inside separate Qt instrument/tool windows.
+    QCoreApplication::instance()->installEventFilter(this);
 
     SetThreadPriority(
         GetCurrentThread(),
@@ -702,23 +710,19 @@ MainWindow::MainWindow(QWidget* parent)
             waveformWidget_->triggerMultiburstMeasurement();
         });
 
+    const auto showYSpectrum =
+        [this]()
+        {
+            ySpectrumWindow_->show();
+            ySpectrumWindow_->raise();
+            ySpectrumWindow_->activateWindow();
+        };
+
     connect(
         videoWidget_,
         &VideoWidget::spectrumRequested,
         this,
-        [this]()
-        {
-            if (ySpectrumWindow_->isVisible())
-            {
-                ySpectrumWindow_->hide();
-            }
-            else
-            {
-                ySpectrumWindow_->show();
-                ySpectrumWindow_->raise();
-                ySpectrumWindow_->activateWindow();
-            }
-        });
+        showYSpectrum);
 
     connect(
         waveformWidget_,
@@ -827,6 +831,18 @@ MainWindow::MainWindow(QWidget* parent)
                 settings.control.instrument.waveform.zoom,
                 inputSignalValid);
         });
+
+    connect(
+        ySpectrumWindow_,
+        &YSpectrumWindow::flatFieldCaptureRequested,
+        videoEngine_,
+        &VideoEngine::requestWaveformFlatFieldSpectrum);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::waveformFlatFieldSpectrumDataChanged,
+        ySpectrumWindow_,
+        &YSpectrumWindow::setFlatFieldSamples);
 
     auto* waveformVideoPreview =
         new WaveformVideoPreview(this);
@@ -2163,6 +2179,30 @@ bool MainWindow::nativeEvent(
         eventType,
         message,
         result);
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event != nullptr &&
+        event->type() == QEvent::KeyPress)
+    {
+        auto* keyEvent =
+            static_cast<QKeyEvent*>(event);
+
+        if (keyEvent->key() == Qt::Key_F &&
+            keyEvent->modifiers() == Qt::NoModifier)
+        {
+            ySpectrumWindow_->show();
+            ySpectrumWindow_->raise();
+            ySpectrumWindow_->activateWindow();
+
+            return true;
+        }
+    }
+
+    return QMainWindow::eventFilter(
+        watched,
+        event);
 }
 
 void MainWindow::closeEvent(

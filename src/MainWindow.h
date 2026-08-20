@@ -36,6 +36,8 @@ public:
 protected:
     void closeEvent(QCloseEvent* event) override;
 
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
     bool nativeEvent(
         const QByteArray& eventType,
         void* message,

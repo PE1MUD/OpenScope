@@ -41,6 +41,8 @@ public:
 
     void setSelectedLine(int line);
 
+    void requestWaveformFlatFieldSpectrum();
+
     void setVideoOutputSize(
         int width,
         int height);
@@ -123,6 +125,12 @@ signals:
         const QVector<float>& visiblePart,
         bool inputSignalValid);
 
+    void waveformFlatFieldSpectrumDataChanged(
+        const QVector<float>& samples,
+        int lineLength,
+        int lineCount,
+        bool inputSignalValid);
+
     void vectorscopeChanged(
         const QImage& image);
 
@@ -199,6 +207,10 @@ private:
 
     std::atomic<bool> videoHighlightEnabled_{
         true
+    };
+
+    std::atomic<bool> flatFieldSpectrumRequested_{
+        false
     };
 
     std::atomic<bool> noiseReductionEnabled_{

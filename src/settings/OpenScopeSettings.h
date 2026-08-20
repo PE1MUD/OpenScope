@@ -37,7 +37,7 @@ struct OpenScopeSettings
                 int zoom = 1;
                 double scrollPosition = 0.0;
 
-                bool vintageLook = true;
+                bool vintageLook = false;
                 int chromaRenderIntensity = 150;
 
                 int persistenceFrames = 5;

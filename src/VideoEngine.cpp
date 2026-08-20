@@ -281,6 +281,16 @@ void VideoEngine::setSelectedLine(int line)
 }
 
 
+void VideoEngine::requestWaveformFlatFieldSpectrum()
+{
+    flatFieldSpectrumRequested_.store(
+        true,
+        std::memory_order_release);
+
+    waveformCondition_.notify_one();
+}
+
+
 void VideoEngine::setVideoHighlightEnabled(
     bool enabled)
 {
@@ -1858,6 +1868,67 @@ void VideoEngine::waveformWorkerLoop()
             emit waveformSpectrumDataChanged(
                 QVector<float>{},
                 QVector<float>{},
+                captureSlot.frame.inputSignalValid);
+        }
+
+        if (flatFieldSpectrumRequested_.exchange(
+                false,
+                std::memory_order_acq_rel))
+        {
+            const int lineLength =
+                captureSlot.frame.width;
+
+            // The final PAL line in this capture contains the start of the
+            // following sync structure.  Flat-field analysis deliberately
+            // excludes that line and uses every preceding active raster line.
+            const int lineCount = std::max(
+                0,
+                captureSlot.frame.height - 1);
+
+            QVector<float> flatFieldSamples;
+            flatFieldSamples.resize(
+                static_cast<qsizetype>(lineLength) *
+                static_cast<qsizetype>(lineCount));
+
+            constexpr double blackVolts = 0.300;
+            constexpr double whiteVolts = 1.000;
+            constexpr double yBlack10 = 64.0;
+            constexpr double yWhite10 = 940.0;
+            constexpr double voltsPerCode =
+                (whiteVolts - blackVolts) /
+                (yWhite10 - yBlack10);
+
+            for (int y = 0; y < lineCount; ++y)
+            {
+                const std::size_t sourceOffset =
+                    static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(lineLength);
+
+                const qsizetype destinationOffset =
+                    static_cast<qsizetype>(y) *
+                    static_cast<qsizetype>(lineLength);
+
+                for (int x = 0; x < lineLength; ++x)
+                {
+                    const double y10 =
+                        static_cast<double>(
+                            captureSlot.frame.y[
+                                sourceOffset +
+                                static_cast<std::size_t>(x)]) /
+                        64.0;
+
+                    flatFieldSamples[
+                        destinationOffset + x] =
+                        static_cast<float>(
+                            blackVolts +
+                            (y10 - yBlack10) * voltsPerCode);
+                }
+            }
+
+            emit waveformFlatFieldSpectrumDataChanged(
+                flatFieldSamples,
+                lineLength,
+                lineCount,
                 captureSlot.frame.inputSignalValid);
         }
 
