@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.6.6
+    VERSION 0.7.0
     LANGUAGES C CXX
 )
 
@@ -159,6 +159,8 @@ src/rendering/WaveformGraticule.h
 src/rendering/WaveformGraticule.cpp
 src/rendering/VectorscopeGraticule.h
 src/rendering/VectorscopeGraticule.cpp
+src/rendering/VectorscopeRenderer.h
+src/rendering/VectorscopeRenderer.cpp
 
 src/settings/OpenScopeSettings.h
 src/settings/SettingsService.h

@@ -21,6 +21,7 @@ public:
     explicit VideoWidget(QWidget* parent = nullptr);
 
     void setImage(const QImage& image);
+    void setInputSignalValid(bool valid);
 
     void setAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
@@ -89,6 +90,7 @@ private:
     void stopArrowRepeatIfIdle();
 
     QImage image_;
+    bool inputSignalValid_ = true;
 
     QTimer arrowRepeatTimer_;
 

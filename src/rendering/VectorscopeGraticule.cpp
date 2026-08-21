@@ -332,7 +332,8 @@ namespace
         const Target* targets,
         std::size_t targetCount,
         ColorBarLevel level,
-        double lineWidth)
+        double lineWidth,
+        double labelScale)
     {
         painter.setBrush(Qt::NoBrush);
         QFont labelFont =
@@ -341,7 +342,8 @@ namespace
         labelFont.setPixelSize(
             static_cast<int>(
                 radius *
-                VectorscopeSettings::targetLabelSizeFraction));
+                VectorscopeSettings::targetLabelSizeFraction *
+                labelScale));
 
         painter.setFont(labelFont);
 
@@ -444,15 +446,20 @@ void VectorscopeGraticule::setLineWidth(double width)
 void VectorscopeGraticule::drawAxes(
     QPainter& painter,
     const QPointF& center,
-    double radius) const
+    double radius,
+    double lineScale,
+    double labelScale) const
 {
     const double labelOffset =
         radius *
         VectorscopeSettings::axisLabelOffsetFraction;
 
+    const double effectiveLineWidth =
+        lineWidth_ * lineScale;
+
     QPen graticulePen(
         QColor(135, 135, 125),
-        lineWidth_);
+        effectiveLineWidth);
 
     painter.setPen(graticulePen);
     painter.setBrush(Qt::NoBrush);
@@ -498,7 +505,7 @@ void VectorscopeGraticule::drawAxes(
     painter.setPen(
         QPen(
             QColor(90, 90, 85),
-            lineWidth_));
+            effectiveLineWidth));
 
     // Horizontal axis.
     painter.drawLine(
@@ -525,7 +532,8 @@ void VectorscopeGraticule::drawAxes(
     axisFont.setPixelSize(
         static_cast<int>(
             radius *
-            VectorscopeSettings::axisLabelSizeFraction));
+            VectorscopeSettings::axisLabelSizeFraction *
+            labelScale));
 
     painter.setFont(axisFont);
 
@@ -571,7 +579,9 @@ void VectorscopeGraticule::drawAxes(
 
 void VectorscopeGraticule::draw(
     QPainter& painter,
-    const QRectF& scopeRect) const
+    const QRectF& scopeRect,
+    double lineScale,
+    double labelScale) const
 {
     const QPointF center =
         scopeRect.center();
@@ -585,7 +595,9 @@ void VectorscopeGraticule::draw(
     drawAxes(
         painter,
         center,
-        axesRadius);
+        axesRadius,
+        lineScale,
+        labelScale);
 
     drawTargets(
         painter,
@@ -594,7 +606,8 @@ void VectorscopeGraticule::draw(
         kTargets75,
         std::size(kTargets75),
         ColorBarLevel::Percent75,
-        lineWidth_);
+        lineWidth_ * lineScale,
+        labelScale);
 
     drawTargets(
         painter,
@@ -603,5 +616,6 @@ void VectorscopeGraticule::draw(
         kTargets100,
         std::size(kTargets100),
         ColorBarLevel::Percent100,
-        lineWidth_);
+        lineWidth_ * lineScale,
+        labelScale);
 }

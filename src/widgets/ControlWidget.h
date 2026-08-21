@@ -50,6 +50,7 @@ signals:
     void floatiesHomeRequested();
     void spoutVideoEnabledChanged(bool enabled);
     void spoutWaveformEnabledChanged(bool enabled);
+    void spoutVectorscopeEnabledChanged(bool enabled);
     void legacyAspectRatioChanged(bool legacyEnabled);
     void exportHighResolutionPngRequested();
     void exportHighResolutionPngQuickRequested();

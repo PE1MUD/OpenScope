@@ -1,4 +1,5 @@
 #include "widgets/WaveformWidget.h"
+#include "ui/ViewportOverlay.h"
 
 #include "rendering/WaveformGraticule.h"
 #include "standards/VideoStandard.h"
@@ -425,6 +426,19 @@ WaveformWidget::WaveformWidget(QWidget* parent)
         this,
         &WaveformWidget::advanceMultiburstDebugStep);
 }
+
+void WaveformWidget::setInputSignalValid(bool valid)
+{
+    if (inputSignalValid_ == valid)
+    {
+        return;
+    }
+
+    inputSignalValid_ = valid;
+    VideoWidget::setInputSignalValid(valid);
+    update();
+}
+
 
 bool WaveformWidget::isZoomed() const
 {
@@ -4473,6 +4487,14 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
     QPainter painter(this);
     painter.fillRect(rect(), Qt::black);
+
+    if (!inputSignalValid_)
+    {
+        ViewportOverlay::drawNoVideo(
+            painter,
+            QRectF(rect()));
+        return;
+    }
 
     if (image().isNull())
     {

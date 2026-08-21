@@ -34,6 +34,8 @@ public:
     void clearMeasurements();
     void triggerMultiburstMeasurement();
 
+    void setInputSignalValid(bool valid);
+
 signals:
     void zoomChanged(bool zoomed);
     void zoomFactorChanged(int factor);
@@ -148,6 +150,8 @@ private:
         int* measurementIndex = nullptr) const;
     double displayYToVolts(double displayY) const;
     double voltsToDisplayY(double volts) const;
+
+    bool inputSignalValid_ = true;
 
     int zoomFactor_ = 1;
     bool zoomEnabled_ = true;

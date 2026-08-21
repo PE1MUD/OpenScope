@@ -58,6 +58,7 @@ signals:
     void floatiesHomeRequested();
     void spoutVideoEnabledChanged(bool enabled);
     void spoutWaveformEnabledChanged(bool enabled);
+    void spoutVectorscopeEnabledChanged(bool enabled);
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);

@@ -1,4 +1,5 @@
 #include "widgets/VideoWidget.h"
+#include "ui/ViewportOverlay.h"
 
 #include <QColor>
 #include <QFocusEvent>
@@ -38,6 +39,17 @@ VideoWidget::VideoWidget(QWidget* parent)
 void VideoWidget::setImage(const QImage& image)
 {
     image_ = image;
+    update();
+}
+
+void VideoWidget::setInputSignalValid(bool valid)
+{
+    if (inputSignalValid_ == valid)
+    {
+        return;
+    }
+
+    inputSignalValid_ = valid;
     update();
 }
 
@@ -454,6 +466,14 @@ void VideoWidget::paintEvent(QPaintEvent* event)
     painter.fillRect(
         rect(),
         Qt::black);
+
+    if (!inputSignalValid_)
+    {
+        ViewportOverlay::drawNoVideo(
+            painter,
+            QRectF(rect()));
+        return;
+    }
 
     if (image_.isNull())
     {

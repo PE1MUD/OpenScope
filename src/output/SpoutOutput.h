@@ -27,6 +27,7 @@ public:
     // the rest of OpenScope.
 public slots:
     void submitImage(const QImage& image);
+    void setInputSignalValid(bool valid);
     void stop();
 
 public:

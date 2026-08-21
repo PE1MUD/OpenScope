@@ -15,7 +15,7 @@
 #include <thread>
 #include <vector>
 
-#include "analysis/VectorscopeAnalyzer.h"
+#include "rendering/VectorscopeRenderer.h"
 #include "processing/SignalReconstructor.h"
 #include "processing/VideoDeinterlacer.h"
 #include "processing/NoiseReducer.h"
@@ -94,6 +94,19 @@ public:
         int width,
         int height);
 
+    void setVectorscopeVideoOutputSize(
+        int width,
+        int height);
+
+    void setVectorscopeVideoContentScale(
+        double horizontalScale,
+        double verticalScale);
+
+    void setVectorscopeVideoEnabled(bool enabled);
+
+    void setVectorscopePresentationInfo(
+        const VectorscopePresentationInfo& info);
+
     void setWaveformAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
 
@@ -105,6 +118,8 @@ public:
     QImage captureHighResolutionSnapshot();
 
 signals:
+    void inputSignalStateChanged(bool valid);
+
     void frameChanged(
         const QImage& image);
 
@@ -132,6 +147,9 @@ signals:
         bool inputSignalValid);
 
     void vectorscopeChanged(
+        const QImage& image);
+
+    void vectorscopeVideoChanged(
         const QImage& image);
 
 private:
@@ -260,6 +278,21 @@ private:
         kMinimumOutputSize
     };
 
+    std::atomic<int> vectorscopeVideoOutputWidth_{
+        kDefaultVideoWidth
+    };
+
+    std::atomic<int> vectorscopeVideoOutputHeight_{
+        kDefaultVideoHeight
+    };
+
+    std::atomic<double> vectorscopeVideoContentScaleX_{ 0.80 };
+    std::atomic<double> vectorscopeVideoContentScaleY_{ 0.90 };
+    std::atomic_bool vectorscopeVideoEnabled_{ false };
+
+    std::mutex vectorscopePresentationMutex_;
+    VectorscopePresentationInfo vectorscopePresentationInfo_;
+
     // Capture buffers
 
     std::array<
@@ -359,7 +392,13 @@ private:
     DisplayConverter spoutVideoConverter_;
     WaveformRenderer waveformScreenRenderer_;
     WaveformRenderer waveformVideoRenderer_;
-    VectorscopeAnalyzer vectorscopeAnalyzer_;
+    VectorscopeRenderer vectorscopeScreenRenderer_{
+        VectorscopeRenderer::Profile::Screen
+    };
+
+    VectorscopeRenderer vectorscopeVideoRenderer_{
+        VectorscopeRenderer::Profile::Video
+    };
 
     NoiseReducer noiseReducer_;
     Yuv444Frame noiseReducedFrame_;

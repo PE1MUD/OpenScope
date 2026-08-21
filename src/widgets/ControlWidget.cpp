@@ -883,8 +883,6 @@ ControlWidget::ControlWidget(
             .spout
             .vectorscopeEnabled);
 
-    spoutVectorscopeCheckBox->setEnabled(
-        false);
 
     miscLayout->addWidget(
         spoutVectorscopeCheckBox);
@@ -942,6 +940,12 @@ ControlWidget::ControlWidget(
         &QCheckBox::toggled,
         this,
         &ControlWidget::spoutWaveformEnabledChanged);
+
+    connect(
+        spoutVectorscopeCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::spoutVectorscopeEnabledChanged);
 
     connect(
         exportHighResolutionPngButton,

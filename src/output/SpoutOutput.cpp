@@ -1,4 +1,5 @@
 #include "output/SpoutOutput.h"
+#include "ui/ViewportOverlay.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,6 +21,7 @@
 
 #include <QByteArray>
 #include <QDebug>
+#include <QPainter>
 
 #include <utility>
 
@@ -158,6 +160,7 @@ public:
 
     bool active = false;
     bool openFailureReported = false;
+    bool inputSignalValid = true;
 };
 
 SpoutOutput::SpoutOutput(
@@ -199,6 +202,17 @@ void SpoutOutput::submitImage(const QImage& image)
 
     QImage source = image;
 
+    if (!d_->inputSignalValid)
+    {
+        source = image.convertToFormat(QImage::Format_RGB32);
+        QPainter painter(&source);
+        painter.fillRect(source.rect(), Qt::black);
+        ViewportOverlay::drawNoVideo(
+            painter,
+            QRectF(source.rect()),
+            true);
+    }
+
     // QImage RGB32/ARGB32 is BGRA byte order on little-endian Windows,
     // matching DXGI_FORMAT_B8G8R8A8_UNORM exactly.
     if (source.format() != QImage::Format_RGB32 &&
@@ -224,6 +238,11 @@ void SpoutOutput::submitImage(const QImage& image)
         0);
 
     d_->sender.SendTexture(d_->uploadTexture.Get());
+}
+
+void SpoutOutput::setInputSignalValid(bool valid)
+{
+    d_->inputSignalValid = valid;
 }
 
 bool SpoutOutput::submitTexture(ID3D11Texture2D* texture)

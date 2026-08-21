@@ -378,17 +378,29 @@ MainWindow::MainWindow(QWidget* parent)
             }
         });
 
-    // Render-output wiring first. Aspect-ratio changes can now safely
-    // emit fresh output sizes into the engine.
+    // Vectorscope now follows the same screen-render contract as waveform:
+    // the widget publishes the full presentation size, VideoEngine renders a
+    // complete image at that size, and the widget simply presents the latest
+    // completed image while a resize is in flight.
     connect(
         vectorscopeWidget_,
-        &VectorscopeWidget::renderSizeChanged,
+        &VideoWidget::outputSizeChanged,
         videoEngine_,
         &VideoEngine::setVectorscopeOutputSize);
 
+    const QSize initialVectorscopeRenderSize =
+        vectorscopeWidget_->renderSize();
+
+    videoEngine_->setVectorscopeOutputSize(
+        initialVectorscopeRenderSize.width(),
+        initialVectorscopeRenderSize.height());
+
+    vectorscopeRenderSize_ =
+        initialVectorscopeRenderSize;
+
     connect(
         vectorscopeWidget_,
-        &VectorscopeWidget::renderSizeChanged,
+        &VideoWidget::outputSizeChanged,
         this,
         [this](int width, int height)
         {
@@ -752,6 +764,42 @@ MainWindow::MainWindow(QWidget* parent)
         videoWidget_,
         &VideoWidget::setImage);
 
+    auto* inputSignalWatchdog =
+        new QTimer(this);
+
+    inputSignalWatchdog->setSingleShot(true);
+    inputSignalWatchdog->setInterval(500);
+
+    const auto setInputSignalValid =
+        [this](bool valid)
+        {
+            videoWidget_->setInputSignalValid(valid);
+            waveformWidget_->setInputSignalValid(valid);
+            vectorscopeWidget_->setInputSignalValid(valid);
+        };
+
+    connect(
+        videoEngine_,
+        &VideoEngine::inputSignalStateChanged,
+        this,
+        [inputSignalWatchdog, setInputSignalValid](bool valid)
+        {
+            setInputSignalValid(valid);
+            inputSignalWatchdog->start();
+        });
+
+    connect(
+        inputSignalWatchdog,
+        &QTimer::timeout,
+        this,
+        [setInputSignalValid]()
+        {
+            setInputSignalValid(false);
+        });
+
+    // No source has delivered a frame yet. Start in the honest state.
+    setInputSignalValid(false);
+
     auto* videoSpoutOutput =
         new SpoutOutput(
             QStringLiteral("OpenScope Video"),
@@ -762,6 +810,13 @@ MainWindow::MainWindow(QWidget* parent)
         &VideoEngine::videoSpoutChanged,
         videoSpoutOutput,
         &SpoutOutput::submitImage,
+        Qt::QueuedConnection);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::inputSignalStateChanged,
+        videoSpoutOutput,
+        &SpoutOutput::setInputSignalValid,
         Qt::QueuedConnection);
 
     const auto setVideoSpoutEnabled =
@@ -863,6 +918,13 @@ MainWindow::MainWindow(QWidget* parent)
             QStringLiteral("OpenScope Waveform"),
             this);
 
+    connect(
+        videoEngine_,
+        &VideoEngine::inputSignalStateChanged,
+        waveformSpoutOutput,
+        &SpoutOutput::setInputSignalValid,
+        Qt::QueuedConnection);
+
     auto waveformSpoutConnection =
         std::make_shared<QMetaObject::Connection>();
 
@@ -926,7 +988,95 @@ MainWindow::MainWindow(QWidget* parent)
         videoEngine_,
         &VideoEngine::vectorscopeChanged,
         vectorscopeWidget_,
-        &VectorscopeWidget::setImage);
+        &VideoWidget::setImage);
+
+    VectorscopePresentationInfo vectorscopePresentation;
+    vectorscopePresentation.source = QStringLiteral("BMD IP 4K");
+    vectorscopePresentation.input = QStringLiteral("Composite");
+    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.targets =
+        initialSettings.control.instrument.vectorscope.showHundredPercentTargets
+        ? QStringLiteral("100%")
+        : QStringLiteral("75%");
+    vectorscopePresentation.matrix = QStringLiteral("BT.601");
+    vectorscopePresentation.processing = QStringLiteral("YUV 4:2:2 10 bit");
+
+    videoEngine_->setVectorscopePresentationInfo(
+        vectorscopePresentation);
+
+    auto* vectorscopeSpoutOutput =
+        new SpoutOutput(
+            QStringLiteral("OpenScope Vectorscope"),
+            this);
+
+    connect(
+        videoEngine_,
+        &VideoEngine::inputSignalStateChanged,
+        vectorscopeSpoutOutput,
+        &SpoutOutput::setInputSignalValid,
+        Qt::QueuedConnection);
+
+    auto vectorscopeSpoutConnection =
+        std::make_shared<QMetaObject::Connection>();
+
+    const auto setVectorscopeSpoutEnabled =
+        [this,
+         vectorscopeSpoutOutput,
+         vectorscopeSpoutConnection](bool enabled)
+        {
+            QObject::disconnect(
+                *vectorscopeSpoutConnection);
+
+            *vectorscopeSpoutConnection =
+                QMetaObject::Connection();
+
+            constexpr VideoStandard videoStandard =
+                VideoStandard::pal625();
+
+            videoEngine_->setVectorscopeVideoOutputSize(
+                videoStandard.outputWidth,
+                videoStandard.outputHeight);
+
+            videoEngine_->setVectorscopeVideoContentScale(
+                videoStandard.safeWidthScale,
+                videoStandard.safeHeightScale);
+
+            videoEngine_->setVectorscopeVideoEnabled(
+                enabled);
+
+            if (enabled)
+            {
+                *vectorscopeSpoutConnection =
+                    connect(
+                        videoEngine_,
+                        &VideoEngine::vectorscopeVideoChanged,
+                        vectorscopeSpoutOutput,
+                        &SpoutOutput::submitImage,
+                        Qt::QueuedConnection);
+            }
+            else
+            {
+                vectorscopeSpoutOutput->stop();
+            }
+        };
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::spoutVectorscopeEnabledChanged,
+        this,
+        [this, setVectorscopeSpoutEnabled](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local.spout.vectorscopeEnabled = enabled;
+                });
+
+            setVectorscopeSpoutEnabled(enabled);
+        });
+
+    setVectorscopeSpoutEnabled(
+        initialSettings.local.spout.vectorscopeEnabled);
 
     // Initial processing/instrument state.
     videoEngine_->setDisplayGamma(
@@ -1532,6 +1682,24 @@ void MainWindow::selectBlackmagicSource()
     waveformWidget_->setInputSampleClockHz(13'500'000.0);
     ySpectrumWindow_->setSnrMeasurementEnabled(true);
 
+    VectorscopePresentationInfo vectorscopePresentation;
+    vectorscopePresentation.source = QStringLiteral("BMD IP 4K");
+    vectorscopePresentation.input = QStringLiteral("Composite");
+    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.targets =
+        settingsService_->settings()
+            .control
+            .instrument
+            .vectorscope
+            .showHundredPercentTargets
+        ? QStringLiteral("100%")
+        : QStringLiteral("75%");
+    vectorscopePresentation.matrix = QStringLiteral("BT.601");
+    vectorscopePresentation.processing = QStringLiteral("YUV 4:2:2 10 bit");
+
+    videoEngine_->setVectorscopePresentationInfo(
+        vectorscopePresentation);
+
     deckLinkStop();
     deckLinkProbe(videoEngine_);
 
@@ -1615,6 +1783,24 @@ void MainWindow::selectPhilipsPatternRomSource()
 
     deckLinkStop();
     philipsPatternRomSource_->start();
+
+    VectorscopePresentationInfo vectorscopePresentation;
+    vectorscopePresentation.source = QStringLiteral("Philips ROM");
+    vectorscopePresentation.input = QStringLiteral("Pattern ROM");
+    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.targets =
+        settingsService_->settings()
+            .control
+            .instrument
+            .vectorscope
+            .showHundredPercentTargets
+        ? QStringLiteral("100%")
+        : QStringLiteral("75%");
+    vectorscopePresentation.matrix = QStringLiteral("BT.601");
+    vectorscopePresentation.processing = QStringLiteral("YUV 4:4:4 16 bit");
+
+    videoEngine_->setVectorscopePresentationInfo(
+        vectorscopePresentation);
 
     philipsPatternRomSourceAction_->setText(
         tr("Philips Pattern ROM - %1")

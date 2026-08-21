@@ -1,7 +1,6 @@
 #include <QMetaObject>
 #include "VideoEngine.h"
 #include "standards/VideoStandard.h"
-#include "VectorscopeSettings.h"
 #include <QDebug>
 #include <QElapsedTimer>
 #include <algorithm>
@@ -19,8 +18,6 @@
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
 {
-    vectorscopeAnalyzer_.setScale(
-        VectorscopeSettings::scale);
 
     for (DisplayConverter& converter :
         displayConverters_)
@@ -52,17 +49,21 @@ VideoEngine::VideoEngine(QObject* parent)
                 });
     }
 
-    vectorscopeAnalyzer_.moveToThread(
+    vectorscopeScreenRenderer_.moveAnalyzerToThread(
+        &vectorscopeThread_);
+
+    vectorscopeVideoRenderer_.moveAnalyzerToThread(
         &vectorscopeThread_);
 
     connect(
         &vectorscopeThread_,
         &QThread::started,
-        &vectorscopeAnalyzer_,
+        this,
         [this]()
         {
             vectorscopeWorkerLoop();
-        });
+        },
+        Qt::DirectConnection);
 
     vectorscopeThread_.start();
 
@@ -242,6 +243,9 @@ void VideoEngine::submitWriteFrame()
         static_cast<int>(slotIndex),
         std::memory_order_release);
 
+    emit inputSignalStateChanged(
+        slot.frame.inputSignalValid);
+
     {
         std::lock_guard<std::mutex> lock(
             displayPresenterMutex_);
@@ -388,6 +392,52 @@ void VideoEngine::setVectorscopeOutputSize(
     vectorscopeOutputHeight_.store(
         (std::max)(height, kMinimumOutputSize),
         std::memory_order_release);
+}
+
+
+void VideoEngine::setVectorscopeVideoOutputSize(
+    int width,
+    int height)
+{
+    vectorscopeVideoOutputWidth_.store(
+        (std::max)(width, kMinimumOutputSize),
+        std::memory_order_release);
+
+    vectorscopeVideoOutputHeight_.store(
+        (std::max)(height, kMinimumOutputSize),
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setVectorscopeVideoContentScale(
+    double horizontalScale,
+    double verticalScale)
+{
+    vectorscopeVideoContentScaleX_.store(
+        std::clamp(horizontalScale, 0.10, 1.0),
+        std::memory_order_release);
+
+    vectorscopeVideoContentScaleY_.store(
+        std::clamp(verticalScale, 0.10, 1.0),
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setVectorscopeVideoEnabled(bool enabled)
+{
+    vectorscopeVideoEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setVectorscopePresentationInfo(
+    const VectorscopePresentationInfo& info)
+{
+    std::lock_guard<std::mutex> lock(
+        vectorscopePresentationMutex_);
+
+    vectorscopePresentationInfo_ = info;
 }
 
 
@@ -2016,54 +2066,127 @@ void VideoEngine::vectorscopeWorkerLoop()
                     << "frame(s)";
             }
         }
-        const int outputWidth =
-            vectorscopeOutputWidth_.load(
-                std::memory_order_acquire);
 
-        const int outputHeight =
-            vectorscopeOutputHeight_.load(
-                std::memory_order_acquire);
+        VectorscopePresentationInfo presentation;
 
-        vectorscopeAnalyzer_.setOutputSize(
-            outputWidth,
-            outputHeight);
+        {
+            std::lock_guard<std::mutex> lock(
+                vectorscopePresentationMutex_);
+
+            presentation =
+                vectorscopePresentationInfo_;
+        }
 
         const int selectedLine =
             selectedLine_.load(
                 std::memory_order_acquire);
 
-        vectorscopeAnalyzer_.setSelectedLine(
-            selectedLine);
-
-        vectorscopeAnalyzer_.setHorizontalWindow(
+        const int zoomFactor =
             waveformZoomFactor_.load(
-                std::memory_order_acquire),
-            waveformScrollPosition_.load(
-                std::memory_order_acquire));
+                std::memory_order_acquire);
 
-        const int vectorscopePersistence =
+        const double scrollPosition =
+            waveformScrollPosition_.load(
+                std::memory_order_acquire);
+
+        const int persistence =
             vectorscopePersistence_.load(
                 std::memory_order_acquire);
 
-        vectorscopeAnalyzer_.setPersistence(
-            vectorscopePersistence);
-
-        const int vectorscopeGlow =
+        const int glow =
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
 
-        vectorscopeAnalyzer_.setGlow(
-            vectorscopeGlow);
+        const int screenWidth =
+            vectorscopeOutputWidth_.load(
+                std::memory_order_acquire);
+
+        const int screenHeight =
+            vectorscopeOutputHeight_.load(
+                std::memory_order_acquire);
+
+        vectorscopeScreenRenderer_.setOutputSize(
+            screenWidth,
+            screenHeight);
+
+        vectorscopeScreenRenderer_.setPresentationInfo(
+            presentation);
+
+        vectorscopeScreenRenderer_.setSelectedLine(
+            selectedLine);
+
+        vectorscopeScreenRenderer_.setHorizontalWindow(
+            zoomFactor,
+            scrollPosition);
+
+        vectorscopeScreenRenderer_.setPersistence(
+            persistence);
+
+        vectorscopeScreenRenderer_.setGlow(
+            glow);
 
         QElapsedTimer timer;
         timer.start();
 
-        vectorscopeAnalyzer_.analyze(
+        vectorscopeScreenRenderer_.analyze(
             captureSlots_[slotIndex].frame);
 
         performanceStats_.vectorscope.update(
             static_cast<std::uint64_t>(
                 timer.nsecsElapsed() / 1000));
+
+        emit vectorscopeChanged(
+            vectorscopeScreenRenderer_.image());
+
+        if (vectorscopeVideoEnabled_.load(
+                std::memory_order_acquire))
+        {
+            const int videoWidth =
+                vectorscopeVideoOutputWidth_.load(
+                    std::memory_order_acquire);
+
+            const int videoHeight =
+                vectorscopeVideoOutputHeight_.load(
+                    std::memory_order_acquire);
+
+            const double contentScaleX =
+                vectorscopeVideoContentScaleX_.load(
+                    std::memory_order_acquire);
+
+            const double contentScaleY =
+                vectorscopeVideoContentScaleY_.load(
+                    std::memory_order_acquire);
+
+            vectorscopeVideoRenderer_.setOutputSize(
+                videoWidth,
+                videoHeight);
+
+            vectorscopeVideoRenderer_.setContentScale(
+                contentScaleX,
+                contentScaleY);
+
+            vectorscopeVideoRenderer_.setPresentationInfo(
+                presentation);
+
+            vectorscopeVideoRenderer_.setSelectedLine(
+                selectedLine);
+
+            vectorscopeVideoRenderer_.setHorizontalWindow(
+                zoomFactor,
+                scrollPosition);
+
+            vectorscopeVideoRenderer_.setPersistence(
+                persistence);
+
+            vectorscopeVideoRenderer_.setGlow(
+                glow);
+
+            vectorscopeVideoRenderer_.analyze(
+                captureSlots_[slotIndex].frame);
+
+            emit vectorscopeVideoChanged(
+                vectorscopeVideoRenderer_.image());
+        }
 
         const bool stillValid =
             isCaptureSlotValid(
@@ -2076,12 +2199,8 @@ void VideoEngine::vectorscopeWorkerLoop()
                 << "Vectorscope missed capture deadline:"
                 << generation;
         }
-
-        emit vectorscopeChanged(
-            vectorscopeAnalyzer_.image());
     }
 }
-
 
 
 int VideoEngine::findCaptureSlotByGeneration(

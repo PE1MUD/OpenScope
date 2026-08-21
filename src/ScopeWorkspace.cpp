@@ -201,6 +201,12 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::spoutVectorscopeEnabledChanged,
+        this,
+        &ScopeWorkspace::spoutVectorscopeEnabledChanged);
+
+    connect(
+        controlWidget_,
         &ControlWidget::noiseReductionChanged,
         this,
         &ScopeWorkspace::noiseReductionChanged);

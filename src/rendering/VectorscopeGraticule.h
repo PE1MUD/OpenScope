@@ -8,7 +8,9 @@ class VectorscopeGraticule
 public:
     void draw(
         QPainter& painter,
-        const QRectF& scopeRect) const;
+        const QRectF& scopeRect,
+        double lineScale = 1.0,
+        double labelScale = 1.0) const;
 
     void setLineWidth(double width);
     void setScale(double scale);
@@ -17,7 +19,9 @@ private:
     void drawAxes(
         QPainter& painter,
         const QPointF& center,
-        double radius) const;
+        double radius,
+        double lineScale,
+        double labelScale) const;
 
     VideoStandard videoStandard_ =
         VideoStandard::pal625();
