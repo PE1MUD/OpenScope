@@ -23,6 +23,7 @@ struct VideoStandard
     int outputWidth;
     int outputHeight;
     double sampleClockHz;
+    double pixelAspectRatio;
     double safeWidthScale;
     double safeHeightScale;
 
@@ -37,6 +38,7 @@ struct VideoStandard
             720,
             576,
             13'500'000.0,
+            16.0 / 15.0,
             0.80,
             0.90
         };
@@ -53,6 +55,7 @@ struct VideoStandard
             720,
             486,
             13'500'000.0,
+            1.0,
             1.0,
             1.0
         };

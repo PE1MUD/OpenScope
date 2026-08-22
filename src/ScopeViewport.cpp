@@ -47,6 +47,15 @@ ScopeViewport::ScopeViewport(
     }
 }
 
+void ScopeViewport::focusContent()
+{
+    if (contentWidget_ != nullptr)
+    {
+        contentWidget_->setFocus(
+            Qt::OtherFocusReason);
+    }
+}
+
 void ScopeViewport::mouseDoubleClickEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::LeftButton)

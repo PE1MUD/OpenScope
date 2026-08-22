@@ -30,6 +30,7 @@ VectorscopeAnalyzer::VectorscopeAnalyzer()
         static_cast<std::size_t>(
             kAllLinesWidth *
             kAllLinesHeight));
+
 }
 void VectorscopeAnalyzer::setOutputSize(
     int width,
@@ -63,6 +64,7 @@ void VectorscopeAnalyzer::setOutputSize(
 
     persistenceImage_.fill(
         Qt::black);
+
 }
 void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 {
@@ -89,6 +91,12 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
         0.5 *
         scale_ /
         32768.0;
+
+    const double scaleX =
+        scale * geometryScaleX_;
+
+    const double scaleY =
+        scale * geometryScaleY_;
 
     std::size_t firstSample = 0;
     std::size_t lastSample = frame.u.size();
@@ -171,44 +179,8 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                 chromaCenter;
 
             return QPointF(
-                centerX + u * scale,
-                centerY - v * scale);
-        };
-
-    auto addGlowPixel =
-        [this](
-            int x,
-            int y,
-            int green)
-        {
-            if (green <= 0 ||
-                x < 0 ||
-                x >= image_.width() ||
-                y < 0 ||
-                y >= image_.height())
-            {
-                return;
-            }
-
-            auto* line =
-                reinterpret_cast<QRgb*>(
-                    image_.scanLine(y));
-
-            const int oldGreen =
-                qGreen(
-                    line[x]);
-
-            const int newGreen =
-                std::min(
-                    255,
-                    oldGreen +
-                    green);
-
-            line[x] =
-                qRgb(
-                    newGreen,
-                    newGreen,
-                    newGreen);
+                centerX + u * scaleX,
+                centerY - v * scaleY);
         };
 
     auto plotPoint =
@@ -294,99 +266,7 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                 }
             }
 
-            if (glow_ <= 0)
-            {
-                return;
-            }
 
-            const double glowStrength =
-                static_cast<double>(
-                    glow_) /
-                100.0;
-
-            const int centerX =
-                static_cast<int>(
-                    std::lround(
-                        x));
-
-            const int centerY =
-                static_cast<int>(
-                    std::lround(
-                        y));
-
-            const int nearGlow =
-                static_cast<int>(
-                    intensity *
-                    0.40 *
-                    glowStrength);
-
-            const int farGlow =
-                static_cast<int>(
-                    intensity *
-                    0.18 *
-                    glowStrength);
-
-            // Sparse halo: eight nearby writes and four wider writes.
-            // No full-frame blur, no extra exp()/hypot() work.
-            addGlowPixel(
-                centerX - 2,
-                centerY,
-                nearGlow);
-
-            addGlowPixel(
-                centerX + 2,
-                centerY,
-                nearGlow);
-
-            addGlowPixel(
-                centerX,
-                centerY - 2,
-                nearGlow);
-
-            addGlowPixel(
-                centerX,
-                centerY + 2,
-                nearGlow);
-
-            addGlowPixel(
-                centerX - 2,
-                centerY - 2,
-                nearGlow / 2);
-
-            addGlowPixel(
-                centerX + 2,
-                centerY - 2,
-                nearGlow / 2);
-
-            addGlowPixel(
-                centerX - 2,
-                centerY + 2,
-                nearGlow / 2);
-
-            addGlowPixel(
-                centerX + 2,
-                centerY + 2,
-                nearGlow / 2);
-
-            addGlowPixel(
-                centerX - 4,
-                centerY,
-                farGlow);
-
-            addGlowPixel(
-                centerX + 4,
-                centerY,
-                farGlow);
-
-            addGlowPixel(
-                centerX,
-                centerY - 4,
-                farGlow);
-
-            addGlowPixel(
-                centerX,
-                centerY + 4,
-                farGlow);
         };
 
     for (std::size_t i = firstSample;
@@ -554,6 +434,7 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 
     Q_UNUSED(renderUs);
 
+    applyGlowPostProcess();
     applyPersistence();
 }
 const QImage& VectorscopeAnalyzer::image() const
@@ -592,13 +473,15 @@ void VectorscopeAnalyzer::renderAllLines(
         static_cast<double>(kAllLinesWidth) *
         0.5 *
         scale_ /
-        32768.0;
+        32768.0 *
+        geometryScaleX_;
 
     const double scaleY =
         static_cast<double>(kAllLinesHeight) *
         0.5 *
         scale_ /
-        32768.0;
+        32768.0 *
+        geometryScaleY_;
 
     constexpr double chromaCenter =
         32768.0;
@@ -924,6 +807,134 @@ void VectorscopeAnalyzer::setPersistence(
         persistence;
 }
 
+void VectorscopeAnalyzer::applyGlowPostProcess()
+{
+    if (glow_ <= 0 || image_.isNull() ||
+        image_.width() < 2 || image_.height() < 2)
+    {
+        return;
+    }
+
+    const int width = image_.width();
+    const int height = image_.height();
+    const int lowWidth = (width + 1) / 2;
+    const int lowHeight = (height + 1) / 2;
+    const std::size_t lowCount =
+        static_cast<std::size_t>(lowWidth) *
+        static_cast<std::size_t>(lowHeight);
+
+    static thread_local std::vector<std::uint16_t> source;
+    static thread_local std::vector<std::uint16_t> temp;
+    static thread_local std::vector<std::uint16_t> blur;
+
+    source.resize(lowCount);
+    temp.resize(lowCount);
+    blur.resize(lowCount);
+
+    for (int ly = 0; ly < lowHeight; ++ly)
+    {
+        const int y0 = ly * 2;
+        const int y1 = std::min(y0 + 1, height - 1);
+        const auto* line0 = reinterpret_cast<const QRgb*>(image_.constScanLine(y0));
+        const auto* line1 = reinterpret_cast<const QRgb*>(image_.constScanLine(y1));
+
+        for (int lx = 0; lx < lowWidth; ++lx)
+        {
+            const int x0 = lx * 2;
+            const int x1 = std::min(x0 + 1, width - 1);
+            const int value = std::max({
+                qGreen(line0[x0]),
+                qGreen(line0[x1]),
+                qGreen(line1[x0]),
+                qGreen(line1[x1])
+            });
+            source[static_cast<std::size_t>(ly) * lowWidth + lx] =
+                static_cast<std::uint16_t>(value);
+        }
+    }
+
+    const double renderScale =
+        static_cast<double>(std::min(width, height)) / 576.0;
+    const int radius = std::max(1, static_cast<int>(std::lround(renderScale)));
+
+    const auto blurHorizontal =
+        [lowWidth, lowHeight, radius](
+            const std::vector<std::uint16_t>& in,
+            std::vector<std::uint16_t>& out)
+        {
+            for (int y = 0; y < lowHeight; ++y)
+            {
+                std::uint32_t sum = 0;
+                const int count = 2 * radius + 1;
+                for (int x = -radius; x <= radius; ++x)
+                {
+                    const int sx = std::clamp(x, 0, lowWidth - 1);
+                    sum += in[static_cast<std::size_t>(y) * lowWidth + sx];
+                }
+                for (int x = 0; x < lowWidth; ++x)
+                {
+                    out[static_cast<std::size_t>(y) * lowWidth + x] =
+                        static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
+                    const int removeX = std::clamp(x - radius, 0, lowWidth - 1);
+                    const int addX = std::clamp(x + radius + 1, 0, lowWidth - 1);
+                    sum -= in[static_cast<std::size_t>(y) * lowWidth + removeX];
+                    sum += in[static_cast<std::size_t>(y) * lowWidth + addX];
+                }
+            }
+        };
+
+    const auto blurVertical =
+        [lowWidth, lowHeight, radius](
+            const std::vector<std::uint16_t>& in,
+            std::vector<std::uint16_t>& out)
+        {
+            for (int x = 0; x < lowWidth; ++x)
+            {
+                std::uint32_t sum = 0;
+                const int count = 2 * radius + 1;
+                for (int y = -radius; y <= radius; ++y)
+                {
+                    const int sy = std::clamp(y, 0, lowHeight - 1);
+                    sum += in[static_cast<std::size_t>(sy) * lowWidth + x];
+                }
+                for (int y = 0; y < lowHeight; ++y)
+                {
+                    out[static_cast<std::size_t>(y) * lowWidth + x] =
+                        static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
+                    const int removeY = std::clamp(y - radius, 0, lowHeight - 1);
+                    const int addY = std::clamp(y + radius + 1, 0, lowHeight - 1);
+                    sum -= in[static_cast<std::size_t>(removeY) * lowWidth + x];
+                    sum += in[static_cast<std::size_t>(addY) * lowWidth + x];
+                }
+            }
+        };
+
+    blurHorizontal(source, temp);
+    blurVertical(temp, blur);
+    blurHorizontal(blur, temp);
+    blurVertical(temp, blur);
+
+    const int glowScale = std::clamp(glow_, 0, 100);
+
+    for (int y = 0; y < height; ++y)
+    {
+        auto* line = reinterpret_cast<QRgb*>(image_.scanLine(y));
+        const int ly = std::min(y / 2, lowHeight - 1);
+        for (int x = 0; x < width; ++x)
+        {
+            const int lx = std::min(x / 2, lowWidth - 1);
+            const int blurred = blur[static_cast<std::size_t>(ly) * lowWidth + lx];
+            const int contribution = (blurred * glowScale * 3) / 400;
+            if (contribution <= 0)
+            {
+                continue;
+            }
+            const int value = std::min(255, qGreen(line[x]) + contribution);
+            line[x] = qRgb(value, value, value);
+        }
+    }
+}
+
 void VectorscopeAnalyzer::setGlow(
     int glow)
 {
@@ -932,6 +943,7 @@ void VectorscopeAnalyzer::setGlow(
             glow,
             0,
             100);
+
 }
 
 void VectorscopeAnalyzer::applyPersistence()
@@ -1037,4 +1049,15 @@ void VectorscopeAnalyzer::setHorizontalWindow(
 void VectorscopeAnalyzer::setScale(double scale)
 {
     scale_ = scale;
+}
+
+void VectorscopeAnalyzer::setGeometryScale(
+    double horizontalScale,
+    double verticalScale)
+{
+    geometryScaleX_ =
+        std::max(0.01, horizontalScale);
+
+    geometryScaleY_ =
+        std::max(0.01, verticalScale);
 }

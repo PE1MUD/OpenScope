@@ -1,4 +1,5 @@
 #include "rendering/WaveformRenderer.h"
+#include "ui/ViewportOverlay.h"
 #include "processing/SignalReconstructor.h"
 #include "standards/VideoStandard.h"
 
@@ -15,6 +16,164 @@
 
 namespace
 {
+
+    void applyHalfResolutionWhiteGlow(
+        QImage& image,
+        int glow)
+    {
+        if (glow <= 0 || image.isNull() ||
+            image.width() < 2 || image.height() < 2)
+        {
+            return;
+        }
+
+        const int width = image.width();
+        const int height = image.height();
+        const int lowWidth = (width + 1) / 2;
+        const int lowHeight = (height + 1) / 2;
+        const std::size_t lowCount =
+            static_cast<std::size_t>(lowWidth) *
+            static_cast<std::size_t>(lowHeight);
+
+        static thread_local std::vector<std::uint16_t> source;
+        static thread_local std::vector<std::uint16_t> temp;
+        static thread_local std::vector<std::uint16_t> blur;
+
+        source.resize(lowCount);
+        temp.resize(lowCount);
+        blur.resize(lowCount);
+
+        // Extract only the white component of the rendered trace. This keeps
+        // the luma beam glowing without turning the coloured chroma fill into
+        // a broad white haze.
+        for (int ly = 0; ly < lowHeight; ++ly)
+        {
+            const int y0 = ly * 2;
+            const int y1 = std::min(y0 + 1, height - 1);
+
+            const auto* line0 = reinterpret_cast<const QRgb*>(image.constScanLine(y0));
+            const auto* line1 = reinterpret_cast<const QRgb*>(image.constScanLine(y1));
+
+            for (int lx = 0; lx < lowWidth; ++lx)
+            {
+                const int x0 = lx * 2;
+                const int x1 = std::min(x0 + 1, width - 1);
+
+                const auto white = [](QRgb pixel)
+                {
+                    return std::min({ qRed(pixel), qGreen(pixel), qBlue(pixel) });
+                };
+
+                const int value = std::max({
+                    white(line0[x0]),
+                    white(line0[x1]),
+                    white(line1[x0]),
+                    white(line1[x1])
+                });
+
+                source[static_cast<std::size_t>(ly) * lowWidth + lx] =
+                    static_cast<std::uint16_t>(value);
+            }
+        }
+
+        // Two cheap box passes approximate a Gaussian. The blur is done at
+        // half resolution, so its cost stays small even for HiDPI/fullscreen.
+        const double renderScale =
+            static_cast<double>(height) / 576.0;
+        const int radius = std::max(1, static_cast<int>(std::lround(renderScale)));
+
+        const auto blurHorizontal =
+            [lowWidth, lowHeight, radius](
+                const std::vector<std::uint16_t>& in,
+                std::vector<std::uint16_t>& out)
+            {
+                for (int y = 0; y < lowHeight; ++y)
+                {
+                    std::uint32_t sum = 0;
+                    int count = 0;
+
+                    for (int x = -radius; x <= radius; ++x)
+                    {
+                        const int sx = std::clamp(x, 0, lowWidth - 1);
+                        sum += in[static_cast<std::size_t>(y) * lowWidth + sx];
+                        ++count;
+                    }
+
+                    for (int x = 0; x < lowWidth; ++x)
+                    {
+                        out[static_cast<std::size_t>(y) * lowWidth + x] =
+                            static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
+
+                        const int removeX = std::clamp(x - radius, 0, lowWidth - 1);
+                        const int addX = std::clamp(x + radius + 1, 0, lowWidth - 1);
+                        sum -= in[static_cast<std::size_t>(y) * lowWidth + removeX];
+                        sum += in[static_cast<std::size_t>(y) * lowWidth + addX];
+                    }
+                }
+            };
+
+        const auto blurVertical =
+            [lowWidth, lowHeight, radius](
+                const std::vector<std::uint16_t>& in,
+                std::vector<std::uint16_t>& out)
+            {
+                for (int x = 0; x < lowWidth; ++x)
+                {
+                    std::uint32_t sum = 0;
+                    int count = 0;
+
+                    for (int y = -radius; y <= radius; ++y)
+                    {
+                        const int sy = std::clamp(y, 0, lowHeight - 1);
+                        sum += in[static_cast<std::size_t>(sy) * lowWidth + x];
+                        ++count;
+                    }
+
+                    for (int y = 0; y < lowHeight; ++y)
+                    {
+                        out[static_cast<std::size_t>(y) * lowWidth + x] =
+                            static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
+
+                        const int removeY = std::clamp(y - radius, 0, lowHeight - 1);
+                        const int addY = std::clamp(y + radius + 1, 0, lowHeight - 1);
+                        sum -= in[static_cast<std::size_t>(removeY) * lowWidth + x];
+                        sum += in[static_cast<std::size_t>(addY) * lowWidth + x];
+                    }
+                }
+            };
+
+        blurHorizontal(source, temp);
+        blurVertical(temp, blur);
+        blurHorizontal(blur, temp);
+        blurVertical(temp, blur);
+
+        const int glowScale = std::clamp(glow, 0, 100);
+
+        for (int y = 0; y < height; ++y)
+        {
+            auto* line = reinterpret_cast<QRgb*>(image.scanLine(y));
+            const int ly = std::min(y / 2, lowHeight - 1);
+
+            for (int x = 0; x < width; ++x)
+            {
+                const int lx = std::min(x / 2, lowWidth - 1);
+                const int blurred = blur[static_cast<std::size_t>(ly) * lowWidth + lx];
+                const int contribution = (blurred * glowScale * 3) / 400;
+
+                if (contribution <= 0)
+                {
+                    continue;
+                }
+
+                const QRgb pixel = line[x];
+                line[x] = qRgb(
+                    std::min(255, qRed(pixel) + contribution),
+                    std::min(255, qGreen(pixel) + contribution),
+                    std::min(255, qBlue(pixel) + contribution));
+            }
+        }
+    }
+
     constexpr double kMaximumSampleValue = 65535.0;
     constexpr double kChromaNoiseThresholdFraction =
         0.03;
@@ -41,6 +200,14 @@ void WaveformRenderer::setChromaFillIntensity(
 void WaveformRenderer::setColor(bool enabled)
 {
     settings_.color = enabled;
+}
+
+void WaveformRenderer::setLineInfoOverlayEnabled(
+    bool enabled,
+    bool palOutput)
+{
+    lineInfoOverlayEnabled_ = enabled;
+    lineInfoOverlayPalOutput_ = palOutput;
 }
 
 void addFillPixel(
@@ -310,6 +477,28 @@ void WaveformRenderer::setOutputSize(
 
     image_.fill(Qt::black);
 
+    // Cache the core width once per output-size change.  The hot trace loop
+    // must not recalculate sqrt/clamp for every line segment.
+    const double renderDimension =
+        static_cast<double>(
+            std::max(
+                1,
+                std::min(width, height)));
+
+    const double beamScale =
+        std::clamp(
+            std::sqrt(
+                renderDimension /
+                576.0),
+            1.0,
+            1.90);
+
+    constexpr double kReferenceCoreRadiusPx = 0.82;
+
+    beamCoreRadiusPx_ =
+        kReferenceCoreRadiusPx *
+        beamScale;
+
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) *
         static_cast<std::size_t>(height);
@@ -349,6 +538,7 @@ void WaveformRenderer::setOutputSize(
     displayV_.resize(
         static_cast<std::size_t>(
             width));
+
 }
 
 void WaveformRenderer::setZoomed(
@@ -1153,12 +1343,76 @@ void WaveformRenderer::renderSingleLine(
     }
     composeTraceImage();
 
+    if (selectedLine_ >= 0 && glow_ > 0)
+    {
+        applyHalfResolutionWhiteGlow(image_, glow_);
+    }
+
     QPainter painter(&image_);
 
     graticule_.draw(
         painter,
         scaledScopeRect(),
         VideoStandard::pal625());
+
+    drawLineInfoOverlay(painter);
+}
+
+
+void WaveformRenderer::drawLineInfoOverlay(QPainter& painter)
+{
+    if (!lineInfoOverlayEnabled_)
+    {
+        return;
+    }
+
+    const QRectF viewport =
+        viewportRect();
+
+    const QRectF scope =
+        scaledScopeRect();
+
+    const QVector<ViewportOverlay::InfoRow> rows
+    {
+        {
+            QStringLiteral("LINE"),
+            QStringLiteral("%1   X%2")
+                .arg(
+                    selectedLine_ >= 0
+                    ? QString::number(selectedLine_)
+                    : QStringLiteral("ALL"))
+                .arg(zoomFactor_)
+        }
+    };
+
+    const double referenceHeight =
+        lineInfoOverlayPalOutput_
+        ? viewport.height()
+        : std::min(viewport.height(), 720.0);
+
+    const QSizeF cardSize =
+        ViewportOverlay::infoCardRequiredSize(
+            rows,
+            referenceHeight,
+            lineInfoOverlayPalOutput_);
+
+    const double lineGap =
+        std::max(
+            4.0,
+            viewport.height() * 0.008);
+
+    const QRectF cardRect(
+        scope.right() - cardSize.width(),
+        scope.bottom() - lineGap - cardSize.height(),
+        cardSize.width(),
+        cardSize.height());
+
+    ViewportOverlay::drawInfoCard(
+        painter,
+        cardRect,
+        rows,
+        referenceHeight,
+        lineInfoOverlayPalOutput_);
 }
 
 
@@ -1786,6 +2040,8 @@ void WaveformRenderer::renderAllLines(
         painter,
         scope,
         VideoStandard::pal625());
+
+    drawLineInfoOverlay(painter);
 }
 
 void WaveformRenderer::addChromaFillPixel(
@@ -1883,33 +2139,46 @@ void WaveformRenderer::plotSegment(
         return;
     }
 
+    const double coreRadius =
+        beamCoreRadiusPx_;
+
+    const int coreMargin =
+        std::max(
+            1,
+            static_cast<int>(
+                std::ceil(coreRadius)));
+
     const int firstX =
         std::max(
             0,
             static_cast<int>(
                 std::floor(
-                    std::min(x0, x1))) - 1);
+                    std::min(x0, x1))) -
+                coreMargin);
 
     const int lastX =
         std::min(
             image_.width() - 1,
             static_cast<int>(
                 std::ceil(
-                    std::max(x0, x1))) + 1);
+                    std::max(x0, x1))) +
+                coreMargin);
 
     const int firstY =
         std::max(
             0,
             static_cast<int>(
                 std::floor(
-                    std::min(y0, y1))) - 1);
+                    std::min(y0, y1))) -
+                coreMargin);
 
     const int lastY =
         std::min(
             image_.height() - 1,
             static_cast<int>(
                 std::ceil(
-                    std::max(y0, y1))) + 1);
+                    std::max(y0, y1))) +
+                coreMargin);
 
     for (int y = firstY;
         y <= lastY;
@@ -1948,10 +2217,13 @@ void WaveformRenderer::plotSegment(
                     py - nearestY);
 
             const double coverage =
-                std::clamp(
-                    1.25 - distance,
+                distance < coreRadius
+                ? std::clamp(
+                    1.0 -
+                    (distance / coreRadius),
                     0.0,
-                    1.0);
+                    1.0)
+                : 0.0;
 
             if (coverage <= 0.0)
             {
@@ -2007,106 +2279,6 @@ void WaveformRenderer::plotSegment(
             addChannel(
                 pixel.blue,
                 blue);
-
-            const bool addLumaGlow =
-                glow_ > 0 &&
-                selectedLine_ >= 0 &&
-                red == 255 &&
-                green == 255 &&
-                blue == 255;
-
-            if (addLumaGlow)
-            {
-                const double glowStrength =
-                    static_cast<double>(
-                        glow_) /
-                    100.0;
-
-                const auto addVerticalGlow =
-                    [this, x, y, contribution, glowStrength](
-                        int offset,
-                        double factor)
-                    {
-                        const int destinationY =
-                            y +
-                            offset;
-
-                        if (destinationY < 0 ||
-                            destinationY >= image_.height())
-                        {
-                            return;
-                        }
-
-                        const std::uint32_t glowContribution =
-                            static_cast<std::uint32_t>(
-                                static_cast<double>(
-                                    contribution) *
-                                factor *
-                                glowStrength);
-
-                        if (glowContribution == 0u)
-                        {
-                            return;
-                        }
-
-                        const std::size_t glowIndex =
-                            static_cast<std::size_t>(
-                                destinationY) *
-                            static_cast<std::size_t>(
-                                image_.width()) +
-                            static_cast<std::size_t>(
-                                x);
-
-                        TracePixel& glowPixel =
-                            trace_[glowIndex];
-
-                        const auto add =
-                            [glowContribution](
-                                std::uint16_t& destination)
-                            {
-                                destination =
-                                    static_cast<std::uint16_t>(
-                                        std::min<std::uint32_t>(
-                                            65535u,
-                                            static_cast<std::uint32_t>(
-                                                destination) +
-                                            glowContribution));
-                            };
-
-                        add(
-                            glowPixel.red);
-
-                        add(
-                            glowPixel.green);
-
-                        add(
-                            glowPixel.blue);
-                    };
-
-                addVerticalGlow(
-                    -1,
-                    0.55);
-
-                addVerticalGlow(
-                    1,
-                    0.55);
-
-                addVerticalGlow(
-                    -2,
-                    0.28);
-
-                addVerticalGlow(
-                    2,
-                    0.28);
-
-                addVerticalGlow(
-                    -4,
-                    0.12);
-
-                addVerticalGlow(
-                    4,
-                    0.12);
-            }
         }
     }
 }
@@ -2231,105 +2403,6 @@ void WaveformRenderer::plotBeam(
             addChannel(
                 pixel.blue,
                 blue);
-
-            const bool addLumaGlow =
-                glow_ > 0 &&
-                selectedLine_ >= 0 &&
-                red == 255 &&
-                green == 255 &&
-                blue == 255;
-
-            if (addLumaGlow)
-            {
-                const double glowStrength =
-                    static_cast<double>(
-                        glow_) /
-                    100.0;
-
-                const auto addVerticalGlow =
-                    [this, destinationX, destinationY, contribution, glowStrength](
-                        int offset,
-                        double factor)
-                    {
-                        const int glowY =
-                            destinationY +
-                            offset;
-
-                        if (glowY < 0 ||
-                            glowY >= image_.height())
-                        {
-                            return;
-                        }
-
-                        const std::uint32_t glowContribution =
-                            static_cast<std::uint32_t>(
-                                static_cast<double>(
-                                    contribution) *
-                                factor *
-                                glowStrength);
-
-                        if (glowContribution == 0u)
-                        {
-                            return;
-                        }
-
-                        const std::size_t glowIndex =
-                            static_cast<std::size_t>(
-                                glowY) *
-                            static_cast<std::size_t>(
-                                image_.width()) +
-                            static_cast<std::size_t>(
-                                destinationX);
-
-                        TracePixel& glowPixel =
-                            trace_[glowIndex];
-
-                        const auto add =
-                            [glowContribution](
-                                std::uint16_t& destination)
-                            {
-                                destination =
-                                    static_cast<std::uint16_t>(
-                                        std::max<std::uint32_t>(
-                                            static_cast<std::uint32_t>(
-                                                destination),
-                                            glowContribution));
-                            };
-
-                        add(
-                            glowPixel.red);
-
-                        add(
-                            glowPixel.green);
-
-                        add(
-                            glowPixel.blue);
-                    };
-
-                addVerticalGlow(
-                    -1,
-                    0.55);
-
-                addVerticalGlow(
-                    1,
-                    0.55);
-
-                addVerticalGlow(
-                    -2,
-                    0.28);
-
-                addVerticalGlow(
-                    2,
-                    0.28);
-
-                addVerticalGlow(
-                    -4,
-                    0.12);
-
-                addVerticalGlow(
-                    4,
-                    0.12);
-            }
         }
     }
 }
@@ -2358,6 +2431,7 @@ void WaveformRenderer::setGlow(
             glow,
             0,
             100);
+
 }
 
 const QImage& WaveformRenderer::image() const

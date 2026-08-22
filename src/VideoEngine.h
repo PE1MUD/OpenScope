@@ -53,6 +53,15 @@ public:
     void setSpoutVideoEnabled(
         bool enabled);
 
+    void setVideoScreenRenderEnabled(
+        bool enabled);
+
+    void setWaveformScreenRenderEnabled(
+        bool enabled);
+
+    void setVectorscopeScreenRenderEnabled(
+        bool enabled);
+
     void setVideoHighlightEnabled(
         bool enabled);
 
@@ -241,6 +250,18 @@ private:
 
     std::atomic<bool> spoutVideoEnabled_{
         false
+    };
+
+    std::atomic<bool> videoScreenRenderEnabled_{
+        true
+    };
+
+    std::atomic<bool> waveformScreenRenderEnabled_{
+        true
+    };
+
+    std::atomic<bool> vectorscopeScreenRenderEnabled_{
+        true
     };
 
     // Output sizes

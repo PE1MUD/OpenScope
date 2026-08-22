@@ -7,6 +7,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QResizeEvent>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
@@ -498,6 +499,62 @@ void VideoWidget::paintEvent(QPaintEvent* event)
             outputSize.width(),
             outputSize.height()),
         image_);
+}
+
+
+void VideoWidget::wheelEvent(
+    QWheelEvent* event)
+{
+    setFocus(Qt::MouseFocusReason);
+
+    QPoint delta = event->angleDelta();
+    int threshold = 120;
+
+    if (delta.isNull())
+    {
+        delta = event->pixelDelta();
+        threshold = 40;
+    }
+
+    if (event->inverted())
+    {
+        delta = -delta;
+    }
+
+    wheelVerticalRemainder_ += delta.y();
+    wheelHorizontalRemainder_ += delta.x();
+
+    while (wheelVerticalRemainder_ >= threshold)
+    {
+        wheelVerticalRemainder_ -= threshold;
+        emit lineUpRequested();
+    }
+
+    while (wheelVerticalRemainder_ <= -threshold)
+    {
+        wheelVerticalRemainder_ += threshold;
+        emit lineDownRequested();
+    }
+
+    while (wheelHorizontalRemainder_ >= threshold)
+    {
+        wheelHorizontalRemainder_ -= threshold;
+        emit panRightRequested();
+    }
+
+    while (wheelHorizontalRemainder_ <= -threshold)
+    {
+        wheelHorizontalRemainder_ += threshold;
+        emit panLeftRequested();
+    }
+
+    if (!delta.isNull())
+    {
+        event->accept();
+        return;
+    }
+
+    QWidget::wheelEvent(event);
 }
 
 void VideoWidget::resizeEvent(

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QString>
+
 class VideoEngine;
 
-void deckLinkProbe(VideoEngine* videoEngine);
+QString deckLinkProbe(VideoEngine* videoEngine);
 void deckLinkStop();

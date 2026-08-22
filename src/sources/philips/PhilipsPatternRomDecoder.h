@@ -23,6 +23,7 @@ public:
     bool alternateFrames() const;
 
     QString setName() const;
+    QString shortName() const;
     QString iniFileName() const;
     double lumaSampleRateHz() const;
     int nativeWidth() const;
@@ -112,6 +113,7 @@ private:
 
     QString iniFileName_;
     QString setName_;
+    QString shortName_;
     QString standard_;
     QString decoderName_;
 

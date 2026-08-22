@@ -62,7 +62,7 @@ namespace ViewportOverlay
             : std::clamp(
                 static_cast<int>(
                     std::lround(height * 0.030)),
-                16,
+                9,
                 26);
 
         font.setPixelSize(pixelSize);
@@ -144,10 +144,10 @@ namespace ViewportOverlay
     inline QRectF vectorscopeScopeRect(
         const QRectF& bounds,
         bool palOutput = false,
-        double palInfoWidth = 0.0)
+        double infoWidth = 0.0)
     {
-        const double screenMargin =
-            std::max(10.0, bounds.height() * 0.025);
+        constexpr double screenMargin = 8.0;
+        constexpr double screenGap = 8.0;
 
         const double palGap =
             std::max(4.0, bounds.height() * 0.010);
@@ -159,9 +159,14 @@ namespace ViewportOverlay
 
         if (!palOutput)
         {
-            // Screen layout stays exactly as before.
+            // Desktop presentation has no video safety area. Reserve only
+            // the measured information panel, one small gap and a small
+            // fixed visual margin. All remaining pixels belong to the scope.
             availableLeft =
-                bounds.left() + bounds.width() * 0.34;
+                bounds.left() +
+                screenMargin +
+                std::max(0.0, infoWidth) +
+                screenGap;
             availableTop = bounds.top() + screenMargin;
             availableRight = bounds.right() - screenMargin;
             availableBottom = bounds.bottom() - screenMargin;
@@ -173,7 +178,7 @@ namespace ViewportOverlay
             // gap; every remaining pixel belongs to the vectorscope.
             availableLeft =
                 bounds.left() +
-                std::max(0.0, palInfoWidth) + palGap;
+                std::max(0.0, infoWidth) + palGap;
             availableTop = bounds.top();
             availableRight = bounds.right();
             availableBottom = bounds.bottom();
@@ -198,10 +203,9 @@ namespace ViewportOverlay
     inline QRectF vectorscopeInfoRect(
         const QRectF& bounds,
         bool palOutput = false,
-        double palInfoWidth = 0.0)
+        double infoWidth = 0.0)
     {
-        const double margin =
-            std::max(10.0, bounds.height() * 0.025);
+        constexpr double screenMargin = 8.0;
 
         if (palOutput)
         {
@@ -210,18 +214,15 @@ namespace ViewportOverlay
             return QRectF(
                 bounds.left(),
                 bounds.top(),
-                std::max(1.0, palInfoWidth),
+                std::max(1.0, infoWidth),
                 std::max(1.0, bounds.height()));
         }
 
-        const QRectF scope =
-            vectorscopeScopeRect(bounds, false);
-
         return QRectF(
-            bounds.left() + margin,
-            bounds.top() + margin,
-            std::max(1.0, scope.left() - bounds.left() - 2.0 * margin),
-            std::max(1.0, bounds.height() - 2.0 * margin));
+            bounds.left() + screenMargin,
+            bounds.top() + screenMargin,
+            std::max(1.0, infoWidth),
+            std::max(1.0, bounds.height() - 2.0 * screenMargin));
     }
 
     struct InfoRow

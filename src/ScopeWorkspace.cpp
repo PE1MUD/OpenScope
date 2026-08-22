@@ -310,6 +310,7 @@ void ScopeWorkspace::showMaximized(
         2);
 
     viewport->show();
+    viewport->focusContent();
 
     maximizedViewport_ =
         viewport;

@@ -805,6 +805,24 @@ void VideoEngine::displayWorkerLoop()
                 static_cast<std::size_t>(
                     captureSlotIndex)];
 
+        const bool screenRenderEnabled =
+            videoScreenRenderEnabled_.load(
+                std::memory_order_acquire);
+
+        const bool spoutRenderEnabled =
+            spoutVideoEnabled_.load(
+                std::memory_order_acquire);
+
+        if (!screenRenderEnabled &&
+            !spoutRenderEnabled)
+        {
+            performanceStats_.videoScreen.update(0);
+            performanceStats_.displayFirst.update(0);
+            performanceStats_.displaySecond.update(0);
+            performanceStats_.displayCompose.update(0);
+            continue;
+        }
+
         QElapsedTimer totalDisplayTimer;
         totalDisplayTimer.start();
 
@@ -957,47 +975,71 @@ void VideoEngine::displayWorkerLoop()
             displayDeinterlaceWorkerUs_[1].load(
                 std::memory_order_relaxed));
 
-        QImage firstDisplayImage(
-            outputWidth,
-            outputHeight,
-            QImage::Format_RGB32);
+        QImage firstDisplayImage;
+        std::array<DisplayPerformance, 2> firstPerformance{};
+        std::uint64_t firstConvertUs = 0;
 
-        firstDisplayImage.detach();
+        if (screenRenderEnabled)
+        {
+            firstDisplayImage = QImage(
+                outputWidth,
+                outputHeight,
+                QImage::Format_RGB32);
 
-        displayPhaseFrame_ =
-            displayFrame;
+            firstDisplayImage.detach();
 
-        displayPhaseLuma_ =
-            progressiveLuma_.first.y.data();
+            displayPhaseFrame_ =
+                displayFrame;
 
-        displayPhaseOutputPixels_ =
-            reinterpret_cast<QRgb*>(
-                firstDisplayImage.bits());
+            displayPhaseLuma_ =
+                progressiveLuma_.first.y.data();
 
-        displayPhaseOutputStridePixels_ =
-            firstDisplayImage.bytesPerLine() /
-            static_cast<int>(
-                sizeof(QRgb));
+            displayPhaseOutputPixels_ =
+                reinterpret_cast<QRgb*>(
+                    firstDisplayImage.bits());
 
-        displayPhaseOutputWidth_ =
-            outputWidth;
+            displayPhaseOutputStridePixels_ =
+                firstDisplayImage.bytesPerLine() /
+                static_cast<int>(
+                    sizeof(QRgb));
 
-        displayPhaseOutputHeight_ =
-            outputHeight;
+            displayPhaseOutputWidth_ =
+                outputWidth;
 
-        phaseTimer.restart();
+            displayPhaseOutputHeight_ =
+                outputHeight;
 
-        runDisplayPhase(
-            DisplayPhase::ConvertFirst);
+            phaseTimer.restart();
 
-        const std::uint64_t
+            runDisplayPhase(
+                DisplayPhase::ConvertFirst);
+
             firstConvertUs =
-            static_cast<std::uint64_t>(
-                phaseTimer.nsecsElapsed() /
-                1000);
+                static_cast<std::uint64_t>(
+                    phaseTimer.nsecsElapsed() /
+                    1000);
+
+            firstPerformance =
+                displayPhasePerformance_;
+        }
 
         performanceStats_.displayFirst.update(
             firstConvertUs);
+
+        QImage firstSpoutImage;
+
+        if (spoutRenderEnabled)
+        {
+            DisplayPerformance spoutPerformance;
+
+            firstSpoutImage =
+                spoutVideoConverter_.convert(
+                    *displayFrame,
+                    progressiveLuma_.first.y.data(),
+                    kCaptureWidth,
+                    kCaptureHeight,
+                    spoutPerformance);
+        }
 
         const std::uint64_t
             firstReadyUs =
@@ -1016,13 +1058,13 @@ void VideoEngine::displayWorkerLoop()
                         kFrameSlotCount)];
 
             slot.first =
-                firstDisplayImage;
+                std::move(firstDisplayImage);
 
             slot.second =
                 QImage{};
 
             slot.spoutFirst =
-                QImage{};
+                std::move(firstSpoutImage);
 
             slot.spoutSecond =
                 QImage{};
@@ -1040,70 +1082,68 @@ void VideoEngine::displayWorkerLoop()
         displayPresenterCondition_.
             notify_one();
 
-        if (spoutVideoEnabled_.load(
-            std::memory_order_acquire))
+        QImage secondDisplayImage;
+        std::array<DisplayPerformance, 2> secondPerformance{};
+        std::uint64_t secondConvertUs = 0;
+
+        if (screenRenderEnabled)
         {
-            DisplayPerformance spoutPerformance;
+            secondDisplayImage = QImage(
+                outputWidth,
+                outputHeight,
+                QImage::Format_RGB32);
 
-            QImage firstSpoutImage =
-                spoutVideoConverter_.convert(
-                    *displayFrame,
-                    progressiveLuma_.first.y.data(),
-                    kCaptureWidth,
-                    kCaptureHeight,
-                    spoutPerformance);
+            secondDisplayImage.detach();
 
-            std::lock_guard<std::mutex> lock(
-                displayPresenterMutex_);
+            displayPhaseLuma_ =
+                progressiveLuma_.second.y.data();
 
-            DisplayFrameSlot& slot =
-                displayFrameSlots_[
-                    static_cast<std::size_t>(
-                        generation %
-                        kFrameSlotCount)];
+            displayPhaseOutputPixels_ =
+                reinterpret_cast<QRgb*>(
+                    secondDisplayImage.bits());
 
-            if (slot.generation == generation)
-            {
-                slot.spoutFirst =
-                    std::move(firstSpoutImage);
-            }
-        }
+            displayPhaseOutputStridePixels_ =
+                secondDisplayImage.bytesPerLine() /
+                static_cast<int>(
+                    sizeof(QRgb));
 
-        const auto firstPerformance =
-            displayPhasePerformance_;
+            displayPhaseOutputWidth_ =
+                outputWidth;
 
-        QImage secondDisplayImage(
-            outputWidth,
-            outputHeight,
-            QImage::Format_RGB32);
+            displayPhaseOutputHeight_ =
+                outputHeight;
 
-        secondDisplayImage.detach();
+            phaseTimer.restart();
 
-        displayPhaseLuma_ =
-            progressiveLuma_.second.y.data();
+            runDisplayPhase(
+                DisplayPhase::ConvertSecond);
 
-        displayPhaseOutputPixels_ =
-            reinterpret_cast<QRgb*>(
-                secondDisplayImage.bits());
-
-        displayPhaseOutputStridePixels_ =
-            secondDisplayImage.bytesPerLine() /
-            static_cast<int>(
-                sizeof(QRgb));
-
-        phaseTimer.restart();
-
-        runDisplayPhase(
-            DisplayPhase::ConvertSecond);
-
-        const std::uint64_t
             secondConvertUs =
-            static_cast<std::uint64_t>(
-                phaseTimer.nsecsElapsed() /
-                1000);
+                static_cast<std::uint64_t>(
+                    phaseTimer.nsecsElapsed() /
+                    1000);
+
+            secondPerformance =
+                displayPhasePerformance_;
+        }
 
         performanceStats_.displaySecond.update(
             secondConvertUs);
+
+        QImage secondSpoutImage;
+
+        if (spoutRenderEnabled)
+        {
+            DisplayPerformance spoutPerformance;
+
+            secondSpoutImage =
+                spoutVideoConverter_.convert(
+                    *displayFrame,
+                    progressiveLuma_.second.y.data(),
+                    kCaptureWidth,
+                    kCaptureHeight,
+                    spoutPerformance);
+        }
 
         const std::uint64_t
             secondReadyUs =
@@ -1125,7 +1165,10 @@ void VideoEngine::displayWorkerLoop()
                 generation)
             {
                 slot.second =
-                    secondDisplayImage;
+                    std::move(secondDisplayImage);
+
+                slot.spoutSecond =
+                    std::move(secondSpoutImage);
 
                 slot.secondReady =
                     true;
@@ -1135,37 +1178,8 @@ void VideoEngine::displayWorkerLoop()
         displayPresenterCondition_.
             notify_one();
 
-        if (spoutVideoEnabled_.load(
-            std::memory_order_acquire))
-        {
-            DisplayPerformance spoutPerformance;
-
-            QImage secondSpoutImage =
-                spoutVideoConverter_.convert(
-                    *displayFrame,
-                    progressiveLuma_.second.y.data(),
-                    kCaptureWidth,
-                    kCaptureHeight,
-                    spoutPerformance);
-
-            std::lock_guard<std::mutex> lock(
-                displayPresenterMutex_);
-
-            DisplayFrameSlot& slot =
-                displayFrameSlots_[
-                    static_cast<std::size_t>(
-                        generation %
-                        kFrameSlotCount)];
-
-            if (slot.generation == generation)
-            {
-                slot.spoutSecond =
-                    std::move(secondSpoutImage);
-            }
-        }
-
-        const auto secondPerformance =
-            displayPhasePerformance_;
+        performanceStats_.videoScreen.update(
+            firstConvertUs + secondConvertUs);
 
         std::uint64_t allocationUs = 0;
         std::uint64_t setupUs = 0;
@@ -1559,8 +1573,13 @@ void VideoEngine::displayPresenterLoop()
                 presentUs);
         }
 
-        emit frameChanged(
-            firstImage);
+        if (videoScreenRenderEnabled_.load(
+                std::memory_order_acquire) &&
+            !firstImage.isNull())
+        {
+            emit frameChanged(
+                firstImage);
+        }
 
         if (spoutVideoEnabled_.load(
             std::memory_order_acquire) &&
@@ -1624,7 +1643,8 @@ void VideoEngine::displayPresenterLoop()
             }
         }
 
-        if (!secondImage.isNull())
+        if (!secondImage.isNull() ||
+            !secondSpoutImage.isNull())
         {
             recordPresentInterval();
 
@@ -1649,8 +1669,12 @@ void VideoEngine::displayPresenterLoop()
                     presentUs);
             }
 
-            emit frameChanged(
-                secondImage);
+            if (videoScreenRenderEnabled_.load(
+                    std::memory_order_acquire))
+            {
+                emit frameChanged(
+                    secondImage);
+            }
 
             if (spoutVideoEnabled_.load(
                 std::memory_order_acquire) &&
@@ -1788,36 +1812,48 @@ void VideoEngine::waveformWorkerLoop()
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
 
-        // Screen render: current widget canvas, always full-frame.
-        waveformScreenRenderer_.setOutputSize(
-            screenOutputWidth,
-            screenOutputHeight);
+        const bool screenRenderEnabled =
+            waveformScreenRenderEnabled_.load(
+                std::memory_order_acquire);
 
-        waveformScreenRenderer_.setFitAspectRatio(true);
+        if (screenRenderEnabled)
+        {
+            waveformScreenRenderer_.setOutputSize(
+                screenOutputWidth,
+                screenOutputHeight);
 
-        waveformScreenRenderer_.setContentScale(
-            1.0,
-            1.0);
+            waveformScreenRenderer_.setFitAspectRatio(true);
 
-        waveformScreenRenderer_.setSelectedLine(
-            selectedLine);
+            waveformScreenRenderer_.setLineInfoOverlayEnabled(true, false);
 
-        waveformScreenRenderer_.setPersistence(
-            waveformPersistence);
+            waveformScreenRenderer_.setContentScale(
+                1.0,
+                1.0);
 
-        waveformScreenRenderer_.setGlow(
-            glow);
+            waveformScreenRenderer_.setSelectedLine(
+                selectedLine);
 
-        QElapsedTimer screenTimer;
-        screenTimer.start();
+            waveformScreenRenderer_.setPersistence(
+                waveformPersistence);
 
-        waveformScreenRenderer_.analyze(
-            captureSlot.frame);
+            waveformScreenRenderer_.setGlow(
+                glow);
 
-        performanceStats_.waveformScreen.update(
-            static_cast<std::uint64_t>(
-                screenTimer.nsecsElapsed() /
-                1000));
+            QElapsedTimer screenTimer;
+            screenTimer.start();
+
+            waveformScreenRenderer_.analyze(
+                captureSlot.frame);
+
+            performanceStats_.waveformScreen.update(
+                static_cast<std::uint64_t>(
+                    screenTimer.nsecsElapsed() /
+                    1000));
+        }
+        else
+        {
+            performanceStats_.waveformScreen.update(0);
+        }
 
         // Video render target is the actual output raster of the
         // selected video standard. PAL625 therefore remains 720x576
@@ -1840,6 +1876,8 @@ void VideoEngine::waveformWorkerLoop()
         // output raster. Aspect ratio is metadata / pixel aspect;
         // it must not letterbox the render canvas.
         waveformVideoRenderer_.setFitAspectRatio(false);
+
+        waveformVideoRenderer_.setLineInfoOverlayEnabled(true, true);
 
         waveformVideoRenderer_.setContentScale(
             videoStandard.safeWidthScale,
@@ -1879,8 +1917,13 @@ void VideoEngine::waveformWorkerLoop()
                 << generation;
         }
 
+        const auto& measurementRenderer =
+            screenRenderEnabled
+            ? waveformScreenRenderer_
+            : waveformVideoRenderer_;
+
         const auto& measurementSource =
-            waveformScreenRenderer_.visibleLumaVolts();
+            measurementRenderer.visibleLumaVolts();
 
         QVector<float> measurementSamples;
         measurementSamples.reserve(
@@ -1895,7 +1938,7 @@ void VideoEngine::waveformWorkerLoop()
             measurementSamples);
 
         const auto& fullSpectrumSource =
-            waveformScreenRenderer_.fullLumaVolts();
+            measurementRenderer.fullLumaVolts();
 
         QVector<float> fullSpectrumSamples;
         fullSpectrumSamples.reserve(
@@ -1982,8 +2025,11 @@ void VideoEngine::waveformWorkerLoop()
                 captureSlot.frame.inputSignalValid);
         }
 
-        emit waveformChanged(
-            waveformScreenRenderer_.image());
+        if (screenRenderEnabled)
+        {
+            emit waveformChanged(
+                waveformScreenRenderer_.image());
+        }
 
         emit waveformVideoChanged(
             waveformVideoRenderer_.image());
@@ -2097,46 +2143,57 @@ void VideoEngine::vectorscopeWorkerLoop()
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
 
-        const int screenWidth =
-            vectorscopeOutputWidth_.load(
+        const bool screenRenderEnabled =
+            vectorscopeScreenRenderEnabled_.load(
                 std::memory_order_acquire);
 
-        const int screenHeight =
-            vectorscopeOutputHeight_.load(
-                std::memory_order_acquire);
+        if (screenRenderEnabled)
+        {
+            const int screenWidth =
+                vectorscopeOutputWidth_.load(
+                    std::memory_order_acquire);
 
-        vectorscopeScreenRenderer_.setOutputSize(
-            screenWidth,
-            screenHeight);
+            const int screenHeight =
+                vectorscopeOutputHeight_.load(
+                    std::memory_order_acquire);
 
-        vectorscopeScreenRenderer_.setPresentationInfo(
-            presentation);
+            vectorscopeScreenRenderer_.setOutputSize(
+                screenWidth,
+                screenHeight);
 
-        vectorscopeScreenRenderer_.setSelectedLine(
-            selectedLine);
+            vectorscopeScreenRenderer_.setPresentationInfo(
+                presentation);
 
-        vectorscopeScreenRenderer_.setHorizontalWindow(
-            zoomFactor,
-            scrollPosition);
+            vectorscopeScreenRenderer_.setSelectedLine(
+                selectedLine);
 
-        vectorscopeScreenRenderer_.setPersistence(
-            persistence);
+            vectorscopeScreenRenderer_.setHorizontalWindow(
+                zoomFactor,
+                scrollPosition);
 
-        vectorscopeScreenRenderer_.setGlow(
-            glow);
+            vectorscopeScreenRenderer_.setPersistence(
+                persistence);
 
-        QElapsedTimer timer;
-        timer.start();
+            vectorscopeScreenRenderer_.setGlow(
+                glow);
 
-        vectorscopeScreenRenderer_.analyze(
-            captureSlots_[slotIndex].frame);
+            QElapsedTimer timer;
+            timer.start();
 
-        performanceStats_.vectorscope.update(
-            static_cast<std::uint64_t>(
-                timer.nsecsElapsed() / 1000));
+            vectorscopeScreenRenderer_.analyze(
+                captureSlots_[slotIndex].frame);
 
-        emit vectorscopeChanged(
-            vectorscopeScreenRenderer_.image());
+            performanceStats_.vectorscopeScreen.update(
+                static_cast<std::uint64_t>(
+                    timer.nsecsElapsed() / 1000));
+
+            emit vectorscopeChanged(
+                vectorscopeScreenRenderer_.image());
+        }
+        else
+        {
+            performanceStats_.vectorscopeScreen.update(0);
+        }
 
         if (vectorscopeVideoEnabled_.load(
                 std::memory_order_acquire))
@@ -2181,11 +2238,22 @@ void VideoEngine::vectorscopeWorkerLoop()
             vectorscopeVideoRenderer_.setGlow(
                 glow);
 
+            QElapsedTimer videoTimer;
+            videoTimer.start();
+
             vectorscopeVideoRenderer_.analyze(
                 captureSlots_[slotIndex].frame);
 
+            performanceStats_.vectorscopeVideo.update(
+                static_cast<std::uint64_t>(
+                    videoTimer.nsecsElapsed() / 1000));
+
             emit vectorscopeVideoChanged(
                 vectorscopeVideoRenderer_.image());
+         }
+        else
+        {
+            performanceStats_.vectorscopeVideo.update(0);
         }
 
         const bool stillValid =
@@ -2286,6 +2354,30 @@ void VideoEngine::setSpoutVideoEnabled(
     bool enabled)
 {
     spoutVideoEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+void VideoEngine::setVideoScreenRenderEnabled(
+    bool enabled)
+{
+    videoScreenRenderEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+void VideoEngine::setWaveformScreenRenderEnabled(
+    bool enabled)
+{
+    waveformScreenRenderEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+void VideoEngine::setVectorscopeScreenRenderEnabled(
+    bool enabled)
+{
+    vectorscopeScreenRenderEnabled_.store(
         enabled,
         std::memory_order_release);
 }

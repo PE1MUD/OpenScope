@@ -12,6 +12,78 @@
 static Uyvy422ToYuv444Converter uyvyConverter;
 static V210ToYuv444Converter v210Converter;
 
+static QString shortDeckLinkName(const QString& apiName)
+{
+    QString name = apiName.simplified();
+
+    if (name.contains(
+            QStringLiteral("Intensity Pro 4K"),
+            Qt::CaseInsensitive))
+    {
+        return QStringLiteral("BMD IP 4K");
+    }
+
+    if (name.contains(
+            QStringLiteral("Intensity Pro"),
+            Qt::CaseInsensitive))
+    {
+        return QStringLiteral("BMD IP");
+    }
+
+    name.replace(
+        QStringLiteral("Blackmagic Design"),
+        QString(),
+        Qt::CaseInsensitive);
+
+    name.replace(
+        QStringLiteral("Blackmagic"),
+        QString(),
+        Qt::CaseInsensitive);
+
+    name.replace(
+        QStringLiteral("DeckLink"),
+        QString(),
+        Qt::CaseInsensitive);
+
+    name = name.simplified();
+
+    if (name.isEmpty())
+    {
+        return QStringLiteral("BMD");
+    }
+
+    return QStringLiteral("BMD %1").arg(name);
+}
+
+static QString deckLinkApiName(IDeckLink* deckLink)
+{
+    BSTR name = nullptr;
+
+    if (deckLink->GetModelName(&name) == S_OK &&
+        name != nullptr)
+    {
+        const QString result =
+            QString::fromWCharArray(name);
+
+        SysFreeString(name);
+        return result;
+    }
+
+    name = nullptr;
+
+    if (deckLink->GetDisplayName(&name) == S_OK &&
+        name != nullptr)
+    {
+        const QString result =
+            QString::fromWCharArray(name);
+
+        SysFreeString(name);
+        return result;
+    }
+
+    return {};
+}
+
 static void dumpConnections(const char* label, int64_t value)
 {
     qDebug() << label;
@@ -175,15 +247,10 @@ static void dumpDevice(
     int index,
     VideoEngine* videoEngine)
 {
-    BSTR name = nullptr;
+    const QString apiName =
+        deckLinkApiName(deckLink);
 
-    if (deckLink->GetDisplayName(&name) == S_OK)
-    {
-        qDebug() << index << ":"
-            << QString::fromWCharArray(name);
-
-        SysFreeString(name);
-    }
+    qDebug() << index << ":" << apiName;
 
     IDeckLinkProfileAttributes* attributes = nullptr;
 
@@ -214,7 +281,7 @@ static void dumpDevice(
     testPalInput(deckLink, videoEngine);
 }
 
-void deckLinkProbe(VideoEngine* videoEngine)
+QString deckLinkProbe(VideoEngine* videoEngine)
 {
     IDeckLinkIterator* iterator = nullptr;
 
@@ -240,14 +307,19 @@ void deckLinkProbe(VideoEngine* videoEngine)
             "Please install Desktop Video 16.2 or later.\n\n"
             "OpenScope will continue without video capture.");
 
-        return;
+        return {};
     }
 
     IDeckLink* deckLink = nullptr;
     int index = 0;
+    QString activeDeviceName;
 
     while (iterator->Next(&deckLink) == S_OK)
     {
+        activeDeviceName =
+            shortDeckLinkName(
+                deckLinkApiName(deckLink));
+
         dumpDevice(deckLink, index, videoEngine);
 
         deckLink->Release();
@@ -268,6 +340,8 @@ void deckLinkProbe(VideoEngine* videoEngine)
             "DeckLink capture device was detected.\n\n"
             "OpenScope will continue without video capture.");
     }
+
+    return activeDeviceName;
 }
 
 void deckLinkStop()

@@ -1,11 +1,10 @@
-PM5644 G/924 ROM SETS
+PM5644 G924 ROM SETS
 
 Put BOTH V1 and V2 EPROM dumps in this single directory.
 
 OpenScope choices:
-  rom.ini      - convenience copy of V1
-  rom_v1.ini   - G/924 V1
-  rom_v2.ini   - G/924 V2
+  16x9_v1.ini   - G/924 V1
+  16x9_v2.ini   - G/924 V2
 
 V2 contains only eight changed EPROMs. It intentionally reuses the V1
 B-Y ROMs:

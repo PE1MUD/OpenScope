@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <QRect>
 #include <QSize>
+#include <QString>
 
 #include <memory>
 
@@ -32,6 +33,7 @@ public:
 
     VideoWidget* videoWidget() const;
     VideoEngine* videoEngine() const;
+    void setBlackmagicDeviceName(const QString& deviceName);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -76,6 +78,7 @@ private:
     QSize videoRenderSize_;
     QSize waveformRenderSize_;
     QSize vectorscopeRenderSize_;
+    QString blackmagicDeviceName_ = QStringLiteral("BMD");
 
     RenderView activeRenderView_ =
         RenderView::Matrix;
@@ -94,6 +97,7 @@ private:
         bool fullscreen);
 
     void updateRenderResolutionTitle();
+    void updateScreenRenderDemand();
     void homeFloaties();
 
     void createSourceMenu();

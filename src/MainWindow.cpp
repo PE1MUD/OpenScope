@@ -52,6 +52,31 @@
 
 namespace
 {
+QSize devicePixelRenderSize(
+    const QWidget* widget,
+    int logicalWidth,
+    int logicalHeight)
+{
+    const double devicePixelRatio =
+        widget != nullptr
+            ? widget->devicePixelRatioF()
+            : 1.0;
+
+    return QSize(
+        (std::max)(
+            1,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(logicalWidth) *
+                    devicePixelRatio))),
+        (std::max)(
+            1,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(logicalHeight) *
+                    devicePixelRatio))));
+}
+
 class WaveformVideoPreview final : public QWidget
 {
 public:
@@ -378,18 +403,18 @@ MainWindow::MainWindow(QWidget* parent)
             }
         });
 
-    // Vectorscope now follows the same screen-render contract as waveform:
-    // the widget publishes the full presentation size, VideoEngine renders a
-    // complete image at that size, and the widget simply presents the latest
-    // completed image while a resize is in flight.
-    connect(
-        vectorscopeWidget_,
-        &VideoWidget::outputSizeChanged,
-        videoEngine_,
-        &VideoEngine::setVectorscopeOutputSize);
+    // Vectorscope follows the waveform screen-render contract.  QWidget
+    // geometry is expressed in logical pixels, while the renderer should use
+    // the physical pixel budget of a HiDPI display.  The completed image is
+    // still presented into the same logical widget rectangle by Qt.
+    const QSize initialVectorscopeLogicalSize =
+        vectorscopeWidget_->renderSize();
 
     const QSize initialVectorscopeRenderSize =
-        vectorscopeWidget_->renderSize();
+        devicePixelRenderSize(
+            vectorscopeWidget_,
+            initialVectorscopeLogicalSize.width(),
+            initialVectorscopeLogicalSize.height());
 
     videoEngine_->setVectorscopeOutputSize(
         initialVectorscopeRenderSize.width(),
@@ -404,8 +429,18 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this](int width, int height)
         {
+            const QSize renderSize =
+                devicePixelRenderSize(
+                    vectorscopeWidget_,
+                    width,
+                    height);
+
+            videoEngine_->setVectorscopeOutputSize(
+                renderSize.width(),
+                renderSize.height());
+
             vectorscopeRenderSize_ =
-                QSize(width, height);
+                renderSize;
 
             if (activeRenderView_ ==
                 RenderView::Vectorscope)
@@ -563,18 +598,9 @@ MainWindow::MainWindow(QWidget* parent)
                 scrollPosition);
         });
 
-    connect(
-        videoWidget_,
-        &VideoWidget::rightClicked,
-        this,
+    const auto cycleWaveformZoom =
         [this]()
         {
-            if (activeRenderView_ !=
-                RenderView::Matrix)
-            {
-                return;
-            }
-
             const int currentZoom =
                 waveformWidget_->zoomFactor();
 
@@ -587,7 +613,24 @@ MainWindow::MainWindow(QWidget* parent)
 
             workspace_->setWaveformZoomFactor(
                 nextZoom);
-        });
+        };
+
+    const auto connectZoomCycle =
+        [this, &cycleWaveformZoom](VideoWidget* widget)
+        {
+            connect(
+                widget,
+                &VideoWidget::rightClicked,
+                this,
+                [cycleWaveformZoom]()
+                {
+                    cycleWaveformZoom();
+                });
+        };
+
+    connectZoomCycle(videoWidget_);
+    connectZoomCycle(waveformWidget_);
+    connectZoomCycle(vectorscopeWidget_);
 
     // Keyboard convenience controls for point-and-measure in the video view.
     // These deliberately reuse the existing line/zoom/scroll state paths.
@@ -627,14 +670,11 @@ MainWindow::MainWindow(QWidget* parent)
             workspace_->setWaveformZoomFactor(nextZoom);
         });
 
-    const auto stepSelectedLine =
+    // Video, waveform and vectorscope share one line/X navigation path.
+    // This stays active in both matrix and maximized views.
+    const auto stepInstrumentLine =
         [this](int delta)
         {
-            if (activeRenderView_ != RenderView::Matrix)
-            {
-                return;
-            }
-
             constexpr int kFirstPalLine = 0;
             constexpr int kLastPalLine = 575;
 
@@ -644,9 +684,6 @@ MainWindow::MainWindow(QWidget* parent)
                     .instrument
                     .lineNumber;
 
-            // Keyboard navigation never enters All Lines (-1).
-            // If All Lines is currently selected, start at the nearest
-            // real edge in the requested direction.
             const int baseLine =
                 currentLine < kFirstPalLine
                 ? (delta < 0 ? kLastPalLine : kFirstPalLine)
@@ -654,30 +691,18 @@ MainWindow::MainWindow(QWidget* parent)
 
             const int nextLine =
                 std::clamp(
-                    baseLine + (currentLine < kFirstPalLine ? 0 : delta),
+                    baseLine +
+                        (currentLine < kFirstPalLine ? 0 : delta),
                     kFirstPalLine,
                     kLastPalLine);
 
             workspace_->setLineNumber(nextLine);
         };
 
-    connect(
-        videoWidget_,
-        &VideoWidget::lineUpRequested,
-        this,
-        [stepSelectedLine]() { stepSelectedLine(-1); });
-
-    connect(
-        videoWidget_,
-        &VideoWidget::lineDownRequested,
-        this,
-        [stepSelectedLine]() { stepSelectedLine(+1); });
-
-    const auto panSelectedLine =
+    const auto panInstrumentWaveform =
         [this](double delta)
         {
-            if (activeRenderView_ != RenderView::Matrix ||
-                waveformWidget_->zoomFactor() <= 1)
+            if (waveformWidget_->zoomFactor() <= 1)
             {
                 return;
             }
@@ -693,22 +718,57 @@ MainWindow::MainWindow(QWidget* parent)
 
             waveformWidget_->setScrollPosition(
                 std::clamp(
-                    currentPosition + (delta * kKeyboardPanStep),
+                    currentPosition +
+                        delta * kKeyboardPanStep,
                     0.0,
                     1.0));
         };
 
-    connect(
-        videoWidget_,
-        &VideoWidget::panLeftRequested,
-        this,
-        [panSelectedLine]() { panSelectedLine(-1.0); });
+    const auto connectInstrumentArrows =
+        [this,
+         &stepInstrumentLine,
+         &panInstrumentWaveform](VideoWidget* widget)
+        {
+            connect(
+                widget,
+                &VideoWidget::lineUpRequested,
+                this,
+                [stepInstrumentLine]()
+                {
+                    stepInstrumentLine(-1);
+                });
 
-    connect(
-        videoWidget_,
-        &VideoWidget::panRightRequested,
-        this,
-        [panSelectedLine]() { panSelectedLine(+1.0); });
+            connect(
+                widget,
+                &VideoWidget::lineDownRequested,
+                this,
+                [stepInstrumentLine]()
+                {
+                    stepInstrumentLine(+1);
+                });
+
+            connect(
+                widget,
+                &VideoWidget::panLeftRequested,
+                this,
+                [panInstrumentWaveform]()
+                {
+                    panInstrumentWaveform(-1.0);
+                });
+
+            connect(
+                widget,
+                &VideoWidget::panRightRequested,
+                this,
+                [panInstrumentWaveform]()
+                {
+                    panInstrumentWaveform(+1.0);
+                });
+        };
+
+    connectInstrumentArrows(videoWidget_);
+    connectInstrumentArrows(waveformWidget_);
+    connectInstrumentArrows(vectorscopeWidget_);
 
     connect(
         videoWidget_,
@@ -739,17 +799,21 @@ MainWindow::MainWindow(QWidget* parent)
     connect(
         waveformWidget_,
         &WaveformWidget::outputSizeChanged,
-        videoEngine_,
-        &VideoEngine::setWaveformOutputSize);
-
-    connect(
-        waveformWidget_,
-        &WaveformWidget::outputSizeChanged,
         this,
         [this](int width, int height)
         {
+            const QSize renderSize =
+                devicePixelRenderSize(
+                    waveformWidget_,
+                    width,
+                    height);
+
+            videoEngine_->setWaveformOutputSize(
+                renderSize.width(),
+                renderSize.height());
+
             waveformRenderSize_ =
-                QSize(width, height);
+                renderSize;
 
             if (activeRenderView_ ==
                 RenderView::Waveform)
@@ -991,7 +1055,7 @@ MainWindow::MainWindow(QWidget* parent)
         &VideoWidget::setImage);
 
     VectorscopePresentationInfo vectorscopePresentation;
-    vectorscopePresentation.source = QStringLiteral("BMD IP 4K");
+    vectorscopePresentation.source = blackmagicDeviceName_;
     vectorscopePresentation.input = QStringLiteral("Composite");
     vectorscopePresentation.standard = QStringLiteral("PAL 625i");
     vectorscopePresentation.targets =
@@ -1493,6 +1557,7 @@ MainWindow::MainWindow(QWidget* parent)
                 break;
             }
 
+            updateScreenRenderDemand();
             updateRenderResolutionTitle();
         });
 
@@ -1528,6 +1593,8 @@ MainWindow::MainWindow(QWidget* parent)
         activeRenderView_ = RenderView::Matrix;
         break;
     }
+
+    updateScreenRenderDemand();
 
     workspace_->setWorkspaceView(
         initialWorkspaceView);
@@ -1682,8 +1749,26 @@ void MainWindow::selectBlackmagicSource()
     waveformWidget_->setInputSampleClockHz(13'500'000.0);
     ySpectrumWindow_->setSnrMeasurementEnabled(true);
 
+    deckLinkStop();
+    setBlackmagicDeviceName(
+        deckLinkProbe(videoEngine_));
+
+    if (blackmagicSourceAction_ != nullptr)
+    {
+        blackmagicSourceAction_->setChecked(true);
+    }
+}
+
+void MainWindow::setBlackmagicDeviceName(
+    const QString& deviceName)
+{
+    blackmagicDeviceName_ =
+        deviceName.isEmpty()
+        ? QStringLiteral("BMD")
+        : deviceName;
+
     VectorscopePresentationInfo vectorscopePresentation;
-    vectorscopePresentation.source = QStringLiteral("BMD IP 4K");
+    vectorscopePresentation.source = blackmagicDeviceName_;
     vectorscopePresentation.input = QStringLiteral("Composite");
     vectorscopePresentation.standard = QStringLiteral("PAL 625i");
     vectorscopePresentation.targets =
@@ -1699,14 +1784,6 @@ void MainWindow::selectBlackmagicSource()
 
     videoEngine_->setVectorscopePresentationInfo(
         vectorscopePresentation);
-
-    deckLinkStop();
-    deckLinkProbe(videoEngine_);
-
-    if (blackmagicSourceAction_ != nullptr)
-    {
-        blackmagicSourceAction_->setChecked(true);
-    }
 }
 
 void MainWindow::selectPhilipsPatternRomSource()
@@ -1765,7 +1842,8 @@ void MainWindow::selectPhilipsPatternRomSource()
         blackmagicSourceAction_->setChecked(true);
         ySpectrumWindow_->setSnrMeasurementEnabled(true);
         deckLinkStop();
-        deckLinkProbe(videoEngine_);
+        setBlackmagicDeviceName(
+            deckLinkProbe(videoEngine_));
         return;
     }
 
@@ -1786,7 +1864,7 @@ void MainWindow::selectPhilipsPatternRomSource()
 
     VectorscopePresentationInfo vectorscopePresentation;
     vectorscopePresentation.source = QStringLiteral("Philips ROM");
-    vectorscopePresentation.input = QStringLiteral("Pattern ROM");
+    vectorscopePresentation.input = philipsPatternRomSource_->shortName();
     vectorscopePresentation.standard = QStringLiteral("PAL 625i");
     vectorscopePresentation.targets =
         settingsService_->settings()
@@ -1835,7 +1913,8 @@ void MainWindow::reloadPhilipsPatternRomSource()
 
         blackmagicSourceAction_->setChecked(true);
         ySpectrumWindow_->setSnrMeasurementEnabled(true);
-        deckLinkProbe(videoEngine_);
+        setBlackmagicDeviceName(
+            deckLinkProbe(videoEngine_));
         return;
     }
 
@@ -1848,6 +1927,29 @@ void MainWindow::reloadPhilipsPatternRomSource()
 
     deckLinkStop();
     philipsPatternRomSource_->start();
+
+    VectorscopePresentationInfo vectorscopePresentation;
+    vectorscopePresentation.source = QStringLiteral("Philips ROM");
+    vectorscopePresentation.input = philipsPatternRomSource_->shortName();
+    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.targets =
+        settingsService_->settings()
+            .control
+            .instrument
+            .vectorscope
+            .showHundredPercentTargets
+        ? QStringLiteral("100%")
+        : QStringLiteral("75%");
+    vectorscopePresentation.matrix = QStringLiteral("BT.601");
+    vectorscopePresentation.processing = QStringLiteral("YUV 4:4:4 16 bit");
+
+    videoEngine_->setVectorscopePresentationInfo(
+        vectorscopePresentation);
+
+    philipsPatternRomSourceAction_->setText(
+        tr("Philips Pattern ROM - %1")
+            .arg(
+                philipsPatternRomSource_->setName()));
 
     philipsPatternRomSourceAction_->setChecked(true);
 }
@@ -2017,6 +2119,45 @@ void MainWindow::updateVideoFullscreenUi(
     videoEngine_->setVideoHighlightEnabled(
         !fullscreen);
 }
+
+void MainWindow::updateScreenRenderDemand()
+{
+    bool videoScreen = false;
+    bool waveformScreen = false;
+    bool vectorscopeScreen = false;
+
+    switch (activeRenderView_)
+    {
+    case RenderView::Video:
+        videoScreen = true;
+        break;
+
+    case RenderView::Waveform:
+        waveformScreen = true;
+        break;
+
+    case RenderView::Vectorscope:
+        vectorscopeScreen = true;
+        break;
+
+    case RenderView::Matrix:
+    default:
+        videoScreen = true;
+        waveformScreen = true;
+        vectorscopeScreen = true;
+        break;
+    }
+
+    videoEngine_->setVideoScreenRenderEnabled(
+        videoScreen);
+
+    videoEngine_->setWaveformScreenRenderEnabled(
+        waveformScreen);
+
+    videoEngine_->setVectorscopeScreenRenderEnabled(
+        vectorscopeScreen);
+}
+
 
 void MainWindow::updateRenderResolutionTitle()
 {

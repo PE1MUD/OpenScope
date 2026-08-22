@@ -1,6 +1,7 @@
 #include "rendering/VectorscopeRenderer.h"
 
 #include "VectorscopeSettings.h"
+#include "standards/VideoStandard.h"
 #include "ui/ViewportOverlay.h"
 
 #include <QPainter>
@@ -61,6 +62,16 @@ VectorscopeRenderer::VectorscopeRenderer(Profile profile)
         profile_ == Profile::Video
         ? VectorscopeSettings::scale * (36.0 / 35.0)
         : VectorscopeSettings::scale);
+
+    if (profile_ == Profile::Video)
+    {
+        constexpr VideoStandard videoStandard =
+            VideoStandard::pal625();
+
+        analyzer_.setGeometryScale(
+            1.0 / videoStandard.pixelAspectRatio,
+            1.0);
+    }
 }
 
 void VectorscopeRenderer::setOutputSize(int width, int height)
@@ -110,6 +121,15 @@ void VectorscopeRenderer::setHorizontalWindow(
     int zoomFactor,
     double scrollPosition)
 {
+    if (zoomFactor != 1 &&
+        zoomFactor != 5 &&
+        zoomFactor != 10)
+    {
+        zoomFactor = 1;
+    }
+
+    horizontalZoomFactor_ = zoomFactor;
+
     analyzer_.setHorizontalWindow(
         zoomFactor,
         scrollPosition);
@@ -149,13 +169,74 @@ QRectF VectorscopeRenderer::contentRect() const
         contentScaleY_ * static_cast<double>(outputHeight_));
 }
 
+double VectorscopeRenderer::screenOwnerWidth(const QRectF& bounds) const
+{
+    const double ownerPadding =
+        std::max(10.0, bounds.height() * 0.018);
+
+    const QVector<ViewportOverlay::InfoRow> sourceRows
+    {
+        { QStringLiteral("SOURCE"), presentation_.source },
+        { QStringLiteral("INPUT"), presentation_.input },
+        { QStringLiteral("STANDARD"), presentation_.standard }
+    };
+
+    const QVector<ViewportOverlay::InfoRow> scopeRows
+    {
+        {
+            QStringLiteral("LINE"),
+            QStringLiteral("%1   X%2")
+                .arg(
+                    selectedLine_ >= 0
+                    ? QString::number(selectedLine_)
+                    : QStringLiteral("ALL"))
+                .arg(horizontalZoomFactor_)
+        },
+        { QStringLiteral("TARGETS"), presentation_.targets },
+        { QStringLiteral("MATRIX"), presentation_.matrix }
+    };
+
+    const QVector<ViewportOverlay::InfoRow> processingRows
+    {
+        { QStringLiteral("PROCESSING"), QString() },
+        { presentation_.processing, QString() }
+    };
+
+    const QSizeF sourceSize =
+        ViewportOverlay::infoCardRequiredSize(
+            sourceRows,
+            bounds.height(),
+            false);
+
+    const QSizeF scopeSize =
+        ViewportOverlay::infoCardRequiredSize(
+            scopeRows,
+            bounds.height(),
+            false);
+
+    const QSizeF processingSize =
+        ViewportOverlay::infoCardRequiredSize(
+            processingRows,
+            bounds.height(),
+            false);
+
+    const double requiredCardWidth =
+        std::max(
+            sourceSize.width(),
+            std::max(
+                scopeSize.width(),
+                processingSize.width()));
+
+    return requiredCardWidth + 2.0 * ownerPadding;
+}
+
 QRectF VectorscopeRenderer::screenScopeRect(const QRectF& bounds) const
 {
     return snapSquare(
         ViewportOverlay::vectorscopeScopeRect(
             bounds,
             false,
-            0.0));
+            screenOwnerWidth(bounds)));
 }
 
 QRectF VectorscopeRenderer::videoScopeRect(
@@ -184,9 +265,12 @@ QRectF VectorscopeRenderer::videoScopeRect(
     {
         {
             QStringLiteral("LINE"),
-            selectedLine_ >= 0
-            ? QString::number(selectedLine_)
-            : QStringLiteral("ALL")
+            QStringLiteral("%1   X%2")
+                .arg(
+                    selectedLine_ >= 0
+                    ? QString::number(selectedLine_)
+                    : QStringLiteral("ALL"))
+                .arg(horizontalZoomFactor_)
         }
     };
 
@@ -349,11 +433,36 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
         QPainter::Antialiasing,
         true);
 
-    graticule_.draw(
-        painter,
-        scopeRect,
-        profile_ == Profile::Video ? 1.8 : 1.0,
-        profile_ == Profile::Video ? 1.35 : 1.0);
+    if (profile_ == Profile::Video)
+    {
+        constexpr VideoStandard videoStandard =
+            VideoStandard::pal625();
+
+        const QPointF center = scopeRect.center();
+
+        painter.save();
+        painter.translate(center);
+        painter.scale(
+            1.0 / videoStandard.pixelAspectRatio,
+            1.0);
+        painter.translate(-center);
+
+        graticule_.draw(
+            painter,
+            scopeRect,
+            1.8,
+            1.35);
+
+        painter.restore();
+    }
+    else
+    {
+        graticule_.draw(
+            painter,
+            scopeRect,
+            1.0,
+            1.0);
+    }
 
     if (profile_ == Profile::Screen)
     {
@@ -394,9 +503,12 @@ void VectorscopeRenderer::composeScreen(
     {
         {
             QStringLiteral("LINE"),
-            selectedLine_ >= 0
-            ? QString::number(selectedLine_)
-            : QStringLiteral("ALL")
+            QStringLiteral("%1   X%2")
+                .arg(
+                    selectedLine_ >= 0
+                    ? QString::number(selectedLine_)
+                    : QStringLiteral("ALL"))
+                .arg(horizontalZoomFactor_)
         },
         { QStringLiteral("TARGETS"), presentation_.targets },
         { QStringLiteral("MATRIX"), presentation_.matrix }
@@ -440,7 +552,7 @@ void VectorscopeRenderer::composeScreen(
         ViewportOverlay::vectorscopeInfoRect(
             bounds,
             false,
-            0.0);
+            measuredOwnerWidth);
 
     const double ownerWidth =
         std::min(infoRect.width(), measuredOwnerWidth);
@@ -573,9 +685,12 @@ void VectorscopeRenderer::composeVideo(
     {
         {
             QStringLiteral("LINE"),
-            selectedLine_ >= 0
-            ? QString::number(selectedLine_)
-            : QStringLiteral("ALL")
+            QStringLiteral("%1   X%2")
+                .arg(
+                    selectedLine_ >= 0
+                    ? QString::number(selectedLine_)
+                    : QStringLiteral("ALL"))
+                .arg(horizontalZoomFactor_)
         }
     };
 

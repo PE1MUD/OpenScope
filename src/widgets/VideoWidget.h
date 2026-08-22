@@ -12,6 +12,7 @@ class QKeyEvent;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
+class QWheelEvent;
 
 class VideoWidget : public QWidget
 {
@@ -82,6 +83,9 @@ protected:
     void resizeEvent(
         QResizeEvent* event) override;
 
+    void wheelEvent(
+        QWheelEvent* event) override;
+
 private:
     bool emitImagePosition(
         const QPointF& position);
@@ -98,6 +102,9 @@ private:
     bool downHeld_ = false;
     bool leftHeld_ = false;
     bool rightHeld_ = false;
+
+    int wheelVerticalRemainder_ = 0;
+    int wheelHorizontalRemainder_ = 0;
 
     OpenScopeSettings::AspectRatio aspectRatio_ =
         OpenScopeSettings::AspectRatio::Ratio16x9;

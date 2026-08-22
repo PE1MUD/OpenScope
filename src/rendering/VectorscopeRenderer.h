@@ -13,7 +13,7 @@ class QPainter;
 
 struct VectorscopePresentationInfo
 {
-    QString source = QStringLiteral("BMD IP 4K");
+    QString source = QStringLiteral("BMD");
     QString input = QStringLiteral("Composite");
     QString standard = QStringLiteral("PAL 625i");
     QString targets = QStringLiteral("100%");
@@ -48,6 +48,7 @@ public:
 
 private:
     [[nodiscard]] QRectF contentRect() const;
+    [[nodiscard]] double screenOwnerWidth(const QRectF& bounds) const;
     [[nodiscard]] QRectF screenScopeRect(const QRectF& bounds) const;
     [[nodiscard]] QRectF videoScopeRect(
         const QRectF& bounds,
@@ -80,4 +81,5 @@ private:
     double contentScaleX_ = 1.0;
     double contentScaleY_ = 1.0;
     int selectedLine_ = -1;
+    int horizontalZoomFactor_ = 1;
 };

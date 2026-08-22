@@ -26,6 +26,7 @@ public:
 
     bool isRunning() const;
     QString setName() const;
+    QString shortName() const;
     QString iniFileName() const;
     double lumaSampleRateHz() const;
 

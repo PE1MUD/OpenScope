@@ -1943,19 +1943,6 @@ void WaveformWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
 
-    if (zoomFactor_ > 1 &&
-        event->button() == Qt::RightButton &&
-        scope.contains(event->position()))
-    {
-        panActive_ = true;
-        panStartX_ = event->position().x();
-        panStartScrollPosition_ = scrollPosition_;
-        hoverActive_ = false;
-        updateInteractionCursor();
-        event->accept();
-        return;
-    }
-
     VideoWidget::mousePressEvent(event);
 }
 
@@ -2126,19 +2113,6 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
         return;
     }
 
-    if (panActive_ && (event->buttons() & Qt::RightButton) != 0 && zoomFactor_ > 1)
-    {
-        const double displayWidth = static_cast<double>((std::max)(displayRect.width(), 1));
-        const double dragPixels = event->position().x() - panStartX_;
-        const double normalizedDelta =
-            dragPixels /
-            (displayWidth * static_cast<double>(zoomFactor_ - 1));
-
-        setScrollPosition(panStartScrollPosition_ - normalizedDelta);
-        event->accept();
-        return;
-    }
-
     if (event->buttons() == Qt::NoButton)
     {
         if (!areaMode_ && !referenceMode_ &&
@@ -2248,15 +2222,6 @@ void WaveformWidget::mouseReleaseEvent(QMouseEvent* event)
         updateHover(event->position());
         event->accept();
         update();
-        return;
-    }
-
-    if (panActive_ && event->button() == Qt::RightButton)
-    {
-        panActive_ = false;
-        updateInteractionCursor();
-        updateHover(event->position());
-        event->accept();
         return;
     }
 

@@ -321,8 +321,18 @@ auto makeBars(
             BarType::Field2Ready },
 
         Bar{
-            "Waveform screen",
+            "PC video",
+            &snapshot.videoScreen,
+            BarType::Normal },
+
+        Bar{
+            "PC waveform",
             &snapshot.waveformScreen,
+            BarType::Normal },
+
+        Bar{
+            "PC vectorscope",
+            &snapshot.vectorscopeScreen,
             BarType::Normal },
 
         Bar{
@@ -331,8 +341,8 @@ auto makeBars(
             BarType::Normal },
 
         Bar{
-            "Vectorscope",
-            &snapshot.vectorscope,
+            "Vectorscope video",
+            &snapshot.vectorscopeVideo,
             BarType::Normal },
 
         Bar{
@@ -348,7 +358,7 @@ PerformanceWidget::PerformanceWidget(
 {
     setMinimumSize(
         320,
-        205);
+        265);
 
     setMouseTracking(
         true);

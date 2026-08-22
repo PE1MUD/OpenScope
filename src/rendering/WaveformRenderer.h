@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <vector>
 
+class QPainter;
+
 
 // Minimum horizontal pixels per cycle for a visually pleasing waveform.
 inline constexpr double kPixelsPerCycleForTraceBW = 6.0;
@@ -56,6 +58,7 @@ public:
         int intensity);
 
     void setColor(bool enabled);
+    void setLineInfoOverlayEnabled(bool enabled, bool palOutput = false);
 
     void setAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
@@ -77,6 +80,7 @@ private:
         const Yuv444Frame& frame);
 
     void composeTraceImage();
+    void drawLineInfoOverlay(QPainter& painter);
     void plotLuminanceTrace();
 
     void plotBeam(
@@ -145,12 +149,15 @@ private:
     int selectedLine_ = -1;
     int persistence_ = 0;
     int glow_ = 50;
+    double beamCoreRadiusPx_ = 0.82;
 
     int zoomFactor_ = 1;
     double scrollPosition_ = 0.0;
     double contentScaleX_ = 1.0;
     double contentScaleY_ = 1.0;
     bool fitAspectRatio_ = true;
+    bool lineInfoOverlayEnabled_ = false;
+    bool lineInfoOverlayPalOutput_ = false;
     int chromaFillIntensity_ = 64;
 
     double inputSampleClockHz_ = 13'500'000.0;

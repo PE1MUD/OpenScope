@@ -13,6 +13,8 @@ public:
         QWidget* contentWidget,
         QWidget* parent = nullptr);
 
+    void focusContent();
+
 signals:
     void doubleClicked(ScopeViewport* viewport);
 

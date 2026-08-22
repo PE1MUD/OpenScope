@@ -107,6 +107,11 @@ QString PhilipsPatternRomSource::setName() const
     return decoder_.setName();
 }
 
+QString PhilipsPatternRomSource::shortName() const
+{
+    return decoder_.shortName();
+}
+
 QString PhilipsPatternRomSource::iniFileName() const
 {
     return decoder_.iniFileName();

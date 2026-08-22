@@ -19,7 +19,8 @@ int main(int argc, char* argv[])
     MainWindow window;
     window.show();
 
-    deckLinkProbe(window.videoEngine());
+    window.setBlackmagicDeviceName(
+        deckLinkProbe(window.videoEngine()));
 
     return app.exec();
 }

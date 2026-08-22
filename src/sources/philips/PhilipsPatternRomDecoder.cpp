@@ -50,6 +50,15 @@ bool PhilipsPatternRomDecoder::loadIni(
         QStringLiteral("Set/Name"),
         QStringLiteral("Philips Pattern ROM")).toString();
 
+    shortName_ = settings.value(
+        QStringLiteral("Set/Shortname"),
+        setName_).toString().trimmed();
+
+    if (shortName_.isEmpty())
+    {
+        shortName_ = setName_;
+    }
+
     standard_ = settings.value(
         QStringLiteral("Set/Standard"),
         QStringLiteral("PAL")).toString().trimmed().toUpper();
@@ -456,6 +465,11 @@ bool PhilipsPatternRomDecoder::alternateFrames() const
 QString PhilipsPatternRomDecoder::setName() const
 {
     return setName_;
+}
+
+QString PhilipsPatternRomDecoder::shortName() const
+{
+    return shortName_;
 }
 
 QString PhilipsPatternRomDecoder::iniFileName() const

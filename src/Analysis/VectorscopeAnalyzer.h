@@ -17,6 +17,9 @@ public:
         int width,
         int height);
     void setScale(double scale);
+    void setGeometryScale(
+        double horizontalScale,
+        double verticalScale);
     void setPersistence(int persistence);
     void setGlow(int glow);
 
@@ -33,6 +36,7 @@ private:
     void renderSingleLine(const Yuv444Frame& frame);
     void renderAllLines(const Yuv444Frame& frame);
     void applyPersistence();
+    void applyGlowPostProcess();
     std::uint32_t accumulateLineSegment(
         double x0,
         double y0,
@@ -55,6 +59,8 @@ private:
     std::vector<std::uint32_t> allLinesDensity_;
     int selectedLine_ = -1;
     double scale_ = 1.0;
+    double geometryScaleX_ = 1.0;
+    double geometryScaleY_ = 1.0;
     int persistence_ = 0;
     int glow_ = 50;
     int horizontalZoomFactor_ = 1;
