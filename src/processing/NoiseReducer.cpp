@@ -121,6 +121,7 @@ namespace
     }
 }
 
+
 void NoiseReducer::process(
     const Yuv444Frame& source,
     Yuv444Frame& destination,
@@ -145,6 +146,47 @@ void NoiseReducer::process(
 
     destination.sampleClockHz = source.sampleClockHz;
 
+    processRange(
+        source,
+        destination,
+        intensity,
+        0,
+        source.height);
+}
+
+void NoiseReducer::processRange(
+    const Yuv444Frame& source,
+    Yuv444Frame& destination,
+    int intensity,
+    int firstLine,
+    int lastLine) const
+{
+    if (source.width <= 0 ||
+        source.height <= 0 ||
+        source.y.empty() ||
+        source.u.empty() ||
+        source.v.empty() ||
+        destination.width != source.width ||
+        destination.height != source.height)
+    {
+        return;
+    }
+
+    firstLine = std::clamp(
+        firstLine,
+        0,
+        source.height);
+
+    lastLine = std::clamp(
+        lastLine,
+        firstLine,
+        source.height);
+
+    if (firstLine >= lastLine)
+    {
+        return;
+    }
+
     const int clampedIntensity =
         std::clamp(
             intensity,
@@ -153,9 +195,35 @@ void NoiseReducer::process(
 
     if (clampedIntensity == 0)
     {
-        destination.y = source.y;
-        destination.u = source.u;
-        destination.v = source.v;
+        const std::size_t firstIndex =
+            static_cast<std::size_t>(firstLine) *
+            static_cast<std::size_t>(source.width);
+
+        const std::size_t sampleCount =
+            static_cast<std::size_t>(lastLine - firstLine) *
+            static_cast<std::size_t>(source.width);
+
+        std::copy_n(
+            source.y.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex),
+            sampleCount,
+            destination.y.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex));
+
+        std::copy_n(
+            source.u.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex),
+            sampleCount,
+            destination.u.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex));
+
+        std::copy_n(
+            source.v.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex),
+            sampleCount,
+            destination.v.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex));
+
         return;
     }
 
@@ -200,52 +268,72 @@ void NoiseReducer::process(
             kMinimumChromaThreshold,
             kMaximumChromaThreshold);
 
-    filterPlane(
+    filterPlaneRange(
         source.y,
         destination.y,
         source.width,
         source.height,
-        lumaThreshold);
+        lumaThreshold,
+        firstLine,
+        lastLine);
 
-    filterPlane(
+    filterPlaneRange(
         source.u,
         destination.u,
         source.width,
         source.height,
-        chromaThreshold);
+        chromaThreshold,
+        firstLine,
+        lastLine);
 
-    filterPlane(
+    filterPlaneRange(
         source.v,
         destination.v,
         source.width,
         source.height,
-        chromaThreshold);
+        chromaThreshold,
+        firstLine,
+        lastLine);
 
     if (clampedIntensity < kMaximumIntensity)
     {
-        blendPlane(
+        blendPlaneRange(
             source.y,
             destination.y,
-            clampedIntensity);
+            source.width,
+            source.height,
+            clampedIntensity,
+            firstLine,
+            lastLine);
 
-        blendPlane(
+        blendPlaneRange(
             source.u,
             destination.u,
-            clampedIntensity);
+            source.width,
+            source.height,
+            clampedIntensity,
+            firstLine,
+            lastLine);
 
-        blendPlane(
+        blendPlaneRange(
             source.v,
             destination.v,
-            clampedIntensity);
+            source.width,
+            source.height,
+            clampedIntensity,
+            firstLine,
+            lastLine);
     }
 }
 
-void NoiseReducer::filterPlane(
+void NoiseReducer::filterPlaneRange(
     const std::vector<std::uint16_t>& source,
     std::vector<std::uint16_t>& destination,
     int width,
     int height,
-    std::uint16_t threshold)
+    std::uint16_t threshold,
+    int firstLine,
+    int lastLine)
 {
     const std::size_t expectedSize =
         static_cast<std::size_t>(width) *
@@ -257,50 +345,39 @@ void NoiseReducer::filterPlane(
         return;
     }
 
-    if (width < 5 ||
-        height < 5)
+    firstLine = std::clamp(
+        firstLine,
+        0,
+        height);
+
+    lastLine = std::clamp(
+        lastLine,
+        firstLine,
+        height);
+
+    if (firstLine >= lastLine)
     {
-        std::copy_n(
-            source.begin(),
-            expectedSize,
-            destination.begin());
         return;
     }
 
-    // Copy the two-pixel border unchanged.
-    for (int borderY = 0;
-        borderY < kFilterRadius;
-        ++borderY)
+    if (width < 5 ||
+        height < 5)
     {
-        const std::size_t topOffset =
-            static_cast<std::size_t>(
-                borderY) *
-            static_cast<std::size_t>(
-                width);
+        const std::size_t firstIndex =
+            static_cast<std::size_t>(firstLine) *
+            static_cast<std::size_t>(width);
 
-        const std::size_t bottomOffset =
-            static_cast<std::size_t>(
-                height - 1 - borderY) *
-            static_cast<std::size_t>(
-                width);
+        const std::size_t sampleCount =
+            static_cast<std::size_t>(lastLine - firstLine) *
+            static_cast<std::size_t>(width);
 
         std::copy_n(
             source.begin() +
-            static_cast<std::ptrdiff_t>(
-                topOffset),
-            static_cast<std::size_t>(width),
+                static_cast<std::ptrdiff_t>(firstIndex),
+            sampleCount,
             destination.begin() +
-            static_cast<std::ptrdiff_t>(
-                topOffset));
-
-        std::copy_n(
-            source.begin() +
-            static_cast<std::ptrdiff_t>(
-                bottomOffset),
-            static_cast<std::size_t>(width),
-            destination.begin() +
-            static_cast<std::ptrdiff_t>(
-                bottomOffset));
+                static_cast<std::ptrdiff_t>(firstIndex));
+        return;
     }
 
     const __m256i thresholdVector =
@@ -309,16 +386,29 @@ void NoiseReducer::filterPlane(
                 threshold));
 
     const __m256i one =
-        _mm256_set1_epi32(
-            1);
+        _mm256_set1_epi32(1);
 
-    for (int y = kFilterRadius;
-        y < height - kFilterRadius;
+    for (int y = firstLine;
+        y < lastLine;
         ++y)
     {
         const std::size_t lineOffset =
             static_cast<std::size_t>(y) *
             static_cast<std::size_t>(width);
+
+        // Vertical border is copied unchanged. This also makes line-range
+        // splitting safe because no worker needs to write halo lines.
+        if (y < kFilterRadius ||
+            y >= height - kFilterRadius)
+        {
+            std::copy_n(
+                source.begin() +
+                    static_cast<std::ptrdiff_t>(lineOffset),
+                static_cast<std::size_t>(width),
+                destination.begin() +
+                    static_cast<std::ptrdiff_t>(lineOffset));
+            continue;
+        }
 
         for (int borderX = 0;
             borderX < kFilterRadius;
@@ -333,18 +423,17 @@ void NoiseReducer::filterPlane(
                         static_cast<std::size_t>(
                             borderX)];
 
-                destination[
+            destination[
+                lineOffset +
+                    static_cast<std::size_t>(
+                        width - 1 - borderX)] =
+                source[
                     lineOffset +
                         static_cast<std::size_t>(
-                            width - 1 - borderX)] =
-                    source[
-                        lineOffset +
-                            static_cast<std::size_t>(
-                                width - 1 - borderX)];
+                            width - 1 - borderX)];
         }
 
-        int x =
-            kFilterRadius;
+        int x = kFilterRadius;
 
         const int vectorEnd =
             width -
@@ -463,17 +552,36 @@ void NoiseReducer::filterPlane(
     }
 }
 
-void NoiseReducer::blendPlane(
+void NoiseReducer::blendPlaneRange(
     const std::vector<std::uint16_t>& source,
     std::vector<std::uint16_t>& filtered,
-    int intensity)
+    int width,
+    int height,
+    int intensity,
+    int firstLine,
+    int lastLine)
 {
-    const std::size_t sampleCount =
-        std::min(
-            source.size(),
-            filtered.size());
+    const std::size_t expectedSize =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height);
 
-    if (sampleCount == 0)
+    if (source.size() < expectedSize ||
+        filtered.size() < expectedSize)
+    {
+        return;
+    }
+
+    firstLine = std::clamp(
+        firstLine,
+        0,
+        height);
+
+    lastLine = std::clamp(
+        lastLine,
+        firstLine,
+        height);
+
+    if (firstLine >= lastLine)
     {
         return;
     }
@@ -484,12 +592,23 @@ void NoiseReducer::blendPlane(
             kMinimumIntensity,
             kMaximumIntensity);
 
+    const std::size_t firstIndex =
+        static_cast<std::size_t>(firstLine) *
+        static_cast<std::size_t>(width);
+
+    const std::size_t lastIndex =
+        static_cast<std::size_t>(lastLine) *
+        static_cast<std::size_t>(width);
+
     if (clampedIntensity <= 0)
     {
-        std::copy_n(
-            source.begin(),
-            sampleCount,
-            filtered.begin());
+        std::copy(
+            source.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex),
+            source.begin() +
+                static_cast<std::ptrdiff_t>(lastIndex),
+            filtered.begin() +
+                static_cast<std::ptrdiff_t>(firstIndex));
         return;
     }
 
@@ -508,34 +627,37 @@ void NoiseReducer::blendPlane(
             clampedIntensity);
 
     const __m256i rounding =
-        _mm256_set1_epi32(
-            50);
+        _mm256_set1_epi32(50);
 
-    const __m256 scale =
-        _mm256_set1_ps(
-            0.01f);
-
-    std::size_t index = 0;
+    std::size_t index = firstIndex;
 
     const std::size_t vectorEnd =
-        sampleCount -
-        sampleCount % 8u;
+        lastIndex -
+        ((lastIndex - firstIndex) % 8u);
 
     for (;
         index < vectorEnd;
-        index += 8u)
+        index += 8)
     {
+        const __m128i source16 =
+            _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(
+                    source.data() + index));
+
+        const __m128i filtered16 =
+            _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(
+                    filtered.data() + index));
+
         const __m256i source32 =
-            load8Unsigned16As32(
-                source.data() +
-                index);
+            _mm256_cvtepu16_epi32(
+                source16);
 
         const __m256i filtered32 =
-            load8Unsigned16As32(
-                filtered.data() +
-                index);
+            _mm256_cvtepu16_epi32(
+                filtered16);
 
-        __m256i weighted =
+        __m256i blended =
             _mm256_add_epi32(
                 _mm256_mullo_epi32(
                     source32,
@@ -544,30 +666,30 @@ void NoiseReducer::blendPlane(
                     filtered32,
                     strength));
 
-        weighted =
+        blended =
             _mm256_add_epi32(
-                weighted,
+                blended,
                 rounding);
 
-        // Integer division by 100 is not directly available in AVX2.
-        // Values are <= 6.6 million, exactly representable as float.
+        // Exact integer division by 100 using scalar lanes would be costly.
+        // The original implementation used float for this final blend; keep
+        // the same numerical behaviour here while restricting it to the range.
         const __m256 blendedFloat =
             _mm256_mul_ps(
-                _mm256_cvtepi32_ps(
-                    weighted),
-                scale);
+                _mm256_cvtepi32_ps(blended),
+                _mm256_set1_ps(0.01f));
 
-        const __m256i blended32 =
+        const __m256i rounded =
             _mm256_cvttps_epi32(
                 blendedFloat);
 
         const __m128i low =
             _mm256_castsi256_si128(
-                blended32);
+                rounded);
 
         const __m128i high =
             _mm256_extracti128_si256(
-                blended32,
+                rounded,
                 1);
 
         const __m128i packed =
@@ -577,28 +699,27 @@ void NoiseReducer::blendPlane(
 
         _mm_storeu_si128(
             reinterpret_cast<__m128i*>(
-                filtered.data() +
-                index),
+                filtered.data() + index),
             packed);
     }
 
     for (;
-        index < sampleCount;
+        index < lastIndex;
         ++index)
     {
-        const std::uint32_t original =
+        const std::uint32_t sourceValue =
             source[index];
 
-        const std::uint32_t reduced =
+        const std::uint32_t filteredValue =
             filtered[index];
 
         filtered[index] =
             static_cast<std::uint16_t>(
-                (original *
+                (sourceValue *
                     static_cast<std::uint32_t>(
                         kMaximumIntensity -
                         clampedIntensity) +
-                    reduced *
+                    filteredValue *
                     static_cast<std::uint32_t>(
                         clampedIntensity) +
                     50u) /

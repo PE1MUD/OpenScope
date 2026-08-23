@@ -1160,6 +1160,18 @@ MainWindow::MainWindow(QWidget* parent)
             .noiseFilter
             .strength);
 
+    videoEngine_->setLumaCompensationEnabled(
+        initialSettings.control
+            .processing
+            .lumaCompensation
+            .enabled);
+
+    videoEngine_->setLumaCompensationGainHundredthsDb(
+        initialSettings.control
+            .processing
+            .lumaCompensation
+            .gainHundredthsDb);
+
     videoEngine_->setWaveformColor(
         !initialSettings.control
             .instrument
@@ -1420,6 +1432,75 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(
         workspace_,
+        &ScopeWorkspace::lumaCompensationChanged,
+        this,
+        [this](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .processing
+                        .lumaCompensation
+                        .enabled =
+                        enabled;
+                });
+
+            videoEngine_->setLumaCompensationEnabled(
+                enabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::lumaCompensationGainChanged,
+        this,
+        [this](int gainHundredthsDb)
+        {
+            settingsService_->update(
+                [gainHundredthsDb](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .processing
+                        .lumaCompensation
+                        .gainHundredthsDb =
+                        gainHundredthsDb;
+                });
+
+            videoEngine_->setLumaCompensationGainHundredthsDb(
+                gainHundredthsDb);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::compositeLumaGainChanged,
+        this,
+        [](int gainHundredthsDb)
+        {
+            deckLinkSetCompositeLumaGain(
+                static_cast<double>(gainHundredthsDb) / 100.0);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::compositeChromaGainChanged,
+        this,
+        [](int gainHundredthsDb)
+        {
+            deckLinkSetCompositeChromaGain(
+                static_cast<double>(gainHundredthsDb) / 100.0);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::compositeGainCommitRequested,
+        this,
+        []()
+        {
+            deckLinkCommitConfiguration();
+        });
+
+    connect(
+        workspace_,
         &ScopeWorkspace::legacyAspectRatioChanged,
         this,
         [this](bool legacyEnabled)
@@ -1452,11 +1533,8 @@ MainWindow::MainWindow(QWidget* parent)
     performanceWidget_->setWindowFlag(
         Qt::Tool);
 
-    performanceWidget_->setFixedSize(
+    performanceWidget_->resize(
         performanceWidget_->sizeHint());
-
-    performanceWidget_->setFixedSize(
-        performanceWidget_->size());
 
     if (initialSettings.local
         .floaties
@@ -1762,6 +1840,23 @@ void MainWindow::selectBlackmagicSource()
 void MainWindow::setBlackmagicDeviceName(
     const QString& deviceName)
 {
+    videoEngine_->setLumaCompensationSourceEnabled(
+        true);
+
+    const DeckLinkCompositeGainState gainState =
+        deckLinkCompositeGainState();
+
+    if (workspace_ != nullptr)
+    {
+        workspace_->setCompositeInputGainState(
+            gainState.lumaAvailable,
+            gainState.chromaAvailable,
+            static_cast<int>(std::lround(gainState.minimumDb * 100.0)),
+            static_cast<int>(std::lround(gainState.maximumDb * 100.0)),
+            static_cast<int>(std::lround(gainState.lumaDb * 100.0)),
+            static_cast<int>(std::lround(gainState.chromaDb * 100.0)));
+    }
+
     blackmagicDeviceName_ =
         deviceName.isEmpty()
         ? QStringLiteral("BMD")
@@ -1860,6 +1955,20 @@ void MainWindow::selectPhilipsPatternRomSource()
         QStringLiteral("DIGITAL ROM SOURCE   SNR not applicable"));
 
     deckLinkStop();
+
+    if (workspace_ != nullptr)
+    {
+        workspace_->setCompositeInputGainState(
+            false,
+            false,
+            0,
+            0,
+            0,
+            0);
+    }
+
+    videoEngine_->setLumaCompensationSourceEnabled(
+        false);
     philipsPatternRomSource_->start();
 
     VectorscopePresentationInfo vectorscopePresentation;
@@ -1926,6 +2035,20 @@ void MainWindow::reloadPhilipsPatternRomSource()
         QStringLiteral("DIGITAL ROM SOURCE   SNR not applicable"));
 
     deckLinkStop();
+
+    if (workspace_ != nullptr)
+    {
+        workspace_->setCompositeInputGainState(
+            false,
+            false,
+            0,
+            0,
+            0,
+            0);
+    }
+
+    videoEngine_->setLumaCompensationSourceEnabled(
+        false);
     philipsPatternRomSource_->start();
 
     VectorscopePresentationInfo vectorscopePresentation;

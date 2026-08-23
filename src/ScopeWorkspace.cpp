@@ -219,6 +219,36 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::lumaCompensationChanged,
+        this,
+        &ScopeWorkspace::lumaCompensationChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::lumaCompensationGainChanged,
+        this,
+        &ScopeWorkspace::lumaCompensationGainChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::compositeLumaGainChanged,
+        this,
+        &ScopeWorkspace::compositeLumaGainChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::compositeChromaGainChanged,
+        this,
+        &ScopeWorkspace::compositeChromaGainChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::compositeGainCommitRequested,
+        this,
+        &ScopeWorkspace::compositeGainCommitRequested);
+
+    connect(
+        controlWidget_,
         &ControlWidget::legacyAspectRatioChanged,
         this,
         &ScopeWorkspace::legacyAspectRatioChanged);
@@ -234,6 +264,28 @@ ScopeWorkspace::ScopeWorkspace(
         &ControlWidget::exportHighResolutionPngQuickRequested,
         this,
         &ScopeWorkspace::exportHighResolutionPngQuickRequested);
+}
+
+void ScopeWorkspace::setCompositeInputGainState(
+    bool lumaAvailable,
+    bool chromaAvailable,
+    int minimumHundredthsDb,
+    int maximumHundredthsDb,
+    int lumaHundredthsDb,
+    int chromaHundredthsDb)
+{
+    if (controlWidget_ == nullptr)
+    {
+        return;
+    }
+
+    controlWidget_->setCompositeInputGainState(
+        lumaAvailable,
+        chromaAvailable,
+        minimumHundredthsDb,
+        maximumHundredthsDb,
+        lumaHundredthsDb,
+        chromaHundredthsDb);
 }
 
 void ScopeWorkspace::toggleMaximized(

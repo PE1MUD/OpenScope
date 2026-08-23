@@ -13,6 +13,16 @@ public:
         Yuv444Frame& destination,
         int intensity);
 
+    // Thread-friendly range entry point. The caller must size destination
+    // before dispatching workers. Each worker writes only [firstLine,lastLine)
+    // and may therefore run in parallel with another non-overlapping range.
+    void processRange(
+        const Yuv444Frame& source,
+        Yuv444Frame& destination,
+        int intensity,
+        int firstLine,
+        int lastLine) const;
+
 private:
     static constexpr int kMinimumIntensity = 0;
     static constexpr int kMaximumIntensity = 100;
@@ -29,15 +39,21 @@ private:
 
     static constexpr int kFilterRadius = 2;
 
-    static void filterPlane(
+    static void filterPlaneRange(
         const std::vector<std::uint16_t>& source,
         std::vector<std::uint16_t>& destination,
         int width,
         int height,
-        std::uint16_t threshold);
+        std::uint16_t threshold,
+        int firstLine,
+        int lastLine);
 
-    static void blendPlane(
+    static void blendPlaneRange(
         const std::vector<std::uint16_t>& source,
         std::vector<std::uint16_t>& filtered,
-        int intensity);
+        int width,
+        int height,
+        int intensity,
+        int firstLine,
+        int lastLine);
 };

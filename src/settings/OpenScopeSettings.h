@@ -65,7 +65,16 @@ struct OpenScopeSettings
                 int temporalStrength = 0;
             };
 
+            struct LumaCompensation
+            {
+                bool enabled = false;
+
+                // Hundredths of a dB at 5.8 MHz, range 0..100.
+                int gainHundredthsDb = 60;
+            };
+
             NoiseFilter noiseFilter;
+            LumaCompensation lumaCompensation;
         };
 
         struct VideoOut

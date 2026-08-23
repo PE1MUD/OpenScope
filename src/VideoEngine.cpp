@@ -26,8 +26,22 @@ VideoEngine::VideoEngine(QObject* parent)
             DisplayConversionImplementation::Avx2);
     }
 
-    spoutVideoConverter_.setImplementation(
-        DisplayConversionImplementation::Avx2);
+    for (DisplayConverter& converter :
+        spoutVideoConverters_)
+    {
+        converter.setImplementation(
+            DisplayConversionImplementation::Avx2);
+    }
+
+    waveformScreenRenderer_.setTraceJobExecutor(
+        [this](
+            std::size_t jobCount,
+            const std::function<void(std::size_t)>& job)
+        {
+            runWaveformTraceJobs(
+                jobCount,
+                job);
+        });
 
     for (CapturedFrameSlot& slot : captureSlots_)
     {
@@ -210,6 +224,20 @@ void VideoEngine::submitWriteFrame()
     CapturedFrameSlot& slot =
         captureSlots_[slotIndex];
 
+    const bool applyLumaCompensation =
+        lumaCompensationSourceEnabled_.load(
+            std::memory_order_acquire) &&
+        lumaCompensationEnabled_.load(
+            std::memory_order_acquire);
+
+    if (applyLumaCompensation)
+    {
+        lumaHighFrequencyCompensator_.process(
+            slot.frame,
+            lumaCompensationGainHundredthsDb_.load(
+                std::memory_order_acquire));
+    }
+
     const std::uint64_t generation =
         captureGeneration_.fetch_add(
             1,
@@ -279,9 +307,15 @@ void VideoEngine::cancelWriteFrame()
 
 void VideoEngine::setSelectedLine(int line)
 {
-    selectedLine_.store(
-        line,
-        std::memory_order_release);
+    const int previousLine =
+        selectedLine_.exchange(
+            line,
+            std::memory_order_acq_rel);
+
+    if (previousLine != line)
+    {
+        resetDisplayPresentation();
+    }
 }
 
 
@@ -298,9 +332,35 @@ void VideoEngine::requestWaveformFlatFieldSpectrum()
 void VideoEngine::setVideoHighlightEnabled(
     bool enabled)
 {
-    videoHighlightEnabled_.store(
-        enabled,
-        std::memory_order_release);
+    const bool previousEnabled =
+        videoHighlightEnabled_.exchange(
+            enabled,
+            std::memory_order_acq_rel);
+
+    if (previousEnabled != enabled)
+    {
+        resetDisplayPresentation();
+    }
+}
+
+
+void VideoEngine::resetDisplayPresentation()
+{
+    std::lock_guard<std::mutex> lock(
+        displayPresenterMutex_);
+
+    for (DisplayFrameSlot& slot : displayFrameSlots_)
+    {
+        slot = DisplayFrameSlot{};
+    }
+
+    lastPresentedFirst_ = QImage{};
+    lastPresentedSecond_ = QImage{};
+    lastPresentedSpoutFirst_ = QImage{};
+    lastPresentedSpoutSecond_ = QImage{};
+    lastPresentedPairValid_ = false;
+
+    displayPresenterCondition_.notify_one();
 }
 
 
@@ -321,6 +381,36 @@ void VideoEngine::setNoiseReductionIntensity(
             intensity,
             0,
             100),
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setLumaCompensationEnabled(
+    bool enabled)
+{
+    lumaCompensationEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setLumaCompensationGainHundredthsDb(
+    int gainHundredthsDb)
+{
+    lumaCompensationGainHundredthsDb_.store(
+        std::clamp(
+            gainHundredthsDb,
+            0,
+            100),
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setLumaCompensationSourceEnabled(
+    bool enabled)
+{
+    lumaCompensationSourceEnabled_.store(
+        enabled,
         std::memory_order_release);
 }
 
@@ -431,6 +521,14 @@ void VideoEngine::setVectorscopeVideoEnabled(bool enabled)
 }
 
 
+void VideoEngine::setWaveformVideoEnabled(bool enabled)
+{
+    waveformVideoEnabled_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+
 void VideoEngine::setVectorscopePresentationInfo(
     const VectorscopePresentationInfo& info)
 {
@@ -504,6 +602,7 @@ void VideoEngine::displayPhaseWorkerLoop(
     std::size_t workerIndex)
 {
     std::uint64_t lastPhaseGeneration = 0;
+    std::uint64_t lastAssistGeneration = 0;
 
     for (;;)
     {
@@ -522,6 +621,7 @@ void VideoEngine::displayPhaseWorkerLoop(
         int outputStridePixels = 0;
         int outputWidth = 0;
         int outputHeight = 0;
+        bool runDisplayWork = false;
 
         {
             std::unique_lock<std::mutex> lock(
@@ -529,12 +629,17 @@ void VideoEngine::displayPhaseWorkerLoop(
 
             displayPhaseCondition_.wait(
                 lock,
-                [this, lastPhaseGeneration]()
+                [this,
+                lastPhaseGeneration,
+                lastAssistGeneration]()
                 {
                     return
                         displayPhaseStop_ ||
                         displayPhaseGeneration_ !=
-                        lastPhaseGeneration;
+                        lastPhaseGeneration ||
+                        waveformAssistGeneration_.load(
+                            std::memory_order_acquire) !=
+                        lastAssistGeneration;
                 });
 
             if (displayPhaseStop_)
@@ -542,119 +647,403 @@ void VideoEngine::displayPhaseWorkerLoop(
                 return;
             }
 
-            lastPhaseGeneration =
-                displayPhaseGeneration_;
+            // Video/deinterlace work always wins.  Waveform helper jobs are
+            // considered only when no newer display phase is waiting.
+            if (displayPhaseGeneration_ !=
+                lastPhaseGeneration)
+            {
+                lastPhaseGeneration =
+                    displayPhaseGeneration_;
 
-            phase =
-                displayPhase_;
+                phase =
+                    displayPhase_;
 
-            frame =
-                displayPhaseFrame_;
+                frame =
+                    displayPhaseFrame_;
 
-            luma =
-                displayPhaseLuma_;
+                luma =
+                    displayPhaseLuma_;
 
-            outputPixels =
-                displayPhaseOutputPixels_;
+                outputPixels =
+                    displayPhaseOutputPixels_;
 
-            outputStridePixels =
-                displayPhaseOutputStridePixels_;
+                outputStridePixels =
+                    displayPhaseOutputStridePixels_;
 
-            outputWidth =
-                displayPhaseOutputWidth_;
+                outputWidth =
+                    displayPhaseOutputWidth_;
 
-            outputHeight =
-                displayPhaseOutputHeight_;
+                outputHeight =
+                    displayPhaseOutputHeight_;
+
+                runDisplayWork = true;
+            }
+            else
+            {
+                lastAssistGeneration =
+                    waveformAssistGeneration_.load(
+                        std::memory_order_acquire);
+            }
         }
 
-        if (phase ==
-            DisplayPhase::Deinterlace)
+        if (runDisplayWork)
         {
-            QElapsedTimer workerTimer;
-            workerTimer.start();
+            QElapsedTimer displayWorkerPhaseTimer;
+            displayWorkerPhaseTimer.start();
 
-            const int height =
-                frame != nullptr
-                ? frame->height
-                : 0;
-
-            for (;;)
+            if (phase ==
+                DisplayPhase::NoiseReduction)
             {
-                const int firstLine =
-                    displayDeinterlaceNextLine_.fetch_add(
-                        kDeinterlaceChunkLines,
-                        std::memory_order_relaxed);
+                const int height =
+                    displayNoiseSource_ != nullptr
+                    ? displayNoiseSource_->height
+                    : 0;
 
-                if (firstLine >= height)
+                const int firstLine =
+                    static_cast<int>(workerIndex) *
+                    height /
+                    static_cast<int>(
+                        displayPhaseWorkers_.size());
+
+                const int lastLine =
+                    static_cast<int>(workerIndex + 1) *
+                    height /
+                    static_cast<int>(
+                        displayPhaseWorkers_.size());
+
+                if (displayNoiseSource_ != nullptr &&
+                    displayNoiseDestination_ != nullptr)
+                {
+                    noiseReducer_.processRange(
+                        *displayNoiseSource_,
+                        *displayNoiseDestination_,
+                        displayNoiseIntensity_,
+                        firstLine,
+                        lastLine);
+                }
+            }
+            else if (phase ==
+                DisplayPhase::Deinterlace)
+            {
+                QElapsedTimer workerTimer;
+                workerTimer.start();
+
+                const int height =
+                    frame != nullptr
+                    ? frame->height
+                    : 0;
+
+                for (;;)
+                {
+                    const int firstLine =
+                        displayDeinterlaceNextLine_.fetch_add(
+                            kDeinterlaceChunkLines,
+                            std::memory_order_relaxed);
+
+                    if (firstLine >= height)
+                    {
+                        break;
+                    }
+
+                    const int lastLine =
+                        std::min(
+                            firstLine +
+                            kDeinterlaceChunkLines,
+                            height);
+
+                    videoDeinterlacer_.processRange(
+                        firstLine,
+                        lastLine);
+                }
+
+                displayDeinterlaceWorkerUs_[
+                    workerIndex].store(
+                        static_cast<std::uint64_t>(
+                            workerTimer.nsecsElapsed() /
+                            1000),
+                        std::memory_order_relaxed);
+            }
+            else if (
+                phase ==
+                DisplayPhase::ConvertFirst ||
+                phase ==
+                DisplayPhase::ConvertSecond)
+            {
+                const int firstOutputY =
+                    static_cast<int>(
+                        workerIndex) *
+                    outputHeight /
+                    static_cast<int>(
+                        displayPhaseWorkers_.size());
+
+                const int lastOutputY =
+                    static_cast<int>(
+                        workerIndex + 1) *
+                    outputHeight /
+                    static_cast<int>(
+                        displayPhaseWorkers_.size());
+
+                displayConverters_[workerIndex].
+                    convertRange(
+                        *frame,
+                        luma,
+                        outputPixels,
+                        outputStridePixels,
+                        outputWidth,
+                        outputHeight,
+                        firstOutputY,
+                        lastOutputY,
+                        displayPhasePerformance_[
+                            workerIndex]);
+            }
+            else if (
+                phase ==
+                DisplayPhase::SpoutFirst ||
+                phase ==
+                DisplayPhase::SpoutSecond)
+            {
+                const int firstOutputY =
+                    static_cast<int>(
+                        workerIndex) *
+                    outputHeight /
+                    static_cast<int>(
+                        displayPhaseWorkers_.size());
+
+                const int lastOutputY =
+                    static_cast<int>(
+                        workerIndex + 1) *
+                    outputHeight /
+                    static_cast<int>(
+                        displayPhaseWorkers_.size());
+
+                spoutVideoConverters_[workerIndex].
+                    convertNativeRange(
+                        *frame,
+                        luma,
+                        outputPixels,
+                        outputStridePixels,
+                        firstOutputY,
+                        lastOutputY,
+                        displayPhasePerformance_[
+                            workerIndex]);
+            }
+
+            const std::uint64_t workerPhaseUs =
+                static_cast<std::uint64_t>(
+                    displayWorkerPhaseTimer.nsecsElapsed() /
+                    1000);
+
+            PerformanceMetric* workerMetric = nullptr;
+
+            if (workerIndex == 0)
+            {
+                switch (phase)
+                {
+                case DisplayPhase::NoiseReduction:
+                    workerMetric = &performanceStats_.displayWorker0Noise;
+                    break;
+                case DisplayPhase::Deinterlace:
+                    workerMetric = &performanceStats_.displayWorker0Deinterlace;
+                    break;
+                case DisplayPhase::ConvertFirst:
+                    workerMetric = &performanceStats_.displayWorker0Convert1;
+                    break;
+                case DisplayPhase::SpoutFirst:
+                    workerMetric = &performanceStats_.displayWorker0Spout1;
+                    break;
+                case DisplayPhase::ConvertSecond:
+                    workerMetric = &performanceStats_.displayWorker0Convert2;
+                    break;
+                case DisplayPhase::SpoutSecond:
+                    workerMetric = &performanceStats_.displayWorker0Spout2;
+                    break;
+                default:
+                    break;
+                }
+            }
+            else
+            {
+                switch (phase)
+                {
+                case DisplayPhase::NoiseReduction:
+                    workerMetric = &performanceStats_.displayWorker1Noise;
+                    break;
+                case DisplayPhase::Deinterlace:
+                    workerMetric = &performanceStats_.displayWorker1Deinterlace;
+                    break;
+                case DisplayPhase::ConvertFirst:
+                    workerMetric = &performanceStats_.displayWorker1Convert1;
+                    break;
+                case DisplayPhase::SpoutFirst:
+                    workerMetric = &performanceStats_.displayWorker1Spout1;
+                    break;
+                case DisplayPhase::ConvertSecond:
+                    workerMetric = &performanceStats_.displayWorker1Convert2;
+                    break;
+                case DisplayPhase::SpoutSecond:
+                    workerMetric = &performanceStats_.displayWorker1Spout2;
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            if (workerMetric != nullptr)
+            {
+                workerMetric->update(workerPhaseUs);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(
+                    displayPhaseMutex_);
+
+                if (displayPhaseWorkersRemaining_ > 0)
+                {
+                    --displayPhaseWorkersRemaining_;
+                }
+            }
+
+            displayPhaseDoneCondition_.
+                notify_one();
+
+            continue;
+        }
+
+        // Help with small waveform stripes while the video pipeline is idle.
+        // Check display generation between every stripe so a new field can
+        // reclaim this worker promptly.
+        for (;;)
+        {
+            {
+                std::lock_guard<std::mutex> lock(
+                    displayPhaseMutex_);
+
+                if (displayPhaseStop_)
+                {
+                    return;
+                }
+
+                if (displayPhaseGeneration_ !=
+                    lastPhaseGeneration)
                 {
                     break;
                 }
-
-                const int lastLine =
-                    std::min(
-                        firstLine +
-                        kDeinterlaceChunkLines,
-                        height);
-
-                videoDeinterlacer_.processRange(
-                    firstLine,
-                    lastLine);
             }
 
-            displayDeinterlaceWorkerUs_[
-                workerIndex].store(
-                    static_cast<std::uint64_t>(
-                        workerTimer.nsecsElapsed() /
-                        1000),
-                    std::memory_order_relaxed);
-        }
-        else if (
-            phase ==
-            DisplayPhase::ConvertFirst ||
-            phase ==
-            DisplayPhase::ConvertSecond)
-        {
-            const int firstOutputY =
-                static_cast<int>(
-                    workerIndex) *
-                outputHeight /
-                static_cast<int>(
-                    displayPhaseWorkers_.size());
-
-            const int lastOutputY =
-                static_cast<int>(
-                    workerIndex + 1) *
-                outputHeight /
-                static_cast<int>(
-                    displayPhaseWorkers_.size());
-
-            displayConverters_[workerIndex].
-                convertRange(
-                    *frame,
-                    luma,
-                    outputPixels,
-                    outputStridePixels,
-                    outputWidth,
-                    outputHeight,
-                    firstOutputY,
-                    lastOutputY,
-                    displayPhasePerformance_[
-                        workerIndex]);
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(
-                displayPhaseMutex_);
-
-            if (displayPhaseWorkersRemaining_ > 0)
+            if (!tryRunWaveformAssistJob())
             {
-                --displayPhaseWorkersRemaining_;
+                break;
             }
         }
-
-        displayPhaseDoneCondition_.
-            notify_one();
     }
+}
+
+bool VideoEngine::tryRunWaveformAssistJob()
+{
+    std::function<void(std::size_t)> job;
+    std::size_t jobIndex = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            waveformAssistMutex_);
+
+        if (!waveformAssistActive_ ||
+            waveformAssistNextJob_ >=
+            waveformAssistJobCount_ ||
+            !waveformAssistJob_)
+        {
+            return false;
+        }
+
+        jobIndex =
+            waveformAssistNextJob_++;
+
+        ++waveformAssistJobsRunning_;
+        job = waveformAssistJob_;
+    }
+
+    job(jobIndex);
+
+    {
+        std::lock_guard<std::mutex> lock(
+            waveformAssistMutex_);
+
+        if (waveformAssistJobsRunning_ > 0)
+        {
+            --waveformAssistJobsRunning_;
+        }
+
+        if (waveformAssistNextJob_ >=
+            waveformAssistJobCount_ &&
+            waveformAssistJobsRunning_ == 0)
+        {
+            waveformAssistDoneCondition_.
+                notify_all();
+        }
+    }
+
+    return true;
+}
+
+void VideoEngine::runWaveformTraceJobs(
+    std::size_t jobCount,
+    const std::function<void(std::size_t)>& job)
+{
+    if (jobCount == 0 || !job)
+    {
+        return;
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(
+            waveformAssistMutex_);
+
+        waveformAssistDoneCondition_.wait(
+            lock,
+            [this]()
+            {
+                return !waveformAssistActive_;
+            });
+
+        waveformAssistJob_ = job;
+        waveformAssistJobCount_ = jobCount;
+        waveformAssistNextJob_ = 0;
+        waveformAssistJobsRunning_ = 0;
+        waveformAssistActive_ = true;
+
+        waveformAssistGeneration_.fetch_add(
+            1,
+            std::memory_order_release);
+    }
+
+    displayPhaseCondition_.notify_all();
+
+    // The waveform thread is not a coordinator-only thread: it consumes the
+    // same queue as the idle display worker, so there is no parallelisation
+    // overhead when the display worker is busy with higher-priority video.
+    while (tryRunWaveformAssistJob())
+    {
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(
+            waveformAssistMutex_);
+
+        waveformAssistDoneCondition_.wait(
+            lock,
+            [this]()
+            {
+                return
+                    waveformAssistNextJob_ >=
+                    waveformAssistJobCount_ &&
+                    waveformAssistJobsRunning_ == 0;
+            });
+
+        waveformAssistActive_ = false;
+        waveformAssistJob_ = {};
+    }
+
+    waveformAssistDoneCondition_.notify_all();
 }
 
 void VideoEngine::runDisplayPhase(
@@ -842,10 +1231,30 @@ void VideoEngine::displayWorkerLoop()
 
         if (noiseReductionEnabled)
         {
-            noiseReducer_.process(
-                captureSlot.frame,
-                noiseReducedFrame_,
-                noiseReductionIntensity);
+            if (noiseReducedFrame_.width !=
+                    captureSlot.frame.width ||
+                noiseReducedFrame_.height !=
+                    captureSlot.frame.height)
+            {
+                noiseReducedFrame_.resize(
+                    captureSlot.frame.width,
+                    captureSlot.frame.height);
+            }
+
+            noiseReducedFrame_.sampleClockHz =
+                captureSlot.frame.sampleClockHz;
+
+            displayNoiseSource_ =
+                &captureSlot.frame;
+
+            displayNoiseDestination_ =
+                &noiseReducedFrame_;
+
+            displayNoiseIntensity_ =
+                noiseReductionIntensity;
+
+            runDisplayPhase(
+                DisplayPhase::NoiseReduction);
 
             displayFrame =
                 &noiseReducedFrame_;
@@ -1027,19 +1436,55 @@ void VideoEngine::displayWorkerLoop()
             firstConvertUs);
 
         QImage firstSpoutImage;
+        QImage secondSpoutImage;
+        std::uint64_t firstSpoutConvertUs = 0;
+        std::uint64_t secondSpoutConvertUs = 0;
 
+        // Field 1 has the earlier deadline. Finish every Field 1 buffer
+        // before starting any Field 2 conversion:
+        //     N -> D -> C1 -> S1 -> C2 -> S2
         if (spoutRenderEnabled)
         {
-            DisplayPerformance spoutPerformance;
+            firstSpoutImage = QImage(
+                kCaptureWidth,
+                kCaptureHeight,
+                QImage::Format_RGB32);
 
-            firstSpoutImage =
-                spoutVideoConverter_.convert(
-                    *displayFrame,
-                    progressiveLuma_.first.y.data(),
-                    kCaptureWidth,
-                    kCaptureHeight,
-                    spoutPerformance);
+            firstSpoutImage.detach();
+
+            displayPhaseFrame_ =
+                displayFrame;
+
+            displayPhaseLuma_ =
+                progressiveLuma_.first.y.data();
+
+            displayPhaseOutputPixels_ =
+                reinterpret_cast<QRgb*>(
+                    firstSpoutImage.bits());
+
+            displayPhaseOutputStridePixels_ =
+                firstSpoutImage.bytesPerLine() /
+                static_cast<int>(sizeof(QRgb));
+
+            displayPhaseOutputWidth_ =
+                kCaptureWidth;
+
+            displayPhaseOutputHeight_ =
+                kCaptureHeight;
+
+            phaseTimer.restart();
+
+            runDisplayPhase(
+                DisplayPhase::SpoutFirst);
+
+            firstSpoutConvertUs =
+                static_cast<std::uint64_t>(
+                    phaseTimer.nsecsElapsed() /
+                    1000);
         }
+
+        performanceStats_.spoutConvertFirst.update(
+            firstSpoutConvertUs);
 
         const std::uint64_t
             firstReadyUs =
@@ -1130,20 +1575,48 @@ void VideoEngine::displayWorkerLoop()
         performanceStats_.displaySecond.update(
             secondConvertUs);
 
-        QImage secondSpoutImage;
-
         if (spoutRenderEnabled)
         {
-            DisplayPerformance spoutPerformance;
+            secondSpoutImage = QImage(
+                kCaptureWidth,
+                kCaptureHeight,
+                QImage::Format_RGB32);
 
-            secondSpoutImage =
-                spoutVideoConverter_.convert(
-                    *displayFrame,
-                    progressiveLuma_.second.y.data(),
-                    kCaptureWidth,
-                    kCaptureHeight,
-                    spoutPerformance);
+            secondSpoutImage.detach();
+
+            displayPhaseFrame_ =
+                displayFrame;
+
+            displayPhaseLuma_ =
+                progressiveLuma_.second.y.data();
+
+            displayPhaseOutputPixels_ =
+                reinterpret_cast<QRgb*>(
+                    secondSpoutImage.bits());
+
+            displayPhaseOutputStridePixels_ =
+                secondSpoutImage.bytesPerLine() /
+                static_cast<int>(sizeof(QRgb));
+
+            displayPhaseOutputWidth_ =
+                kCaptureWidth;
+
+            displayPhaseOutputHeight_ =
+                kCaptureHeight;
+
+            phaseTimer.restart();
+
+            runDisplayPhase(
+                DisplayPhase::SpoutSecond);
+
+            secondSpoutConvertUs =
+                static_cast<std::uint64_t>(
+                    phaseTimer.nsecsElapsed() /
+                    1000);
         }
+
+        performanceStats_.spoutConvertSecond.update(
+            secondSpoutConvertUs);
 
         const std::uint64_t
             secondReadyUs =
@@ -1336,6 +1809,9 @@ void VideoEngine::displayPresenterLoop()
     constexpr auto fieldPeriod =
         std::chrono::milliseconds(20);
 
+    constexpr auto framePeriod =
+        fieldPeriod * 2;
+
     DWORD mmcssTaskIndex = 0;
 
     HANDLE mmcssHandle =
@@ -1390,8 +1866,8 @@ void VideoEngine::displayPresenterLoop()
 
                 const auto remaining =
                     std::chrono::duration_cast<
-                    std::chrono::nanoseconds>(
-                        targetTime - now);
+                        std::chrono::nanoseconds>(
+                            targetTime - now);
 
                 LONGLONG due100ns =
                     static_cast<LONGLONG>(
@@ -1441,10 +1917,10 @@ void VideoEngine::displayPresenterLoop()
                 const auto intervalUs =
                     static_cast<std::uint64_t>(
                         std::chrono::duration_cast<
-                        std::chrono::microseconds>(
-                            now -
-                            previousPresentTime)
-                        .count());
+                            std::chrono::microseconds>(
+                                now -
+                                previousPresentTime)
+                            .count());
 
                 performanceStats_.presentInterval.update(
                     intervalUs);
@@ -1454,123 +1930,173 @@ void VideoEngine::displayPresenterLoop()
                 now;
         };
 
-    for (;;)
+    // Capture supplies data at 25 fps, but it is no longer the output
+    // clock. Once started, this presenter owns one continuous 20 ms
+    // field cadence. Both the PC video present and the 50 fps video
+    // Spout dispatch are emitted from these exact same F1/F2 ticks.
+    Clock::time_point nextFirstFieldTime{};
+    std::uint64_t nextGeneration = 0;
+
     {
-        std::uint64_t captureGeneration = 0;
-        Clock::time_point captureTickTime;
+        std::unique_lock<std::mutex> lock(
+            displayPresenterMutex_);
+
+        displayPresenterCondition_.wait(
+            lock,
+            [this]()
+            {
+                return
+                    displayPresenterStop_ ||
+                    latestCaptureTickGeneration_ > 1;
+            });
+
+        if (!displayPresenterStop_)
+        {
+            nextGeneration =
+                latestCaptureTickGeneration_ - 1;
+
+            nextFirstFieldTime =
+                latestCaptureTickTime_;
+
+            presenterLastTickGeneration_ =
+                latestCaptureTickGeneration_;
+        }
+    }
+
+    while (nextFirstFieldTime !=
+        Clock::time_point{})
+    {
+        waitUntil(
+            nextFirstFieldTime);
 
         QImage firstImage;
         QImage secondImage;
         QImage firstSpoutImage;
         QImage secondSpoutImage;
 
-        std::uint64_t presentedGeneration = 0;
         bool presentingNewGeneration = false;
         bool haveFirst = false;
 
         {
-            std::unique_lock<std::mutex> lock(
+            std::lock_guard<std::mutex> lock(
                 displayPresenterMutex_);
-
-            displayPresenterCondition_.wait(
-                lock,
-                [this]()
-                {
-                    return
-                        displayPresenterStop_ ||
-                        latestCaptureTickGeneration_ !=
-                        presenterLastTickGeneration_;
-                });
 
             if (displayPresenterStop_)
             {
                 break;
             }
 
-            captureGeneration =
-                latestCaptureTickGeneration_;
+            // Do not get permanently stuck on a generation that was
+            // skipped/overwritten while switching source or while a worker
+            // was late.  Move forward to the newest ready generation in
+            // the small presenter ring, but never backwards.
+            std::uint64_t readyGeneration =
+                nextGeneration;
 
-            captureTickTime =
-                latestCaptureTickTime_;
+            bool exactGenerationReady = false;
 
-            presenterLastTickGeneration_ =
-                captureGeneration;
-
-            if (captureGeneration > 1)
+            for (const DisplayFrameSlot& candidate :
+                displayFrameSlots_)
             {
-                const std::uint64_t
-                    expectedGeneration =
-                    captureGeneration - 1;
-
-                DisplayFrameSlot& slot =
-                    displayFrameSlots_[
-                        static_cast<std::size_t>(
-                            expectedGeneration %
-                            kFrameSlotCount)];
-
-                if (slot.generation ==
-                    expectedGeneration &&
-                    slot.firstReady)
+                if (!candidate.firstReady ||
+                    candidate.generation < nextGeneration)
                 {
-                    firstImage =
-                        slot.first;
-
-                    firstSpoutImage =
-                        slot.spoutFirst;
-
-                    presentedGeneration =
-                        expectedGeneration;
-
-                    presentingNewGeneration =
-                        true;
-
-                    haveFirst =
-                        true;
-
-                    lastPresentedFirst_ =
-                        firstImage;
+                    continue;
                 }
-                else if (
-                    lastPresentedPairValid_)
+
+                if (candidate.generation == nextGeneration)
                 {
-                    firstImage =
-                        lastPresentedFirst_;
-
-                    secondImage =
-                        lastPresentedSecond_;
-
-                    haveFirst =
-                        true;
+                    exactGenerationReady = true;
+                    readyGeneration = nextGeneration;
+                    break;
                 }
+
+                readyGeneration =
+                    std::max(
+                        readyGeneration,
+                        candidate.generation);
+            }
+
+            if (!exactGenerationReady &&
+                readyGeneration > nextGeneration)
+            {
+                nextGeneration = readyGeneration;
+            }
+
+            DisplayFrameSlot& slot =
+                displayFrameSlots_[
+                    static_cast<std::size_t>(
+                        nextGeneration %
+                        kFrameSlotCount)];
+
+            if (slot.generation ==
+                    nextGeneration &&
+                slot.firstReady)
+            {
+                firstImage =
+                    slot.first;
+
+                firstSpoutImage =
+                    slot.spoutFirst;
+
+                lastPresentedFirst_ =
+                    firstImage;
+
+                lastPresentedSpoutFirst_ =
+                    firstSpoutImage;
+
+                presentingNewGeneration =
+                    true;
+
+                haveFirst =
+                    true;
+            }
+            else if (lastPresentedPairValid_)
+            {
+                firstImage =
+                    lastPresentedFirst_;
+
+                secondImage =
+                    lastPresentedSecond_;
+
+                firstSpoutImage =
+                    lastPresentedSpoutFirst_;
+
+                secondSpoutImage =
+                    lastPresentedSpoutSecond_;
+
+                haveFirst =
+                    true;
             }
         }
 
         if (!haveFirst)
         {
+            // Keep the master clock running during startup. Retry the
+            // same generation on the next 40 ms pair instead of letting
+            // a capture callback redefine the field phase.
+            nextFirstFieldTime +=
+                framePeriod;
+
             continue;
         }
 
         recordPresentInterval();
 
         {
-            const Clock::time_point now =
-                Clock::now();
-
-            const auto offsetUs =
+            const auto lateUs =
                 std::chrono::duration_cast<
                     std::chrono::microseconds>(
-                        now - captureTickTime)
-                .count();
+                        Clock::now() -
+                        nextFirstFieldTime)
+                    .count();
 
-            const std::uint64_t presentUs =
+            performanceStats_.field1Present.update(
                 40000u +
                 static_cast<std::uint64_t>(
                     std::max<std::int64_t>(
-                        offsetUs,
-                        0));
-
-            performanceStats_.field1Present.update(
-                presentUs);
+                        lateUs,
+                        0)));
         }
 
         if (videoScreenRenderEnabled_.load(
@@ -1582,15 +2108,23 @@ void VideoEngine::displayPresenterLoop()
         }
 
         if (spoutVideoEnabled_.load(
-            std::memory_order_acquire) &&
+                std::memory_order_acquire) &&
             !firstSpoutImage.isNull())
         {
+            const qint64 dispatchTimestampUs =
+                static_cast<qint64>(
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds>(
+                            Clock::now().time_since_epoch())
+                        .count());
+
             emit videoSpoutChanged(
-                firstSpoutImage);
+                firstSpoutImage,
+                dispatchTimestampUs);
         }
 
         const Clock::time_point secondFieldTime =
-            captureTickTime +
+            nextFirstFieldTime +
             fieldPeriod;
 
         waitUntil(
@@ -1610,11 +2144,11 @@ void VideoEngine::displayPresenterLoop()
                 DisplayFrameSlot& slot =
                     displayFrameSlots_[
                         static_cast<std::size_t>(
-                            presentedGeneration %
+                            nextGeneration %
                             kFrameSlotCount)];
 
                 if (slot.generation ==
-                    presentedGeneration &&
+                        nextGeneration &&
                     slot.secondReady)
                 {
                     secondImage =
@@ -1626,19 +2160,27 @@ void VideoEngine::displayPresenterLoop()
                     lastPresentedSecond_ =
                         secondImage;
 
+                    lastPresentedSpoutSecond_ =
+                        secondSpoutImage;
+
                     lastPresentedPairValid_ =
                         true;
                 }
-                else if (
-                    lastPresentedPairValid_)
+                else if (lastPresentedPairValid_)
                 {
                     secondImage =
                         lastPresentedSecond_;
+
+                    secondSpoutImage =
+                        lastPresentedSpoutSecond_;
                 }
                 else
                 {
                     secondImage =
                         firstImage;
+
+                    secondSpoutImage =
+                        firstSpoutImage;
                 }
             }
         }
@@ -1649,39 +2191,75 @@ void VideoEngine::displayPresenterLoop()
             recordPresentInterval();
 
             {
-                const Clock::time_point now =
-                    Clock::now();
-
-                const auto offsetUs =
+                const auto lateUs =
                     std::chrono::duration_cast<
                         std::chrono::microseconds>(
-                            now - captureTickTime)
-                    .count();
-
-                const std::uint64_t presentUs =
-                    40000u +
-                    static_cast<std::uint64_t>(
-                        std::max<std::int64_t>(
-                            offsetUs,
-                            0));
+                            Clock::now() -
+                            secondFieldTime)
+                        .count();
 
                 performanceStats_.field2Present.update(
-                    presentUs);
+                    60000u +
+                    static_cast<std::uint64_t>(
+                        std::max<std::int64_t>(
+                            lateUs,
+                            0)));
             }
 
             if (videoScreenRenderEnabled_.load(
-                    std::memory_order_acquire))
+                    std::memory_order_acquire) &&
+                !secondImage.isNull())
             {
                 emit frameChanged(
                     secondImage);
             }
 
             if (spoutVideoEnabled_.load(
-                std::memory_order_acquire) &&
+                    std::memory_order_acquire) &&
                 !secondSpoutImage.isNull())
             {
+                const qint64 dispatchTimestampUs =
+                    static_cast<qint64>(
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds>(
+                                Clock::now().time_since_epoch())
+                            .count());
+
                 emit videoSpoutChanged(
-                    secondSpoutImage);
+                    secondSpoutImage,
+                    dispatchTimestampUs);
+            }
+        }
+
+        if (presentingNewGeneration)
+        {
+            ++nextGeneration;
+        }
+
+        nextFirstFieldTime +=
+            framePeriod;
+
+        // If the machine was suspended/stalled for a long time, do not
+        // run a burst of expired timer ticks. Re-anchor once, then return
+        // immediately to the normal fixed 20 ms cadence.
+        const Clock::time_point now =
+            Clock::now();
+
+        if (now >
+            nextFirstFieldTime +
+                framePeriod)
+        {
+            std::lock_guard<std::mutex> lock(
+                displayPresenterMutex_);
+
+            if (latestCaptureTickGeneration_ > 1)
+            {
+                nextGeneration =
+                    latestCaptureTickGeneration_ - 1;
+
+                nextFirstFieldTime =
+                    now +
+                    fieldPeriod;
             }
         }
     }
@@ -1849,59 +2427,194 @@ void VideoEngine::waveformWorkerLoop()
                 static_cast<std::uint64_t>(
                     screenTimer.nsecsElapsed() /
                     1000));
+
+            const auto& timings =
+                waveformScreenRenderer_.renderTimings();
+
+            performanceStats_.waveformScreenPersistence.update(
+                timings.persistenceUs);
+            performanceStats_.waveformScreenTrace.update(
+                timings.traceUs);
+            performanceStats_.waveformScreenTracePrep.update(
+                timings.tracePrepUs);
+            performanceStats_.waveformScreenTraceRaster.update(
+                timings.traceRasterUs);
+            performanceStats_.waveformScreenCompose.update(
+                timings.composeUs);
+            performanceStats_.waveformScreenGlow.update(
+                timings.glowUs);
+            performanceStats_.waveformScreenOverlay.update(
+                timings.overlayUs);
+            performanceStats_.waveformScreenTraceParallel.store(
+                timings.traceParallel,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenOutputSizeChanged.store(
+                timings.outputSizeChanged,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenOutputBufferCapacityGrew.store(
+                timings.outputBufferCapacityGrew,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenResamplerCacheRebuilt.store(
+                timings.resamplerCacheRebuilt,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenTraceJobCount.store(
+                timings.traceJobCount,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenBeamCoreRadiusPx.store(
+                timings.beamCoreRadiusPx,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenBeamCoreMarginPx.store(
+                timings.beamCoreMarginPx,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenWidth.store(
+                static_cast<std::uint32_t>(screenOutputWidth),
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenHeight.store(
+                static_cast<std::uint32_t>(screenOutputHeight),
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenGlowWorkload.update(
+                timings.glowDirtyTiles,
+                timings.glowTotalTiles,
+                timings.glowHorizontalPass1Tiles,
+                timings.glowVerticalPass1Tiles,
+                timings.glowHorizontalPass2Tiles,
+                timings.glowVerticalPass2Tiles,
+                timings.glowActiveX,
+                timings.glowActiveY,
+                timings.glowActiveWidth,
+                timings.glowActiveHeight);
         }
         else
         {
             performanceStats_.waveformScreen.update(0);
+            performanceStats_.waveformScreenPersistence.update(0);
+            performanceStats_.waveformScreenTrace.update(0);
+            performanceStats_.waveformScreenTracePrep.update(0);
+            performanceStats_.waveformScreenTraceRaster.update(0);
+            performanceStats_.waveformScreenCompose.update(0);
+            performanceStats_.waveformScreenGlow.update(0);
+            performanceStats_.waveformScreenOverlay.update(0);
+            performanceStats_.waveformScreenTraceParallel.store(
+                false,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenOutputSizeChanged.store(
+                false,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenOutputBufferCapacityGrew.store(
+                false,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenResamplerCacheRebuilt.store(
+                false,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenTraceJobCount.store(
+                0,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenBeamCoreRadiusPx.store(
+                0.0,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenBeamCoreMarginPx.store(
+                0,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenWidth.store(
+                0,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenHeight.store(
+                0,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenGlowWorkload.update(
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
-        // Video render target is the actual output raster of the
-        // selected video standard. PAL625 therefore remains 720x576
-        // for both 4:3 and 16:9; aspect ratio is carried separately.
-        constexpr VideoStandard videoStandard =
-            VideoStandard::pal625();
-
-        const auto videoAspectRatio =
-            waveformVideoAspectRatio_.load(
+        const bool videoRenderEnabled =
+            waveformVideoEnabled_.load(
                 std::memory_order_acquire);
 
-        waveformVideoRenderer_.setOutputSize(
-            videoStandard.outputWidth,
-            videoStandard.outputHeight);
+        if (videoRenderEnabled)
+        {
+            // Video render target is the actual output raster of the
+            // selected video standard. PAL625 therefore remains 720x576
+            // for both 4:3 and 16:9; aspect ratio is carried separately.
+            constexpr VideoStandard videoStandard =
+                VideoStandard::pal625();
 
-        waveformVideoRenderer_.setAspectRatio(
-            videoAspectRatio);
+            const auto videoAspectRatio =
+                waveformVideoAspectRatio_.load(
+                    std::memory_order_acquire);
 
-        // PAL 4:3 and 16:9 both use the complete 720x576
-        // output raster. Aspect ratio is metadata / pixel aspect;
-        // it must not letterbox the render canvas.
-        waveformVideoRenderer_.setFitAspectRatio(false);
+            waveformVideoRenderer_.setOutputSize(
+                videoStandard.outputWidth,
+                videoStandard.outputHeight);
 
-        waveformVideoRenderer_.setLineInfoOverlayEnabled(true, true);
+            waveformVideoRenderer_.setAspectRatio(
+                videoAspectRatio);
 
-        waveformVideoRenderer_.setContentScale(
-            videoStandard.safeWidthScale,
-            videoStandard.safeHeightScale);
+            // PAL 4:3 and 16:9 both use the complete 720x576
+            // output raster. Aspect ratio is metadata / pixel aspect;
+            // it must not letterbox the render canvas.
+            waveformVideoRenderer_.setFitAspectRatio(false);
 
-        waveformVideoRenderer_.setSelectedLine(
-            selectedLine);
+            waveformVideoRenderer_.setLineInfoOverlayEnabled(true, true);
 
-        waveformVideoRenderer_.setPersistence(
-            waveformPersistence);
+            waveformVideoRenderer_.setContentScale(
+                videoStandard.safeWidthScale,
+                videoStandard.safeHeightScale);
 
-        waveformVideoRenderer_.setGlow(
-            glow);
+            waveformVideoRenderer_.setSelectedLine(
+                selectedLine);
 
-        QElapsedTimer videoTimer;
-        videoTimer.start();
+            waveformVideoRenderer_.setPersistence(
+                waveformPersistence);
 
-        waveformVideoRenderer_.analyze(
-            captureSlot.frame);
+            waveformVideoRenderer_.setGlow(
+                glow);
 
-        performanceStats_.waveformVideo.update(
-            static_cast<std::uint64_t>(
-                videoTimer.nsecsElapsed() /
-                1000));
+            QElapsedTimer videoTimer;
+            videoTimer.start();
+
+            waveformVideoRenderer_.analyze(
+                captureSlot.frame);
+
+            performanceStats_.waveformVideo.update(
+                static_cast<std::uint64_t>(
+                    videoTimer.nsecsElapsed() /
+                    1000));
+
+            const auto& videoTimings =
+                waveformVideoRenderer_.renderTimings();
+
+            performanceStats_.waveformVideoPersistence.update(
+                videoTimings.persistenceUs);
+            performanceStats_.waveformVideoTrace.update(
+                videoTimings.traceUs);
+            performanceStats_.waveformVideoCompose.update(
+                videoTimings.composeUs);
+            performanceStats_.waveformVideoGlow.update(
+                videoTimings.glowUs);
+            performanceStats_.waveformVideoOverlay.update(
+                videoTimings.overlayUs);
+            performanceStats_.waveformVideoGlowWorkload.update(
+                videoTimings.glowDirtyTiles,
+                videoTimings.glowTotalTiles,
+                videoTimings.glowHorizontalPass1Tiles,
+                videoTimings.glowVerticalPass1Tiles,
+                videoTimings.glowHorizontalPass2Tiles,
+                videoTimings.glowVerticalPass2Tiles,
+                videoTimings.glowActiveX,
+                videoTimings.glowActiveY,
+                videoTimings.glowActiveWidth,
+                videoTimings.glowActiveHeight);
+        }
+        else
+        {
+            performanceStats_.waveformVideo.update(0);
+            performanceStats_.waveformVideoPersistence.update(0);
+            performanceStats_.waveformVideoTrace.update(0);
+            performanceStats_.waveformVideoCompose.update(0);
+            performanceStats_.waveformVideoGlow.update(0);
+            performanceStats_.waveformVideoOverlay.update(0);
+            performanceStats_.waveformVideoGlowWorkload.update(
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
 
         const bool captureValid =
             isCaptureSlotValid(
@@ -1917,39 +2630,54 @@ void VideoEngine::waveformWorkerLoop()
                 << generation;
         }
 
-        const auto& measurementRenderer =
-            screenRenderEnabled
-            ? waveformScreenRenderer_
-            : waveformVideoRenderer_;
+        const WaveformRenderer* measurementRenderer = nullptr;
 
-        const auto& measurementSource =
-            measurementRenderer.visibleLumaVolts();
+        if (screenRenderEnabled)
+        {
+            measurementRenderer =
+                &waveformScreenRenderer_;
+        }
+        else if (videoRenderEnabled)
+        {
+            measurementRenderer =
+                &waveformVideoRenderer_;
+        }
 
         QVector<float> measurementSamples;
-        measurementSamples.reserve(
-            static_cast<qsizetype>(measurementSource.size()));
+        QVector<float> fullSpectrumSamples;
 
-        for (float sample : measurementSource)
+        if (measurementRenderer != nullptr)
         {
-            measurementSamples.append(sample);
+            const auto& measurementSource =
+                measurementRenderer->visibleLumaVolts();
+
+            measurementSamples.reserve(
+                static_cast<qsizetype>(
+                    measurementSource.size()));
+
+            for (float sample : measurementSource)
+            {
+                measurementSamples.append(sample);
+            }
+
+            const auto& fullSpectrumSource =
+                measurementRenderer->fullLumaVolts();
+
+            fullSpectrumSamples.reserve(
+                static_cast<qsizetype>(
+                    fullSpectrumSource.size()));
+
+            for (float sample : fullSpectrumSource)
+            {
+                fullSpectrumSamples.append(sample);
+            }
         }
 
         emit waveformMeasurementDataChanged(
             measurementSamples);
 
-        const auto& fullSpectrumSource =
-            measurementRenderer.fullLumaVolts();
-
-        QVector<float> fullSpectrumSamples;
-        fullSpectrumSamples.reserve(
-            static_cast<qsizetype>(fullSpectrumSource.size()));
-
-        for (float sample : fullSpectrumSource)
-        {
-            fullSpectrumSamples.append(sample);
-        }
-
-        if (selectedLine >= 0)
+        if (selectedLine >= 0 &&
+            measurementRenderer != nullptr)
         {
             emit waveformSpectrumDataChanged(
                 fullSpectrumSamples,
@@ -2031,8 +2759,11 @@ void VideoEngine::waveformWorkerLoop()
                 waveformScreenRenderer_.image());
         }
 
-        emit waveformVideoChanged(
-            waveformVideoRenderer_.image());
+        if (videoRenderEnabled)
+        {
+            emit waveformVideoChanged(
+                waveformVideoRenderer_.image());
+        }
     }
 }
 
@@ -2187,12 +2918,41 @@ void VideoEngine::vectorscopeWorkerLoop()
                 static_cast<std::uint64_t>(
                     timer.nsecsElapsed() / 1000));
 
+            const auto& timings =
+                vectorscopeScreenRenderer_.renderTimings();
+
+            performanceStats_.vectorscopeScreenAnalyzer.update(
+                timings.analyzerUs);
+            performanceStats_.vectorscopeScreenGlowPersistence.update(
+                timings.glowPersistenceUs);
+            performanceStats_.vectorscopeScreenCompose.update(
+                timings.composeUs);
+            performanceStats_.vectorscopeScreenOverlay.update(
+                timings.overlayUs);
+            performanceStats_.vectorscopeScreenGlowWorkload.update(
+                timings.glowDirtyTiles,
+                timings.glowTotalTiles,
+                timings.glowHorizontalPass1Tiles,
+                timings.glowVerticalPass1Tiles,
+                timings.glowHorizontalPass2Tiles,
+                timings.glowVerticalPass2Tiles,
+                timings.glowActiveX,
+                timings.glowActiveY,
+                timings.glowActiveWidth,
+                timings.glowActiveHeight);
+
             emit vectorscopeChanged(
                 vectorscopeScreenRenderer_.image());
         }
         else
         {
             performanceStats_.vectorscopeScreen.update(0);
+            performanceStats_.vectorscopeScreenAnalyzer.update(0);
+            performanceStats_.vectorscopeScreenGlowPersistence.update(0);
+            performanceStats_.vectorscopeScreenCompose.update(0);
+            performanceStats_.vectorscopeScreenOverlay.update(0);
+            performanceStats_.vectorscopeScreenGlowWorkload.update(
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         if (vectorscopeVideoEnabled_.load(
@@ -2248,12 +3008,41 @@ void VideoEngine::vectorscopeWorkerLoop()
                 static_cast<std::uint64_t>(
                     videoTimer.nsecsElapsed() / 1000));
 
+            const auto& timings =
+                vectorscopeVideoRenderer_.renderTimings();
+
+            performanceStats_.vectorscopeVideoAnalyzer.update(
+                timings.analyzerUs);
+            performanceStats_.vectorscopeVideoGlowPersistence.update(
+                timings.glowPersistenceUs);
+            performanceStats_.vectorscopeVideoCompose.update(
+                timings.composeUs);
+            performanceStats_.vectorscopeVideoOverlay.update(
+                timings.overlayUs);
+            performanceStats_.vectorscopeVideoGlowWorkload.update(
+                timings.glowDirtyTiles,
+                timings.glowTotalTiles,
+                timings.glowHorizontalPass1Tiles,
+                timings.glowVerticalPass1Tiles,
+                timings.glowHorizontalPass2Tiles,
+                timings.glowVerticalPass2Tiles,
+                timings.glowActiveX,
+                timings.glowActiveY,
+                timings.glowActiveWidth,
+                timings.glowActiveHeight);
+
             emit vectorscopeVideoChanged(
                 vectorscopeVideoRenderer_.image());
          }
         else
         {
             performanceStats_.vectorscopeVideo.update(0);
+            performanceStats_.vectorscopeVideoAnalyzer.update(0);
+            performanceStats_.vectorscopeVideoGlowPersistence.update(0);
+            performanceStats_.vectorscopeVideoCompose.update(0);
+            performanceStats_.vectorscopeVideoOverlay.update(0);
+            performanceStats_.vectorscopeVideoGlowWorkload.update(
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         const bool stillValid =
@@ -2348,6 +3137,24 @@ void VideoEngine::setWaveformColor(bool enabled)
 {
     waveformScreenRenderer_.setColor(enabled);
     waveformVideoRenderer_.setColor(enabled);
+}
+
+void VideoEngine::recordVideoSpoutTiming(
+    std::uint64_t queueDelayUs,
+    std::uint64_t sendUs,
+    std::uint64_t intervalUs)
+{
+    performanceStats_.spoutQueueDelay.update(
+        queueDelayUs);
+
+    performanceStats_.spoutSend.update(
+        sendUs);
+
+    if (intervalUs > 0)
+    {
+        performanceStats_.spoutInterval.update(
+            intervalUs);
+    }
 }
 
 void VideoEngine::setSpoutVideoEnabled(

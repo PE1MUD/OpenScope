@@ -5,6 +5,7 @@
 #include "Video/Uyvy422ToYuv444Converter.h"
 #include "Video/V210ToYuv444Converter.h"
 
+#include <algorithm>
 #include <QDebug>
 #include <QMessageBox>
 #include <QString>
@@ -168,6 +169,9 @@ static void dumpDisplayModes(IDeckLink* deckLink)
 
 static IDeckLinkInput* activeInput = nullptr;
 static DeckLinkInputCallback* activeCallback = nullptr;
+static IDeckLinkConfiguration* activeConfiguration = nullptr;
+static DeckLinkCompositeGainState activeCompositeGainState;
+static bool activeConfigurationDirty = false;
 
 static void testPalInput(
     IDeckLink* deckLink,
@@ -181,6 +185,72 @@ static void testPalInput(
     {
         qDebug() << "  No capture interface";
         return;
+    }
+
+    if (activeConfiguration != nullptr)
+    {
+        if (activeConfigurationDirty)
+        {
+            activeConfiguration->WriteConfigurationToPreferences();
+        }
+
+        activeConfiguration->Release();
+        activeConfiguration = nullptr;
+    }
+
+    activeCompositeGainState = {};
+    activeConfigurationDirty = false;
+
+    IDeckLinkConfiguration* configuration = nullptr;
+
+    if (deckLink->QueryInterface(
+            IID_IDeckLinkConfiguration,
+            reinterpret_cast<void**>(&configuration)) == S_OK)
+    {
+        activeConfiguration = configuration;
+
+        IDeckLinkProfileAttributes* attributes = nullptr;
+
+        if (deckLink->QueryInterface(
+                IID_IDeckLinkProfileAttributes,
+                reinterpret_cast<void**>(&attributes)) == S_OK)
+        {
+            double minimumDb = 0.0;
+            double maximumDb = 0.0;
+
+            if (attributes->GetFloat(
+                    BMDDeckLinkVideoInputGainMinimum,
+                    &minimumDb) == S_OK &&
+                attributes->GetFloat(
+                    BMDDeckLinkVideoInputGainMaximum,
+                    &maximumDb) == S_OK)
+            {
+                activeCompositeGainState.minimumDb = minimumDb;
+                activeCompositeGainState.maximumDb = maximumDb;
+            }
+
+            attributes->Release();
+        }
+
+        double value = 0.0;
+
+        if (activeConfiguration->GetFloat(
+                bmdDeckLinkConfigVideoInputCompositeLumaGain,
+                &value) == S_OK)
+        {
+            activeCompositeGainState.lumaAvailable = true;
+            activeCompositeGainState.lumaDb = value;
+        }
+
+        value = 0.0;
+
+        if (activeConfiguration->GetFloat(
+                bmdDeckLinkConfigVideoInputCompositeChromaGain,
+                &value) == S_OK)
+        {
+            activeCompositeGainState.chromaAvailable = true;
+            activeCompositeGainState.chromaDb = value;
+        }
     }
 
     activeInput = input;
@@ -362,5 +432,95 @@ void deckLinkStop()
         activeCallback = nullptr;
     }
 
+    if (activeConfiguration != nullptr)
+    {
+        if (activeConfigurationDirty)
+        {
+            activeConfiguration->WriteConfigurationToPreferences();
+        }
+
+        activeConfiguration->Release();
+        activeConfiguration = nullptr;
+    }
+
+    activeCompositeGainState = {};
+    activeConfigurationDirty = false;
+
     qDebug() << "DeckLink capture stopped";
+}
+
+DeckLinkCompositeGainState deckLinkCompositeGainState()
+{
+    return activeCompositeGainState;
+}
+
+bool deckLinkSetCompositeLumaGain(double gainDb)
+{
+    if (activeConfiguration == nullptr ||
+        !activeCompositeGainState.lumaAvailable)
+    {
+        return false;
+    }
+
+    gainDb = std::clamp(
+        gainDb,
+        activeCompositeGainState.minimumDb,
+        activeCompositeGainState.maximumDb);
+
+    if (activeConfiguration->SetFloat(
+            bmdDeckLinkConfigVideoInputCompositeLumaGain,
+            gainDb) != S_OK)
+    {
+        return false;
+    }
+
+    activeCompositeGainState.lumaDb = gainDb;
+    activeConfigurationDirty = true;
+    return true;
+}
+
+bool deckLinkSetCompositeChromaGain(double gainDb)
+{
+    if (activeConfiguration == nullptr ||
+        !activeCompositeGainState.chromaAvailable)
+    {
+        return false;
+    }
+
+    gainDb = std::clamp(
+        gainDb,
+        activeCompositeGainState.minimumDb,
+        activeCompositeGainState.maximumDb);
+
+    if (activeConfiguration->SetFloat(
+            bmdDeckLinkConfigVideoInputCompositeChromaGain,
+            gainDb) != S_OK)
+    {
+        return false;
+    }
+
+    activeCompositeGainState.chromaDb = gainDb;
+    activeConfigurationDirty = true;
+    return true;
+}
+
+bool deckLinkCommitConfiguration()
+{
+    if (activeConfiguration == nullptr)
+    {
+        return false;
+    }
+
+    if (!activeConfigurationDirty)
+    {
+        return true;
+    }
+
+    if (activeConfiguration->WriteConfigurationToPreferences() != S_OK)
+    {
+        return false;
+    }
+
+    activeConfigurationDirty = false;
+    return true;
 }

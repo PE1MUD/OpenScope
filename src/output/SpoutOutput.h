@@ -4,6 +4,8 @@
 #include <QImage>
 #include <QString>
 
+#include <cstdint>
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
@@ -25,8 +27,19 @@ public:
     // Current CPU/QImage path. This is intentionally kept behind this
     // class so the renderer side can later move to D3D11 without changing
     // the rest of OpenScope.
+signals:
+    void submissionTiming(
+        std::uint64_t queueDelayUs,
+        std::uint64_t sendUs,
+        std::uint64_t intervalUs);
+
 public slots:
-    void submitImage(const QImage& image);
+    void submitImage(
+        const QImage& image);
+
+    void submitTimedImage(
+        const QImage& image,
+        qint64 dispatchTimestampUs);
     void setInputSignalValid(bool valid);
     void stop();
 

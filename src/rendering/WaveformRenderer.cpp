@@ -4,6 +4,7 @@
 #include "standards/VideoStandard.h"
 
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QtGlobal>
 #include <QApplication>
 
@@ -12,19 +13,34 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace
 {
+    struct GlowWorkload
+    {
+        std::uint32_t dirtyTiles = 0;
+        std::uint32_t totalTiles = 0;
+        std::uint32_t horizontalPass1Tiles = 0;
+        std::uint32_t verticalPass1Tiles = 0;
+        std::uint32_t horizontalPass2Tiles = 0;
+        std::uint32_t verticalPass2Tiles = 0;
+        int activeX = 0;
+        int activeY = 0;
+        int activeWidth = 0;
+        int activeHeight = 0;
+    };
 
-    void applyHalfResolutionWhiteGlow(
+    GlowWorkload applyHalfResolutionWhiteGlow(
         QImage& image,
         int glow)
     {
+        GlowWorkload workload;
         if (glow <= 0 || image.isNull() ||
             image.width() < 2 || image.height() < 2)
         {
-            return;
+            return workload;
         }
 
         const int width = image.width();
@@ -34,6 +50,32 @@ namespace
         const std::size_t lowCount =
             static_cast<std::size_t>(lowWidth) *
             static_cast<std::size_t>(lowHeight);
+
+        // Diagnostic tiling only.  These are glow-buffer tiles, not render
+        // jobs yet.  Keeping the accounting in the already-required source
+        // extraction pass avoids an extra full-image scan.
+        constexpr int kTileWidth = 64;
+        constexpr int kTileHeight = 32;
+        const int tilesX = (lowWidth + kTileWidth - 1) / kTileWidth;
+        const int tilesY = (lowHeight + kTileHeight - 1) / kTileHeight;
+        workload.totalTiles = static_cast<std::uint32_t>(tilesX * tilesY);
+
+        static thread_local std::vector<std::uint8_t> dirtyTiles;
+        dirtyTiles.assign(
+            static_cast<std::size_t>(workload.totalTiles),
+            static_cast<std::uint8_t>(0));
+
+        static thread_local std::vector<std::uint32_t> sourceActivity;
+        static thread_local std::vector<std::uint32_t> horizontal1Activity;
+        static thread_local std::vector<std::uint32_t> vertical1Activity;
+        static thread_local std::vector<std::uint32_t> horizontal2Activity;
+        static thread_local std::vector<std::uint32_t> vertical2Activity;
+        sourceActivity.assign(dirtyTiles.size(), 0u);
+
+        int minActiveX = lowWidth;
+        int minActiveY = lowHeight;
+        int maxActiveX = -1;
+        int maxActiveY = -1;
 
         static thread_local std::vector<std::uint16_t> source;
         static thread_local std::vector<std::uint16_t> temp;
@@ -73,105 +115,379 @@ namespace
 
                 source[static_cast<std::size_t>(ly) * lowWidth + lx] =
                     static_cast<std::uint16_t>(value);
+
+                if (value > 0)
+                {
+                    minActiveX = std::min(minActiveX, lx);
+                    minActiveY = std::min(minActiveY, ly);
+                    maxActiveX = std::max(maxActiveX, lx);
+                    maxActiveY = std::max(maxActiveY, ly);
+
+                    const int tileX = lx / kTileWidth;
+                    const int tileY = ly / kTileHeight;
+                    const std::size_t tileIndex =
+                        static_cast<std::size_t>(tileY) *
+                        static_cast<std::size_t>(tilesX) +
+                        static_cast<std::size_t>(tileX);
+
+                    ++sourceActivity[tileIndex];
+
+                    if (dirtyTiles[tileIndex] == 0)
+                    {
+                        dirtyTiles[tileIndex] = 1;
+                        ++workload.dirtyTiles;
+                    }
+                }
             }
         }
 
+        if (maxActiveX >= minActiveX && maxActiveY >= minActiveY)
+        {
+            workload.activeX = minActiveX * 2;
+            workload.activeY = minActiveY * 2;
+            workload.activeWidth =
+                std::min(width - workload.activeX,
+                    (maxActiveX - minActiveX + 1) * 2);
+            workload.activeHeight =
+                std::min(height - workload.activeY,
+                    (maxActiveY - minActiveY + 1) * 2);
+        }
+
         // Two cheap box passes approximate a Gaussian. The blur is done at
-        // half resolution, so its cost stays small even for HiDPI/fullscreen.
+        // half resolution. From this point on, only active tiles are
+        // processed. A tile propagates into neighbouring tiles only while
+        // at least 5% of that tile still contains non-zero glow data.
         const double renderScale =
             static_cast<double>(height) / 576.0;
         const int radius = std::max(1, static_cast<int>(std::lround(renderScale)));
+        const int horizontalTileExpansion =
+            (radius + kTileWidth - 1) / kTileWidth;
+        const int verticalTileExpansion =
+            (radius + kTileHeight - 1) / kTileHeight;
+
+        static thread_local std::vector<std::uint8_t> horizontalMask1;
+        static thread_local std::vector<std::uint8_t> verticalMask1;
+        static thread_local std::vector<std::uint8_t> horizontalMask2;
+        static thread_local std::vector<std::uint8_t> verticalMask2;
+
+        constexpr std::uint32_t kMinimumExpansionPercent = 5;
+
+        const auto dilateTiles =
+            [lowWidth, lowHeight, tilesX, tilesY, kTileWidth, kTileHeight](
+                const std::vector<std::uint8_t>& input,
+                const std::vector<std::uint32_t>& activity,
+                std::vector<std::uint8_t>& output,
+                int expandX,
+                int expandY)
+            {
+                // The tile itself remains active. It only propagates glow to
+                // neighbouring tiles while at least 5% of that tile still
+                // contains non-zero glow data from the preceding pass.
+                output = input;
+
+                for (int tileY = 0; tileY < tilesY; ++tileY)
+                {
+                    const int pixelFirstY = tileY * kTileHeight;
+                    const int pixelLastY =
+                        std::min(pixelFirstY + kTileHeight, lowHeight);
+
+                    for (int tileX = 0; tileX < tilesX; ++tileX)
+                    {
+                        const std::size_t index =
+                            static_cast<std::size_t>(tileY) *
+                            static_cast<std::size_t>(tilesX) +
+                            static_cast<std::size_t>(tileX);
+
+                        if (input[index] == 0)
+                        {
+                            continue;
+                        }
+
+                        const int pixelFirstX = tileX * kTileWidth;
+                        const int pixelLastX =
+                            std::min(pixelFirstX + kTileWidth, lowWidth);
+                        const std::uint32_t tilePixels =
+                            static_cast<std::uint32_t>(
+                                (pixelLastX - pixelFirstX) *
+                                (pixelLastY - pixelFirstY));
+
+                        if (activity[index] * 100u <
+                            tilePixels * kMinimumExpansionPercent)
+                        {
+                            continue;
+                        }
+
+                        const int firstY = std::max(0, tileY - expandY);
+                        const int lastY = std::min(tilesY - 1, tileY + expandY);
+                        const int firstX = std::max(0, tileX - expandX);
+                        const int lastX = std::min(tilesX - 1, tileX + expandX);
+
+                        for (int y = firstY; y <= lastY; ++y)
+                        {
+                            for (int x = firstX; x <= lastX; ++x)
+                            {
+                                output[
+                                    static_cast<std::size_t>(y) *
+                                    static_cast<std::size_t>(tilesX) +
+                                    static_cast<std::size_t>(x)] = 1;
+                            }
+                        }
+                    }
+                }
+            };
+
+        const auto countActiveTiles =
+            [](const std::vector<std::uint8_t>& mask)
+            {
+                return static_cast<std::uint32_t>(
+                    std::count_if(
+                        mask.begin(),
+                        mask.end(),
+                        [](std::uint8_t value)
+                        {
+                            return value != 0;
+                        }));
+            };
 
         const auto blurHorizontal =
-            [lowWidth, lowHeight, radius](
+            [lowWidth, lowHeight, radius, tilesX, kTileWidth, kTileHeight](
                 const std::vector<std::uint16_t>& in,
-                std::vector<std::uint16_t>& out)
+                std::vector<std::uint16_t>& out,
+                const std::vector<std::uint8_t>& mask,
+                std::vector<std::uint32_t>& activity)
             {
-                for (int y = 0; y < lowHeight; ++y)
+                std::fill(out.begin(), out.end(), static_cast<std::uint16_t>(0));
+                activity.assign(mask.size(), 0u);
+                const std::uint32_t count =
+                    static_cast<std::uint32_t>(2 * radius + 1);
+
+                for (int tileY = 0; tileY < (lowHeight + kTileHeight - 1) / kTileHeight; ++tileY)
                 {
-                    std::uint32_t sum = 0;
-                    int count = 0;
+                    const int firstY = tileY * kTileHeight;
+                    const int lastY = std::min(firstY + kTileHeight, lowHeight);
 
-                    for (int x = -radius; x <= radius; ++x)
+                    for (int tileX = 0; tileX < tilesX; ++tileX)
                     {
-                        const int sx = std::clamp(x, 0, lowWidth - 1);
-                        sum += in[static_cast<std::size_t>(y) * lowWidth + sx];
-                        ++count;
-                    }
+                        const std::size_t tileIndex =
+                            static_cast<std::size_t>(tileY) *
+                            static_cast<std::size_t>(tilesX) +
+                            static_cast<std::size_t>(tileX);
 
-                    for (int x = 0; x < lowWidth; ++x)
-                    {
-                        out[static_cast<std::size_t>(y) * lowWidth + x] =
-                            static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
+                        if (mask[tileIndex] == 0)
+                        {
+                            continue;
+                        }
 
-                        const int removeX = std::clamp(x - radius, 0, lowWidth - 1);
-                        const int addX = std::clamp(x + radius + 1, 0, lowWidth - 1);
-                        sum -= in[static_cast<std::size_t>(y) * lowWidth + removeX];
-                        sum += in[static_cast<std::size_t>(y) * lowWidth + addX];
+                        const int firstX = tileX * kTileWidth;
+                        const int lastX = std::min(firstX + kTileWidth, lowWidth);
+
+                        for (int y = firstY; y < lastY; ++y)
+                        {
+                            const std::size_t row =
+                                static_cast<std::size_t>(y) *
+                                static_cast<std::size_t>(lowWidth);
+                            std::uint32_t sum = 0;
+
+                            for (int x = firstX - radius;
+                                x <= firstX + radius;
+                                ++x)
+                            {
+                                const int sx = std::clamp(x, 0, lowWidth - 1);
+                                sum += in[row + static_cast<std::size_t>(sx)];
+                            }
+
+                            for (int x = firstX; x < lastX; ++x)
+                            {
+                                const std::uint16_t value =
+                                    static_cast<std::uint16_t>(sum / count);
+                                out[row + static_cast<std::size_t>(x)] = value;
+                                if (value != 0)
+                                {
+                                    ++activity[tileIndex];
+                                }
+
+                                const int removeX =
+                                    std::clamp(x - radius, 0, lowWidth - 1);
+                                const int addX =
+                                    std::clamp(x + radius + 1, 0, lowWidth - 1);
+                                sum -= in[row + static_cast<std::size_t>(removeX)];
+                                sum += in[row + static_cast<std::size_t>(addX)];
+                            }
+                        }
                     }
                 }
             };
 
         const auto blurVertical =
-            [lowWidth, lowHeight, radius](
+            [lowWidth, lowHeight, radius, tilesX, kTileWidth, kTileHeight](
                 const std::vector<std::uint16_t>& in,
-                std::vector<std::uint16_t>& out)
+                std::vector<std::uint16_t>& out,
+                const std::vector<std::uint8_t>& mask,
+                std::vector<std::uint32_t>& activity)
             {
-                for (int x = 0; x < lowWidth; ++x)
+                std::fill(out.begin(), out.end(), static_cast<std::uint16_t>(0));
+                activity.assign(mask.size(), 0u);
+                const std::uint32_t count =
+                    static_cast<std::uint32_t>(2 * radius + 1);
+                const int tilesY =
+                    (lowHeight + kTileHeight - 1) / kTileHeight;
+
+                for (int tileY = 0; tileY < tilesY; ++tileY)
                 {
-                    std::uint32_t sum = 0;
-                    int count = 0;
+                    const int firstY = tileY * kTileHeight;
+                    const int lastY = std::min(firstY + kTileHeight, lowHeight);
 
-                    for (int y = -radius; y <= radius; ++y)
+                    for (int tileX = 0; tileX < tilesX; ++tileX)
                     {
-                        const int sy = std::clamp(y, 0, lowHeight - 1);
-                        sum += in[static_cast<std::size_t>(sy) * lowWidth + x];
-                        ++count;
-                    }
+                        const std::size_t tileIndex =
+                            static_cast<std::size_t>(tileY) *
+                            static_cast<std::size_t>(tilesX) +
+                            static_cast<std::size_t>(tileX);
 
-                    for (int y = 0; y < lowHeight; ++y)
-                    {
-                        out[static_cast<std::size_t>(y) * lowWidth + x] =
-                            static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
+                        if (mask[tileIndex] == 0)
+                        {
+                            continue;
+                        }
 
-                        const int removeY = std::clamp(y - radius, 0, lowHeight - 1);
-                        const int addY = std::clamp(y + radius + 1, 0, lowHeight - 1);
-                        sum -= in[static_cast<std::size_t>(removeY) * lowWidth + x];
-                        sum += in[static_cast<std::size_t>(addY) * lowWidth + x];
+                        const int firstX = tileX * kTileWidth;
+                        const int lastX = std::min(firstX + kTileWidth, lowWidth);
+
+                        for (int x = firstX; x < lastX; ++x)
+                        {
+                            std::uint32_t sum = 0;
+
+                            for (int y = firstY - radius;
+                                y <= firstY + radius;
+                                ++y)
+                            {
+                                const int sy = std::clamp(y, 0, lowHeight - 1);
+                                sum += in[
+                                    static_cast<std::size_t>(sy) *
+                                    static_cast<std::size_t>(lowWidth) +
+                                    static_cast<std::size_t>(x)];
+                            }
+
+                            for (int y = firstY; y < lastY; ++y)
+                            {
+                                const std::size_t index =
+                                    static_cast<std::size_t>(y) *
+                                    static_cast<std::size_t>(lowWidth) +
+                                    static_cast<std::size_t>(x);
+                                const std::uint16_t value =
+                                    static_cast<std::uint16_t>(sum / count);
+                                out[index] = value;
+                                if (value != 0)
+                                {
+                                    ++activity[tileIndex];
+                                }
+
+                                const int removeY =
+                                    std::clamp(y - radius, 0, lowHeight - 1);
+                                const int addY =
+                                    std::clamp(y + radius + 1, 0, lowHeight - 1);
+                                sum -= in[
+                                    static_cast<std::size_t>(removeY) *
+                                    static_cast<std::size_t>(lowWidth) +
+                                    static_cast<std::size_t>(x)];
+                                sum += in[
+                                    static_cast<std::size_t>(addY) *
+                                    static_cast<std::size_t>(lowWidth) +
+                                    static_cast<std::size_t>(x)];
+                            }
+                        }
                     }
                 }
             };
 
-        blurHorizontal(source, temp);
-        blurVertical(temp, blur);
-        blurHorizontal(blur, temp);
-        blurVertical(temp, blur);
+        dilateTiles(
+            dirtyTiles,
+            sourceActivity,
+            horizontalMask1,
+            horizontalTileExpansion,
+            0);
+        workload.horizontalPass1Tiles = countActiveTiles(horizontalMask1);
+        blurHorizontal(source, temp, horizontalMask1, horizontal1Activity);
+
+        dilateTiles(
+            horizontalMask1,
+            horizontal1Activity,
+            verticalMask1,
+            0,
+            verticalTileExpansion);
+        workload.verticalPass1Tiles = countActiveTiles(verticalMask1);
+        blurVertical(temp, blur, verticalMask1, vertical1Activity);
+
+        dilateTiles(
+            verticalMask1,
+            vertical1Activity,
+            horizontalMask2,
+            horizontalTileExpansion,
+            0);
+        workload.horizontalPass2Tiles = countActiveTiles(horizontalMask2);
+        blurHorizontal(blur, temp, horizontalMask2, horizontal2Activity);
+
+        dilateTiles(
+            horizontalMask2,
+            horizontal2Activity,
+            verticalMask2,
+            0,
+            verticalTileExpansion);
+        workload.verticalPass2Tiles = countActiveTiles(verticalMask2);
+        blurVertical(temp, blur, verticalMask2, vertical2Activity);
 
         const int glowScale = std::clamp(glow, 0, 100);
 
-        for (int y = 0; y < height; ++y)
+        // Composite only the tiles kept by the final thresholded blur mask.
+        for (int tileY = 0; tileY < tilesY; ++tileY)
         {
-            auto* line = reinterpret_cast<QRgb*>(image.scanLine(y));
-            const int ly = std::min(y / 2, lowHeight - 1);
-
-            for (int x = 0; x < width; ++x)
+            for (int tileX = 0; tileX < tilesX; ++tileX)
             {
-                const int lx = std::min(x / 2, lowWidth - 1);
-                const int blurred = blur[static_cast<std::size_t>(ly) * lowWidth + lx];
-                const int contribution = (blurred * glowScale * 3) / 400;
+                const std::size_t tileIndex =
+                    static_cast<std::size_t>(tileY) *
+                    static_cast<std::size_t>(tilesX) +
+                    static_cast<std::size_t>(tileX);
 
-                if (contribution <= 0)
+                if (verticalMask2[tileIndex] == 0)
                 {
                     continue;
                 }
 
-                const QRgb pixel = line[x];
-                line[x] = qRgb(
-                    std::min(255, qRed(pixel) + contribution),
-                    std::min(255, qGreen(pixel) + contribution),
-                    std::min(255, qBlue(pixel) + contribution));
+                const int firstX = tileX * kTileWidth * 2;
+                const int lastX =
+                    std::min((tileX + 1) * kTileWidth * 2, width);
+                const int firstY = tileY * kTileHeight * 2;
+                const int lastY =
+                    std::min((tileY + 1) * kTileHeight * 2, height);
+
+                for (int y = firstY; y < lastY; ++y)
+                {
+                    auto* line = reinterpret_cast<QRgb*>(image.scanLine(y));
+                    const int ly = std::min(y / 2, lowHeight - 1);
+
+                    for (int x = firstX; x < lastX; ++x)
+                    {
+                        const int lx = std::min(x / 2, lowWidth - 1);
+                        const int blurred =
+                            blur[static_cast<std::size_t>(ly) * lowWidth + lx];
+                        const int contribution =
+                            (blurred * glowScale * 3) / 400;
+
+                        if (contribution <= 0)
+                        {
+                            continue;
+                        }
+
+                        const QRgb pixel = line[x];
+                        line[x] = qRgb(
+                            std::min(255, qRed(pixel) + contribution),
+                            std::min(255, qGreen(pixel) + contribution),
+                            std::min(255, qBlue(pixel) + contribution));
+                    }
+                }
             }
         }
+
+        return workload;
     }
 
     constexpr double kMaximumSampleValue = 65535.0;
@@ -200,6 +516,12 @@ void WaveformRenderer::setChromaFillIntensity(
 void WaveformRenderer::setColor(bool enabled)
 {
     settings_.color = enabled;
+}
+
+void WaveformRenderer::setTraceJobExecutor(
+    TraceJobExecutor executor)
+{
+    traceJobExecutor_ = std::move(executor);
 }
 
 void WaveformRenderer::setLineInfoOverlayEnabled(
@@ -469,6 +791,18 @@ void WaveformRenderer::setOutputSize(
         return;
     }
 
+    const std::size_t requestedPixelCount =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height);
+
+    outputSizeChangedSinceRender_ = true;
+    outputBufferCapacityGrewSinceRender_ =
+        outputBufferCapacityGrewSinceRender_ ||
+        trace_.capacity() < requestedPixelCount ||
+        chromaTrace_.capacity() < requestedPixelCount ||
+        hits_.capacity() < requestedPixelCount ||
+        allLinesPersistence_.capacity() < requestedPixelCount;
+
     image_ =
         QImage(
             width,
@@ -658,6 +992,7 @@ void WaveformRenderer::analyze(
         frame.u.size() < requiredSamples ||
         frame.v.size() < requiredSamples)
     {
+        renderTimings_ = {};
         image_.fill(Qt::black);
         return;
     }
@@ -843,7 +1178,32 @@ QRectF WaveformRenderer::scaledScopeRect() const
 void WaveformRenderer::renderSingleLine(
     const Yuv444Frame& frame)
 {
+    renderTimings_ = {};
+    renderTimings_.outputSizeChanged =
+        outputSizeChangedSinceRender_;
+    renderTimings_.outputBufferCapacityGrew =
+        outputBufferCapacityGrewSinceRender_;
+    renderTimings_.beamCoreRadiusPx =
+        beamCoreRadiusPx_;
+    renderTimings_.beamCoreMarginPx =
+        std::max(
+            1,
+            static_cast<int>(
+                std::floor(beamCoreRadiusPx_)));
+
+    outputSizeChangedSinceRender_ = false;
+    outputBufferCapacityGrewSinceRender_ = false;
+
+    QElapsedTimer phaseTimer;
+    phaseTimer.start();
+
     clearOrFadeTrace();
+
+    renderTimings_.persistenceUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
 
     const std::size_t sourceWidth =
         static_cast<std::size_t>(
@@ -879,9 +1239,16 @@ void WaveformRenderer::renderSingleLine(
                         x]);
     }
 
+    const std::uint64_t resamplerGenerationBefore =
+        singleLineReconstructor_.cacheGeneration();
+
     singleLineReconstructor_.resample(
         singleLineSource_,
         singleLineReconstructed_);
+
+    renderTimings_.resamplerCacheRebuilt =
+        singleLineReconstructor_.cacheGeneration() !=
+        resamplerGenerationBefore;
 
     /*
      * Determine which part of the reconstructed line
@@ -1283,79 +1650,345 @@ void WaveformRenderer::renderSingleLine(
     }
 
 
-    plotLuminanceTrace();
-    //composeTraceImage();
-
     const int firstScreenX =
-        static_cast<int>(
-            std::ceil(scope.left()));
+        std::clamp(
+            static_cast<int>(
+                std::ceil(scope.left())),
+            0,
+            image_.width());
 
-    const int lastScreenX =
-        static_cast<int>(
-            std::floor(scope.right()));
+    const int lastScreenXExclusive =
+        std::clamp(
+            static_cast<int>(
+                std::floor(scope.right())) + 1,
+            firstScreenX,
+            image_.width());
 
-    for (int screenX = firstScreenX;
-        screenX <= lastScreenX;
-        ++screenX)
-    {
-        const double normalisedX =
-            (static_cast<double>(screenX) -
-                scope.left()) /
-            scope.width();
+    // Large screen waveforms are split into narrow vertical stripes.  Each
+    // stripe exclusively owns its destination X range; the luminance beam
+    // may inspect a small source halo, but writes are clipped to the stripe.
+    // That makes the jobs race-free without private full-frame buffers.
+    constexpr int kParallelTraceStripeWidth = 128;
 
-        const std::size_t index =
-            std::min(
-                static_cast<std::size_t>(
-                    normalisedX *
-                    static_cast<double>(
-                        displayWidth - 1)),
-                static_cast<std::size_t>(
-                    displayWidth - 1));
+    const int traceWidth =
+        image_.width();
 
-        const int firstY =
-            std::clamp(
-                static_cast<int>(
-                    std::ceil(
-                        chromaUpperY[index])),
-                0,
-                image_.height() - 1);
+    const int traceStripeWidth =
+        traceJobExecutor_
+        ? kParallelTraceStripeWidth
+        : std::max(1, traceWidth);
 
-        const int lastY =
-            std::clamp(
-                static_cast<int>(
-                    std::floor(
-                        chromaLowerY[index])),
-                0,
-                image_.height() - 1);
+    const std::size_t traceJobCount =
+        traceWidth > 0
+        ? static_cast<std::size_t>(
+            (traceWidth +
+                traceStripeWidth - 1) /
+            traceStripeWidth)
+        : 0u;
 
-        for (int y = firstY;
-            y <= lastY;
-            ++y)
+    const auto renderTraceStripe =
+        [this,
+        &scope,
+        &chromaUpperY,
+        &chromaLowerY,
+        &chromaRed,
+        &chromaGreen,
+        &chromaBlue,
+        displayWidth,
+        firstScreenX,
+        lastScreenXExclusive,
+        traceStripeWidth](std::size_t jobIndex)
         {
-            addChromaFillPixel(
-                screenX,
-                y,
-                chromaRed[index],
-                chromaGreen[index],
-                chromaBlue[index],
-                chromaFillIntensity_);
+            const int stripeFirstX =
+                std::min(
+                    static_cast<int>(jobIndex) *
+                    traceStripeWidth,
+                    image_.width());
+
+            const int stripeLastX =
+                std::min(
+                    stripeFirstX +
+                    traceStripeWidth,
+                    image_.width());
+
+            if (stripeFirstX >= stripeLastX)
+            {
+                return;
+            }
+
+            plotLuminanceTraceRange(
+                stripeFirstX,
+                stripeLastX);
+
+            const int chromaFirstX =
+                std::max(
+                    stripeFirstX,
+                    firstScreenX);
+
+            const int chromaLastX =
+                std::min(
+                    stripeLastX,
+                    lastScreenXExclusive);
+
+            for (int screenX = chromaFirstX;
+                screenX < chromaLastX;
+                ++screenX)
+            {
+                const double normalisedX =
+                    (static_cast<double>(screenX) -
+                        scope.left()) /
+                    scope.width();
+
+                const std::size_t index =
+                    std::min(
+                        static_cast<std::size_t>(
+                            std::clamp(
+                                normalisedX,
+                                0.0,
+                                1.0) *
+                            static_cast<double>(
+                                displayWidth - 1)),
+                        static_cast<std::size_t>(
+                            displayWidth - 1));
+
+                const int firstY =
+                    std::clamp(
+                        static_cast<int>(
+                            std::ceil(
+                                chromaUpperY[index])),
+                        0,
+                        image_.height() - 1);
+
+                const int lastY =
+                    std::clamp(
+                        static_cast<int>(
+                            std::floor(
+                                chromaLowerY[index])),
+                        0,
+                        image_.height() - 1);
+
+                for (int y = firstY;
+                    y <= lastY;
+                    ++y)
+                {
+                    addChromaFillPixel(
+                        screenX,
+                        y,
+                        chromaRed[index],
+                        chromaGreen[index],
+                        chromaBlue[index],
+                        chromaFillIntensity_);
+                }
+            }
+        };
+
+    // Worker dispatch has a measurable fixed cost on small viewports.
+    // Keep those renders scalar and only ask the idle display worker to
+    // assist once the PC waveform canvas is large enough to amortise it.
+    constexpr std::int64_t kParallelTraceMinimumPixels = 2'000'000;
+
+    const std::int64_t traceCanvasPixels =
+        static_cast<std::int64_t>(image_.width()) *
+        static_cast<std::int64_t>(image_.height());
+
+    const bool useParallelTrace =
+        traceCanvasPixels >= kParallelTraceMinimumPixels &&
+        traceJobCount > 1u &&
+        static_cast<bool>(traceJobExecutor_);
+
+    renderTimings_.traceParallel = useParallelTrace;
+    renderTimings_.traceJobCount =
+        static_cast<std::uint32_t>(traceJobCount);
+
+    const std::uint64_t tracePrepUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    QElapsedTimer rasterTimer;
+    rasterTimer.start();
+
+    if (useParallelTrace)
+    {
+        traceJobExecutor_(
+            traceJobCount,
+            renderTraceStripe);
+    }
+    else
+    {
+        for (std::size_t jobIndex = 0;
+            jobIndex < traceJobCount;
+            ++jobIndex)
+        {
+            renderTraceStripe(jobIndex);
         }
     }
-    composeTraceImage();
+    renderTimings_.traceRasterUs =
+        static_cast<std::uint64_t>(
+            rasterTimer.nsecsElapsed() / 1000);
+    renderTimings_.traceUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+    renderTimings_.tracePrepUs =
+        std::min(
+            tracePrepUs,
+            renderTimings_.traceUs);
 
+    phaseTimer.restart();
+    composeTraceImage();
+    renderTimings_.composeUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
     if (selectedLine_ >= 0 && glow_ > 0)
     {
-        applyHalfResolutionWhiteGlow(image_, glow_);
-    }
+        const GlowWorkload workload =
+            applyHalfResolutionWhiteGlow(image_, glow_);
 
+        renderTimings_.glowDirtyTiles = workload.dirtyTiles;
+        renderTimings_.glowTotalTiles = workload.totalTiles;
+        renderTimings_.glowHorizontalPass1Tiles = workload.horizontalPass1Tiles;
+        renderTimings_.glowVerticalPass1Tiles = workload.verticalPass1Tiles;
+        renderTimings_.glowHorizontalPass2Tiles = workload.horizontalPass2Tiles;
+        renderTimings_.glowVerticalPass2Tiles = workload.verticalPass2Tiles;
+        renderTimings_.glowActiveX = workload.activeX;
+        renderTimings_.glowActiveY = workload.activeY;
+        renderTimings_.glowActiveWidth = workload.activeWidth;
+        renderTimings_.glowActiveHeight = workload.activeHeight;
+    }
+    renderTimings_.glowUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
     QPainter painter(&image_);
 
     graticule_.draw(
         painter,
-        scaledScopeRect(),
+        scope,
         VideoStandard::pal625());
 
-    drawLineInfoOverlay(painter);
+    // The trace is the measurement, so its core must win over the
+    // graticule at intersections.  Glow is intentionally left below the
+    // graticule; only the actual beam/core is repainted on top.
+    painter.end();
+
+    const int firstX =
+        std::clamp(
+            static_cast<int>(std::floor(scope.left())),
+            0,
+            image_.width() - 1);
+    const int lastX =
+        std::clamp(
+            static_cast<int>(std::ceil(scope.right())),
+            firstX,
+            image_.width() - 1);
+    const int firstY =
+        std::clamp(
+            static_cast<int>(std::floor(scope.top())),
+            0,
+            image_.height() - 1);
+    const int lastY =
+        std::clamp(
+            static_cast<int>(std::ceil(scope.bottom())),
+            firstY,
+            image_.height() - 1);
+
+    for (int y = firstY; y <= lastY; ++y)
+    {
+        auto* destination =
+            reinterpret_cast<QRgb*>(
+                image_.scanLine(y));
+
+        for (int x = firstX; x <= lastX; ++x)
+        {
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(image_.width()) +
+                static_cast<std::size_t>(x);
+
+            const TracePixel& lumaPixel =
+                trace_[index];
+            const TracePixel& chromaPixel =
+                chromaTrace_[index];
+
+            const bool hasLuma =
+                lumaPixel.red != 0 ||
+                lumaPixel.green != 0 ||
+                lumaPixel.blue != 0;
+            const bool hasChroma =
+                chromaPixel.red != 0 ||
+                chromaPixel.green != 0 ||
+                chromaPixel.blue != 0;
+
+            if (!hasLuma && !hasChroma)
+            {
+                continue;
+            }
+
+            if (settings_.color)
+            {
+                const auto combinedChannel =
+                    [this](
+                        std::uint16_t luma,
+                        std::uint16_t chroma)
+                    {
+                        const std::uint32_t combined =
+                            std::min<std::uint32_t>(
+                                65535u,
+                                static_cast<std::uint32_t>(luma) +
+                                static_cast<std::uint32_t>(chroma));
+
+                        return displayLut_[combined];
+                    };
+
+                destination[x] =
+                    qRgb(
+                        combinedChannel(
+                            lumaPixel.red,
+                            chromaPixel.red),
+                        combinedChannel(
+                            lumaPixel.green,
+                            chromaPixel.green),
+                        combinedChannel(
+                            lumaPixel.blue,
+                            chromaPixel.blue));
+            }
+            else
+            {
+                const std::uint32_t luma =
+                    std::max({
+                        static_cast<std::uint32_t>(lumaPixel.red),
+                        static_cast<std::uint32_t>(lumaPixel.green),
+                        static_cast<std::uint32_t>(lumaPixel.blue)
+                    });
+
+                const std::uint32_t chroma =
+                    std::max({
+                        static_cast<std::uint32_t>(chromaPixel.red),
+                        static_cast<std::uint32_t>(chromaPixel.green),
+                        static_cast<std::uint32_t>(chromaPixel.blue)
+                    });
+
+                const std::uint32_t combined =
+                    std::min<std::uint32_t>(
+                        65535u,
+                        luma + chroma);
+
+                const int value =
+                    displayLut_[combined];
+
+                destination[x] =
+                    qRgb(value, value, value);
+            }
+        }
+    }
+
+    QPainter overlayPainter(&image_);
+    drawLineInfoOverlay(overlayPainter);
+    renderTimings_.overlayUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
 }
 
 
@@ -1416,7 +2049,9 @@ void WaveformRenderer::drawLineInfoOverlay(QPainter& painter)
 }
 
 
-void WaveformRenderer::plotLuminanceTrace()
+void WaveformRenderer::plotLuminanceTraceRange(
+    int firstPixelX,
+    int lastPixelX)
 {
     const int width =
         image_.width();
@@ -1427,11 +2062,6 @@ void WaveformRenderer::plotLuminanceTrace()
     const QRectF scope =
         scaledScopeRect();
 
-    const double xScale =
-        scope.width() /
-        static_cast<double>(
-            width - 1);
-
     if (width < 2 ||
         displayY_.size() <
         static_cast<std::size_t>(
@@ -1440,16 +2070,32 @@ void WaveformRenderer::plotLuminanceTrace()
         return;
     }
 
+    firstPixelX =
+        std::clamp(
+            firstPixelX,
+            0,
+            width);
+
+    lastPixelX =
+        std::clamp(
+            lastPixelX,
+            firstPixelX,
+            width);
+
+    if (firstPixelX >= lastPixelX)
+    {
+        return;
+    }
+
     const auto analog =
         analogLevels(
             VideoColorStandard::Rec601_625);
-
 
     const double voltsToPixels =
         scope.height() /
         analog.graticuleMaxVolts;
 
-    auto sampleToPlotY =
+    const auto sampleToPlotY =
         [scope,
         voltsToPixels](double volts)
         {
@@ -1459,13 +2105,55 @@ void WaveformRenderer::plotLuminanceTrace()
                 voltsToPixels;
         };
 
-    auto plotSmoothCurve =
+    const auto sampleCenter =
+        [this, &sampleToPlotY](int x)
+        {
+            x =
+                std::clamp(
+                    x,
+                    0,
+                    image_.width() - 1);
+
+            return
+                sampleToPlotY(
+                    static_cast<double>(
+                        displayY_[
+                            static_cast<std::size_t>(
+                                x)]));
+        };
+
+    const auto sampleZoomed =
+        [this, &sampleToPlotY](int x)
+        {
+            x =
+                std::clamp(
+                    x,
+                    0,
+                    static_cast<int>(
+                        sourceY_.size()) - 1);
+
+            return
+                sampleToPlotY(
+                    static_cast<double>(
+                        sourceY_[
+                            static_cast<std::size_t>(
+                                x)]));
+        };
+
+    const auto plotSmoothCurveRange =
         [this,
-        scope](
+        scope,
+        firstPixelX,
+        lastPixelX](
             const auto& sampleY,
             int sampleCount,
             int intensity)
         {
+            if (sampleCount < 2)
+            {
+                return;
+            }
+
             constexpr double targetStepPixels = 0.5;
 
             const double curveXScale =
@@ -1473,8 +2161,39 @@ void WaveformRenderer::plotLuminanceTrace()
                 static_cast<double>(
                     sampleCount - 1);
 
-            for (int x = 0;
-                x < sampleCount - 1;
+            if (curveXScale <= 0.0)
+            {
+                return;
+            }
+
+            // Include enough source segments to cover the beam core at the
+            // stripe edge. Writes are still clipped to this stripe, so two
+            // workers never touch the same TracePixel.
+            const double halo =
+                beamCoreRadiusPx_ + 2.0;
+
+            const int firstSegment =
+                std::clamp(
+                    static_cast<int>(
+                        std::floor(
+                            (static_cast<double>(firstPixelX) -
+                                halo - scope.left()) /
+                            curveXScale)) - 1,
+                    0,
+                    sampleCount - 2);
+
+            const int lastSegment =
+                std::clamp(
+                    static_cast<int>(
+                        std::ceil(
+                            (static_cast<double>(lastPixelX) +
+                                halo - scope.left()) /
+                            curveXScale)) + 1,
+                    0,
+                    sampleCount - 2);
+
+            for (int x = firstSegment;
+                x <= lastSegment;
                 ++x)
             {
                 const double p0 =
@@ -1502,6 +2221,7 @@ void WaveformRenderer::plotLuminanceTrace()
                                 targetStepPixels)),
                         1,
                         256);
+
                 double previousX =
                     scope.left() +
                     static_cast<double>(x) *
@@ -1509,6 +2229,7 @@ void WaveformRenderer::plotLuminanceTrace()
 
                 double previousY =
                     p1;
+
                 for (int step = 0;
                     step <= subdivisions;
                     ++step)
@@ -1557,7 +2278,9 @@ void WaveformRenderer::plotLuminanceTrace()
                             intensity,
                             255,
                             255,
-                            255);
+                            255,
+                            firstPixelX,
+                            lastPixelX);
                     }
 
                     previousX = plotX;
@@ -1566,45 +2289,9 @@ void WaveformRenderer::plotLuminanceTrace()
             }
         };
 
-    auto sampleCenter =
-        [this, &sampleToPlotY](int x)
-        {
-            x =
-                std::clamp(
-                    x,
-                    0,
-                    image_.width() - 1);
-
-            return
-                sampleToPlotY(
-                    static_cast<double>(
-                        displayY_[
-                            static_cast<std::size_t>(
-                                x)]));
-        };
-
-    auto sampleZoomed =
-        [this, &sampleToPlotY](int x)
-        {
-            x =
-                std::clamp(
-                    x,
-                    0,
-                    static_cast<int>(
-                        sourceY_.size()) - 1);
-
-            return
-                sampleToPlotY(
-                    static_cast<double>(
-                        sourceY_[
-                            static_cast<std::size_t>(
-                                x)]));
-        };
-
-    // Keep the original smooth waveform as the primary trace.
     if (zoomFactor_ > 1)
     {
-        plotSmoothCurve(
+        plotSmoothCurveRange(
             sampleZoomed,
             static_cast<int>(
                 sourceY_.size()),
@@ -1612,7 +2299,7 @@ void WaveformRenderer::plotLuminanceTrace()
     }
     else
     {
-        plotSmoothCurve(
+        plotSmoothCurveRange(
             sampleCenter,
             width,
             kLuminanceBeamIntensity);
@@ -1624,20 +2311,40 @@ void WaveformRenderer::plotLuminanceTrace()
         return;
     }
 
-    /*
-     * When several reconstructed source samples collapse into one
-     * display column, preserve their full vertical energy.
-     *
-     * The smooth centre trace stays visible where the waveform still
-     * fits the horizontal display resolution. If the samples within
-     * one display column span a meaningful vertical range, draw that
-     * complete min/max range solid white instead of inventing a
-     * misleading interpolated waveform.
-     */
     constexpr double kMinMaxFillThresholdPixels = 3.0;
 
-    for (int x = 0;
-        x < width;
+    const double xScale =
+        scope.width() /
+        static_cast<double>(
+            width - 1);
+
+    if (xScale <= 0.0)
+    {
+        return;
+    }
+
+    const int firstDisplayX =
+        std::clamp(
+            static_cast<int>(
+                std::floor(
+                    (static_cast<double>(firstPixelX) -
+                        2.0 - scope.left()) /
+                    xScale)),
+            0,
+            width - 1);
+
+    const int lastDisplayX =
+        std::clamp(
+            static_cast<int>(
+                std::ceil(
+                    (static_cast<double>(lastPixelX) +
+                        2.0 - scope.left()) /
+                    xScale)),
+            0,
+            width - 1);
+
+    for (int x = firstDisplayX;
+        x <= lastDisplayX;
         ++x)
     {
         const std::size_t index =
@@ -1695,10 +2402,11 @@ void WaveformRenderer::plotLuminanceTrace()
                 kLuminanceBeamIntensity,
                 255,
                 255,
-                255);
+                255,
+                firstPixelX,
+                lastPixelX);
         }
     }
-
 }
 
 void WaveformRenderer::composeTraceImage()
@@ -1804,12 +2512,23 @@ void WaveformRenderer::composeTraceImage()
 void WaveformRenderer::renderAllLines(
     const Yuv444Frame& frame)
 {
+    renderTimings_ = {};
+
+    QElapsedTimer phaseTimer;
+    phaseTimer.start();
+
     sourceY_.clear();
 
     std::fill(
         hits_.begin(),
         hits_.end(),
         0u);
+
+    renderTimings_.persistenceUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
 
     const int displayWidth =
         image_.width();
@@ -1978,10 +2697,25 @@ void WaveformRenderer::renderAllLines(
         }
     }
 
+    // Build the graticule first.  The all-lines density trace only writes
+    // non-zero pixels afterwards, so the trace naturally sits on top.
+    image_.fill(Qt::black);
+    {
+        QPainter graticulePainter(&image_);
+        graticule_.draw(
+            graticulePainter,
+            scope,
+            VideoStandard::pal625());
+    }
+
     for (int y = 0;
         y < displayHeight;
         ++y)
     {
+        auto* destination =
+            reinterpret_cast<QRgb*>(
+                image_.scanLine(y));
+
         for (int x = 0;
             x < displayWidth;
             ++x)
@@ -2022,9 +2756,10 @@ void WaveformRenderer::renderAllLines(
                         temporalDensity / 256.0f) *
                     8u);
 
-            auto* destination =
-                reinterpret_cast<QRgb*>(
-                    image_.scanLine(y));
+            if (intensity == 0)
+            {
+                continue;
+            }
 
             destination[x] =
                 qRgb(
@@ -2034,14 +2769,16 @@ void WaveformRenderer::renderAllLines(
         }
     }
 
+    renderTimings_.traceUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
     QPainter painter(&image_);
-
-    graticule_.draw(
-        painter,
-        scope,
-        VideoStandard::pal625());
-
     drawLineInfoOverlay(painter);
+    renderTimings_.overlayUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
 }
 
 void WaveformRenderer::addChromaFillPixel(
@@ -2114,7 +2851,9 @@ void WaveformRenderer::plotSegment(
     int intensity,
     int red,
     int green,
-    int blue)
+    int blue,
+    int clipFirstX,
+    int clipLastX)
 {
     const double dx =
         x1 - x0;
@@ -2134,7 +2873,9 @@ void WaveformRenderer::plotSegment(
             intensity,
             red,
             green,
-            blue);
+            blue,
+            clipFirstX,
+            clipLastX);
 
         return;
     }
@@ -2142,15 +2883,40 @@ void WaveformRenderer::plotSegment(
     const double coreRadius =
         beamCoreRadiusPx_;
 
+    // The segment bounds already use floor(min) / ceil(max), which
+    // provide the sub-pixel guard band at both ends.  Using ceil()
+    // here therefore adds an unnecessary full pixel whenever the
+    // continuously scaled beam radius crosses an integer boundary
+    // (for example 0.999 -> 1.001 px), causing a large raster-work
+    // cliff without changing the visible beam support.  floor() keeps
+    // the candidate box tight while still covering every integer pixel
+    // whose centre can lie inside coreRadius.
     const int coreMargin =
         std::max(
             1,
             static_cast<int>(
-                std::ceil(coreRadius)));
+                std::floor(coreRadius)));
+
+    if (clipLastX < 0)
+    {
+        clipLastX = image_.width();
+    }
+
+    clipFirstX =
+        std::clamp(
+            clipFirstX,
+            0,
+            image_.width());
+
+    clipLastX =
+        std::clamp(
+            clipLastX,
+            clipFirstX,
+            image_.width());
 
     const int firstX =
         std::max(
-            0,
+            clipFirstX,
             static_cast<int>(
                 std::floor(
                     std::min(x0, x1))) -
@@ -2158,7 +2924,7 @@ void WaveformRenderer::plotSegment(
 
     const int lastX =
         std::min(
-            image_.width() - 1,
+            clipLastX - 1,
             static_cast<int>(
                 std::ceil(
                     std::max(x0, x1))) +
@@ -2289,7 +3055,9 @@ void WaveformRenderer::plotBeam(
     int intensity,
     int red,
     int green,
-    int blue)
+    int blue,
+    int clipFirstX,
+    int clipLastX)
 {
     if (x < 0.0 ||
         x >= static_cast<double>(
@@ -2297,6 +3065,23 @@ void WaveformRenderer::plotBeam(
     {
         return;
     }
+
+    if (clipLastX < 0)
+    {
+        clipLastX = image_.width();
+    }
+
+    clipFirstX =
+        std::clamp(
+            clipFirstX,
+            0,
+            image_.width());
+
+    clipLastX =
+        std::clamp(
+            clipLastX,
+            clipFirstX,
+            image_.width());
 
     const int x0 =
         static_cast<int>(
@@ -2339,8 +3124,8 @@ void WaveformRenderer::plotBeam(
             const int destinationX =
                 x0 + dx;
 
-            if (destinationX < 0 ||
-                destinationX >= image_.width())
+            if (destinationX < clipFirstX ||
+                destinationX >= clipLastX)
             {
                 continue;
             }
@@ -2410,7 +3195,17 @@ void WaveformRenderer::plotBeam(
 void WaveformRenderer::setSelectedLine(
     int line)
 {
+    if (selectedLine_ == line)
+    {
+        return;
+    }
+
     selectedLine_ = line;
+
+    // A trace accumulated for another source line must never survive a
+    // line change.  This is especially visible with persistence enabled
+    // and when switching between matrix and fullscreen views.
+    clearTrace();
 }
 
 void WaveformRenderer::setPersistence(
@@ -2447,6 +3242,11 @@ const std::vector<float>& WaveformRenderer::visibleLumaVolts() const noexcept
 const std::vector<float>& WaveformRenderer::fullLumaVolts() const noexcept
 {
     return fullLumaVolts_;
+}
+
+const WaveformRenderTimings& WaveformRenderer::renderTimings() const noexcept
+{
+    return renderTimings_;
 }
 
 double WaveformRenderer::traceBandwidthMHz() const

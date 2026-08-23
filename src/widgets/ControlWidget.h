@@ -9,6 +9,8 @@ class QButtonGroup;
 class QToolButton;
 class QSpinBox;
 class QTabWidget;
+class QSlider;
+class QLabel;
 
 class ControlWidget : public QWidget
 {
@@ -34,6 +36,14 @@ public:
     void setHelpTabVisible(
         bool visible);
 
+    void setCompositeInputGainState(
+        bool lumaAvailable,
+        bool chromaAvailable,
+        int minimumHundredthsDb,
+        int maximumHundredthsDb,
+        int lumaHundredthsDb,
+        int chromaHundredthsDb);
+
 signals:
     void lineNumberChanged(int lineNumber);
     void waveformZoomChanged(int zoomFactor);
@@ -45,6 +55,12 @@ signals:
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);
+    void lumaCompensationChanged(bool enabled);
+    void lumaCompensationGainChanged(int gainHundredthsDb);
+
+    void compositeLumaGainChanged(int gainHundredthsDb);
+    void compositeChromaGainChanged(int gainHundredthsDb);
+    void compositeGainCommitRequested();
 
     void performanceVisibilityChanged(bool visible);
     void floatiesHomeRequested();
@@ -64,5 +80,8 @@ private:
     QToolButton* waveformZoom10Button_ = nullptr;
     QSpinBox* lineSelector_ = nullptr;
     QTabWidget* tabs_ = nullptr;
+    QSlider* compositeLumaGainSlider_ = nullptr;
+    QSlider* compositeChromaGainSlider_ = nullptr;
+    QLabel* compositeGainStatusLabel_ = nullptr;
     int helpTabIndex_ = -1;
 };

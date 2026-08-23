@@ -2,9 +2,13 @@
 
 #include "VectorscopeSettings.h"
 #include "standards/VideoStandard.h"
+#include "standards/ColorBars.h"
+#include "standards/ColorMatrices.h"
 #include "ui/ViewportOverlay.h"
 
 #include <QPainter>
+#include <QPainterPath>
+#include <QElapsedTimer>
 #include <QPointF>
 #include <QVector>
 
@@ -42,6 +46,370 @@ namespace
             static_cast<double>(diameter),
             static_cast<double>(diameter));
     }
+
+    double referenceChromaMagnitude16Bit(
+        VideoColorStandard standard)
+    {
+        constexpr ColorBar referenceColors[] =
+        {
+            ColorBar::Yellow,
+            ColorBar::Cyan,
+            ColorBar::Green,
+            ColorBar::Magenta,
+            ColorBar::Red,
+            ColorBar::Blue
+        };
+
+        double maximumMagnitude = 0.0;
+
+        for (const ColorBar color : referenceColors)
+        {
+            const CbCr cbcr =
+                rgbToCbCr(
+                    colorBar(
+                        color,
+                        ColorBarLevel::Percent100),
+                    standard);
+
+            maximumMagnitude =
+                std::max(
+                    maximumMagnitude,
+                    std::hypot(
+                        cbcr.cb,
+                        cbcr.cr));
+        }
+
+        // Digital legal-range chroma is 512 +/-448 in 10-bit video.
+        // The internal frame stores those samples left-shifted by six bits.
+        // rgbToCbCr() expresses Cb/Cr on the conventional +/-0.5 scale,
+        // so derive the code-space radius from that exact mapping.
+        constexpr double kNeutral10Bit = 512.0;
+        constexpr double kMaximum10Bit = 960.0;
+        constexpr double kInternalScale = 64.0;
+        constexpr double kNormalizedComponentFullScale = 0.5;
+
+        const double codeUnitsPerCbCrUnit =
+            ((kMaximum10Bit - kNeutral10Bit) * kInternalScale) /
+            kNormalizedComponentFullScale;
+
+        return maximumMagnitude * codeUnitsPerCbCrUnit;
+    }
+
+    bool hasPalCompositeGamutError(
+        const Yuv444Frame& frame,
+        int selectedLine,
+        int horizontalZoomFactor,
+        double horizontalScrollPosition)
+    {
+        if (frame.width <= 0 ||
+            frame.height <= 0 ||
+            frame.y.empty() ||
+            frame.u.empty() ||
+            frame.v.empty())
+        {
+            return false;
+        }
+
+        const std::size_t sampleCount =
+            std::min(
+                frame.y.size(),
+                std::min(
+                    frame.u.size(),
+                    frame.v.size()));
+
+        std::size_t firstSample = 0;
+        std::size_t lastSample = sampleCount;
+
+        if (selectedLine >= 0 &&
+            selectedLine < frame.height)
+        {
+            const std::size_t lineStart =
+                static_cast<std::size_t>(selectedLine) *
+                static_cast<std::size_t>(frame.width);
+
+            const std::size_t sourceWidth =
+                static_cast<std::size_t>(frame.width);
+
+            std::size_t viewWidth = sourceWidth;
+            std::size_t viewOffset = 0;
+
+            if (horizontalZoomFactor > 1)
+            {
+                viewWidth =
+                    std::max<std::size_t>(
+                        sourceWidth /
+                            static_cast<std::size_t>(horizontalZoomFactor),
+                        1u);
+
+                const std::size_t maximumOffset =
+                    sourceWidth - viewWidth;
+
+                viewOffset =
+                    static_cast<std::size_t>(
+                        std::lround(
+                            std::clamp(
+                                horizontalScrollPosition,
+                                0.0,
+                                1.0) *
+                            static_cast<double>(maximumOffset)));
+            }
+
+            firstSample =
+                std::min(
+                    lineStart + viewOffset,
+                    sampleCount);
+
+            lastSample =
+                std::min(
+                    lineStart + sourceWidth,
+                    std::min(
+                        firstSample + viewWidth,
+                        sampleCount));
+        }
+
+        // Rec.601 studio-range samples in the internal 16-bit container:
+        // Y  : 64..940 (10-bit) -> 4096..60160
+        // Cb/Cr: centre 512, legal excursion +/-448 -> centre 32768.
+        constexpr double kYBlack = 64.0 * 64.0;
+        constexpr double kYWhite = 940.0 * 64.0;
+        constexpr double kYRange = kYWhite - kYBlack;
+        constexpr double kChromaCenter = 512.0 * 64.0;
+        constexpr double kChromaRange = 896.0 * 64.0;
+
+        // PAL composite modulation from Rec.601 Cb/Cr.
+        // B-Y = 1.772 Cb; R-Y = 1.402 Cr.
+        // PAL U = 0.493(B-Y), V = 0.877(R-Y).
+        constexpr double kPalUFromCb = 0.493 * 1.772;
+        constexpr double kPalVFromCr = 0.877 * 1.402;
+
+        // 100% PAL colour bars nominally reach about -33.4% / +133.4%.
+        // Do not flag a legal calibrated 100% bar because of a handful of
+        // noisy / quantised samples at the boundary.  A gamut alarm should
+        // represent a real excursion, not a single outlier.
+        constexpr double kCompositeMinimum = -0.34;
+        constexpr double kCompositeMaximum = 1.34;
+
+        // Additional decision margin beyond the nominal PAL boundary.
+        // 0.02 == two percentage points of normalized luminance.
+        constexpr double kDecisionMargin = 0.02;
+
+        // A PAL decoder can ring around colour transitions.  Those transient
+        // samples are not representative of the settled colour level and
+        // must not trip the gamut alarm.  First require a stable run, then
+        // require a sustained excursion outside the PAL composite envelope.
+        constexpr std::size_t kRequiredStableSamples = 24u;
+        constexpr std::size_t kRequiredConsecutiveOutside = 8u;
+
+        // Normalized per-sample change allowed while considering the signal
+        // settled.  These are deliberately much larger than normal ADC noise
+        // but far smaller than a colour-bar transition.
+        constexpr double kStableYDelta = 0.025;
+        constexpr double kStableChromaDelta = 0.025;
+
+        std::size_t stableSamples = 0u;
+        std::size_t consecutiveOutside = 0u;
+
+        double previousY = 0.0;
+        double previousCb = 0.0;
+        double previousCr = 0.0;
+        bool havePrevious = false;
+
+        const std::size_t lineWidth =
+            static_cast<std::size_t>(
+                std::max(frame.width, 1));
+
+        for (std::size_t i = firstSample;
+            i < lastSample;
+            ++i)
+        {
+            const double y =
+                (static_cast<double>(frame.y[i]) - kYBlack) /
+                kYRange;
+
+            const double cb =
+                (static_cast<double>(frame.u[i]) - kChromaCenter) /
+                kChromaRange;
+
+            const double cr =
+                (static_cast<double>(frame.v[i]) - kChromaCenter) /
+                kChromaRange;
+
+            // Never let stability or an outside run continue over a raster
+            // line boundary when All Lines is selected.
+            const bool lineStart =
+                (i % lineWidth) == 0u;
+
+            bool stable = false;
+
+            if (havePrevious &&
+                !lineStart)
+            {
+                stable =
+                    std::abs(y - previousY) <= kStableYDelta &&
+                    std::abs(cb - previousCb) <= kStableChromaDelta &&
+                    std::abs(cr - previousCr) <= kStableChromaDelta;
+            }
+
+            previousY = y;
+            previousCb = cb;
+            previousCr = cr;
+            havePrevious = true;
+
+            if (!stable)
+            {
+                stableSamples = 0u;
+                consecutiveOutside = 0u;
+                continue;
+            }
+
+            ++stableSamples;
+
+            if (stableSamples < kRequiredStableSamples)
+            {
+                consecutiveOutside = 0u;
+                continue;
+            }
+
+            const double palU =
+                kPalUFromCb * cb;
+
+            const double palV =
+                kPalVFromCr * cr;
+
+            const double chromaPeak =
+                std::hypot(
+                    palU,
+                    palV);
+
+            const double compositeMinimum =
+                y - chromaPeak;
+
+            const double compositeMaximum =
+                y + chromaPeak;
+
+            const bool outside =
+                compositeMinimum <
+                    (kCompositeMinimum - kDecisionMargin) ||
+                compositeMaximum >
+                    (kCompositeMaximum + kDecisionMargin);
+
+            if (outside)
+            {
+                ++consecutiveOutside;
+
+                if (consecutiveOutside >=
+                    kRequiredConsecutiveOutside)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                consecutiveOutside = 0u;
+            }
+        }
+
+        return false;
+    }
+
+    void drawGamutStatus(
+        QPainter& painter,
+        const QRectF& scopeRect,
+        bool gamutError,
+        bool videoProfile,
+        const QRectF& bottomRightCard)
+    {
+        const QString text =
+            QStringLiteral("GAMUT ERROR");
+
+        QFont font = painter.font();
+        font.setBold(true);
+        font.setPixelSize(
+            std::max(
+                11,
+                static_cast<int>(
+                    std::lround(
+                        scopeRect.height() *
+                        (videoProfile ? 0.026 : 0.024)))));
+
+        painter.save();
+        painter.setFont(font);
+
+        QPainterPath textPath;
+        const QFontMetricsF metrics(font);
+        const QRectF bounds = metrics.boundingRect(text);
+
+        const double inset =
+            std::max(
+                8.0,
+                scopeRect.height() * 0.018);
+
+        double rightEdge =
+            scopeRect.right() - inset;
+
+        double baselineY =
+            scopeRect.bottom() - inset;
+
+        if (videoProfile &&
+            bottomRightCard.isValid() &&
+            !bottomRightCard.isEmpty())
+        {
+            // Spout/video profile:
+            // place GAMUT ERROR directly above the PROCESSING/YUV card,
+            // aligned to the card's right edge.
+            const double cardGap =
+                std::max(
+                    6.0,
+                    scopeRect.height() * 0.012);
+
+            rightEdge =
+                bottomRightCard.right();
+
+            baselineY =
+                bottomRightCard.top() -
+                cardGap -
+                bounds.bottom();
+        }
+
+        const QPointF baseline(
+            rightEdge - bounds.right(),
+            baselineY);
+
+        textPath.addText(
+            baseline,
+            font,
+            text);
+
+        if (gamutError)
+        {
+            QPen outerGlow(
+                QColor(0, 255, 255, 45),
+                std::max(4.0, scopeRect.height() * 0.010));
+            outerGlow.setJoinStyle(Qt::RoundJoin);
+            painter.setPen(outerGlow);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(textPath);
+
+            QPen innerGlow(
+                QColor(0, 255, 255, 110),
+                std::max(2.0, scopeRect.height() * 0.005));
+            innerGlow.setJoinStyle(Qt::RoundJoin);
+            painter.setPen(innerGlow);
+            painter.drawPath(textPath);
+
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(0, 255, 255));
+            painter.drawPath(textPath);
+        }
+        else
+        {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(80, 80, 80));
+            painter.drawPath(textPath);
+        }
+
+        painter.restore();
+    }
 }
 
 VectorscopeRenderer::VectorscopeRenderer(Profile profile)
@@ -55,13 +423,13 @@ VectorscopeRenderer::VectorscopeRenderer(Profile profile)
     graticule_.setLineWidth(
         VectorscopeSettings::graticuleLineWidth);
 
-    // Preserve the established screen geometry. The dedicated PAL/video
-    // renderer keeps the PAL-specific scale that was already in use before
-    // this refactor; the refactor changes ownership, not calibration.
+    // Match analyzer legal-range chroma geometry to the graticule.
+    // The analyzer uses a 0.5 image radius and 10-bit legal chroma has
+    // +/-448 codes around 512, while the graticule uses a 0.45 radius.
+    // 0.5 * (448/512) * (36/35) == 0.45 exactly.
+    // Use the same calibration for both PC and Video/Spout renderers.
     analyzer_.setScale(
-        profile_ == Profile::Video
-        ? VectorscopeSettings::scale * (36.0 / 35.0)
-        : VectorscopeSettings::scale);
+        VectorscopeSettings::scale * (36.0 / 35.0));
 
     if (profile_ == Profile::Video)
     {
@@ -129,10 +497,15 @@ void VectorscopeRenderer::setHorizontalWindow(
     }
 
     horizontalZoomFactor_ = zoomFactor;
+    horizontalScrollPosition_ =
+        std::clamp(
+            scrollPosition,
+            0.0,
+            1.0);
 
     analyzer_.setHorizontalWindow(
         zoomFactor,
-        scrollPosition);
+        horizontalScrollPosition_);
 }
 
 void VectorscopeRenderer::setPresentationInfo(
@@ -149,6 +522,11 @@ void VectorscopeRenderer::moveAnalyzerToThread(QThread* thread)
 const QImage& VectorscopeRenderer::image() const
 {
     return image_;
+}
+
+const VectorscopeRenderTimings& VectorscopeRenderer::renderTimings() const noexcept
+{
+    return renderTimings_;
 }
 
 QRectF VectorscopeRenderer::contentRect() const
@@ -387,6 +765,11 @@ QRectF VectorscopeRenderer::videoScopeRect(
 
 void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
 {
+    renderTimings_ = {};
+
+    QElapsedTimer phaseTimer;
+    phaseTimer.start();
+
     const QRectF bounds = contentRect();
 
     QRectF topLeftCard;
@@ -414,20 +797,86 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
         scopeWidth,
         scopeHeight);
 
+    const bool gamutError =
+        hasPalCompositeGamutError(
+            frame,
+            selectedLine_,
+            horizontalZoomFactor_,
+            horizontalScrollPosition_);
+
+    // Maximum chroma magnitude on the selected line. Normalize against
+    // the largest 100% BT.601 colour-bar vector computed from the exact same
+    // colorBar()/rgbToCbCr() definitions used by the vectorscope targets.
+    // This keeps the chroma meter and target geometry mathematically tied.
+    double maximumChroma = 0.0;
+
+    if (!frame.u.empty() &&
+        frame.u.size() == frame.v.size())
+    {
+        std::size_t firstSample = 0;
+        std::size_t lastSample = frame.u.size();
+
+        if (selectedLine_ >= 0 &&
+            selectedLine_ < frame.height)
+        {
+            firstSample =
+                static_cast<std::size_t>(selectedLine_) *
+                static_cast<std::size_t>(frame.width);
+
+            lastSample =
+                std::min(
+                    frame.u.size(),
+                    firstSample +
+                        static_cast<std::size_t>(frame.width));
+        }
+
+        constexpr double chromaCenter = 32768.0;
+
+        const double chromaFullScale =
+            referenceChromaMagnitude16Bit(
+                VideoColorStandard::Rec601_625);
+
+        for (std::size_t i = firstSample;
+            i < lastSample;
+            ++i)
+        {
+            const double u =
+                static_cast<double>(frame.u[i]) -
+                chromaCenter;
+
+            const double v =
+                static_cast<double>(frame.v[i]) -
+                chromaCenter;
+
+            maximumChroma =
+                std::max(
+                    maximumChroma,
+                    std::hypot(u, v) /
+                        chromaFullScale);
+        }
+    }
+
+    graticule_.setChromaMagnitude(
+        maximumChroma);
+
     analyzer_.analyze(frame);
 
+    const auto& analyzerTimings =
+        analyzer_.renderTimings();
+
+    renderTimings_.analyzerUs =
+        analyzerTimings.setupUs +
+        analyzerTimings.statisticsUs +
+        analyzerTimings.traceUs;
+
+    renderTimings_.glowPersistenceUs =
+        analyzerTimings.glowUs +
+        analyzerTimings.persistenceUs;
+
+    phaseTimer.restart();
     image_.fill(Qt::black);
 
     QPainter painter(&image_);
-
-    if (!analyzer_.image().isNull() &&
-        analyzer_.image().width() == scopeWidth &&
-        analyzer_.image().height() == scopeHeight)
-    {
-        painter.drawImage(
-            scopeRect.topLeft(),
-            analyzer_.image());
-    }
 
     painter.setRenderHint(
         QPainter::Antialiasing,
@@ -464,6 +913,32 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
             1.0);
     }
 
+    if (!analyzer_.image().isNull() &&
+        analyzer_.image().width() == scopeWidth &&
+        analyzer_.image().height() == scopeHeight)
+    {
+        painter.save();
+        painter.setCompositionMode(
+            QPainter::CompositionMode_Screen);
+        painter.drawImage(
+            scopeRect.topLeft(),
+            analyzer_.image());
+        painter.restore();
+    }
+
+    drawGamutStatus(
+        painter,
+        scopeRect,
+        gamutError,
+        profile_ == Profile::Video,
+        bottomRightCard);
+
+    renderTimings_.composeUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
+
     if (profile_ == Profile::Screen)
     {
         composeScreen(painter, bounds, scopeRect);
@@ -479,6 +954,10 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
             bottomLeftCard,
             bottomRightCard);
     }
+
+    renderTimings_.overlayUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
 }
 
 void VectorscopeRenderer::composeScreen(

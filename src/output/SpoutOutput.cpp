@@ -21,7 +21,10 @@
 
 #include <QByteArray>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QPainter>
+
+#include <chrono>
 
 #include <utility>
 
@@ -146,6 +149,7 @@ public:
         device = nullptr;
         context = nullptr;
         active = false;
+        lastSubmitTimestampUs = 0;
     }
 
     QString senderName;
@@ -160,6 +164,7 @@ public:
 
     bool active = false;
     bool openFailureReported = false;
+    qint64 lastSubmitTimestampUs = 0;
     bool inputSignalValid = true;
 };
 
@@ -188,8 +193,36 @@ bool SpoutOutput::isActive() const noexcept
     return d_->active;
 }
 
-void SpoutOutput::submitImage(const QImage& image)
+void SpoutOutput::submitImage(
+    const QImage& image)
 {
+    submitTimedImage(
+        image,
+        0);
+}
+
+void SpoutOutput::submitTimedImage(
+    const QImage& image,
+    qint64 dispatchTimestampUs)
+{
+    using Clock = std::chrono::steady_clock;
+
+    const qint64 startTimestampUs =
+        static_cast<qint64>(
+            std::chrono::duration_cast<
+                std::chrono::microseconds>(
+                    Clock::now().time_since_epoch())
+            .count());
+
+    const std::uint64_t queueDelayUs =
+        dispatchTimestampUs > 0 &&
+        startTimestampUs > dispatchTimestampUs
+        ? static_cast<std::uint64_t>(
+            startTimestampUs - dispatchTimestampUs)
+        : 0u;
+
+    QElapsedTimer sendTimer;
+    sendTimer.start();
     if (image.isNull())
     {
         return;
@@ -238,6 +271,33 @@ void SpoutOutput::submitImage(const QImage& image)
         0);
 
     d_->sender.SendTexture(d_->uploadTexture.Get());
+
+    const std::uint64_t sendUs =
+        static_cast<std::uint64_t>(
+            sendTimer.nsecsElapsed() / 1000);
+
+    const qint64 completeTimestampUs =
+        static_cast<qint64>(
+            std::chrono::duration_cast<
+                std::chrono::microseconds>(
+                    Clock::now().time_since_epoch())
+            .count());
+
+    const std::uint64_t intervalUs =
+        d_->lastSubmitTimestampUs > 0 &&
+        completeTimestampUs > d_->lastSubmitTimestampUs
+        ? static_cast<std::uint64_t>(
+            completeTimestampUs -
+            d_->lastSubmitTimestampUs)
+        : 0u;
+
+    d_->lastSubmitTimestampUs =
+        completeTimestampUs;
+
+    emit submissionTiming(
+        queueDelayUs,
+        sendUs,
+        intervalUs);
 }
 
 void SpoutOutput::setInputSignalValid(bool valid)

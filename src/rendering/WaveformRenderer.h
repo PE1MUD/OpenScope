@@ -10,6 +10,7 @@
 #include <QRectF>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 class QPainter;
@@ -22,6 +23,34 @@ struct WaveformSettings
 {
     int fillDensity = 0;
     bool color = false;
+};
+
+struct WaveformRenderTimings
+{
+    std::uint64_t persistenceUs = 0;
+    std::uint64_t traceUs = 0;
+    std::uint64_t tracePrepUs = 0;
+    std::uint64_t traceRasterUs = 0;
+    std::uint64_t composeUs = 0;
+    std::uint64_t glowUs = 0;
+    std::uint64_t overlayUs = 0;
+    bool traceParallel = false;
+    bool outputSizeChanged = false;
+    bool outputBufferCapacityGrew = false;
+    bool resamplerCacheRebuilt = false;
+    std::uint32_t traceJobCount = 0;
+    double beamCoreRadiusPx = 0.0;
+    std::int32_t beamCoreMarginPx = 0;
+    std::uint32_t glowDirtyTiles = 0;
+    std::uint32_t glowTotalTiles = 0;
+    std::uint32_t glowHorizontalPass1Tiles = 0;
+    std::uint32_t glowVerticalPass1Tiles = 0;
+    std::uint32_t glowHorizontalPass2Tiles = 0;
+    std::uint32_t glowVerticalPass2Tiles = 0;
+    std::int32_t glowActiveX = 0;
+    std::int32_t glowActiveY = 0;
+    std::int32_t glowActiveWidth = 0;
+    std::int32_t glowActiveHeight = 0;
 };
 
 class WaveformRenderer final : public Analyzer
@@ -53,11 +82,18 @@ public:
     [[nodiscard]] const QImage& image() const;
     [[nodiscard]] const std::vector<float>& visibleLumaVolts() const noexcept;
     [[nodiscard]] const std::vector<float>& fullLumaVolts() const noexcept;
+    [[nodiscard]] const WaveformRenderTimings& renderTimings() const noexcept;
 
     void setChromaFillIntensity(
         int intensity);
 
     void setColor(bool enabled);
+
+    using TraceJobExecutor = std::function<void(
+        std::size_t,
+        const std::function<void(std::size_t)>&)>;
+
+    void setTraceJobExecutor(TraceJobExecutor executor);
     void setLineInfoOverlayEnabled(bool enabled, bool palOutput = false);
 
     void setAspectRatio(
@@ -81,7 +117,9 @@ private:
 
     void composeTraceImage();
     void drawLineInfoOverlay(QPainter& painter);
-    void plotLuminanceTrace();
+    void plotLuminanceTraceRange(
+        int firstPixelX,
+        int lastPixelX);
 
     void plotBeam(
         double x,
@@ -89,7 +127,9 @@ private:
         int intensity,
         int red,
         int green,
-        int blue);
+        int blue,
+        int clipFirstX = 0,
+        int clipLastX = -1);
 
     void plotSegment(
         double x0,
@@ -99,7 +139,9 @@ private:
         int intensity,
         int red,
         int green,
-        int blue);
+        int blue,
+        int clipFirstX = 0,
+        int clipLastX = -1);
 
     void addChromaFillPixel(
         int x,
@@ -160,10 +202,15 @@ private:
     bool lineInfoOverlayPalOutput_ = false;
     int chromaFillIntensity_ = 64;
 
+    TraceJobExecutor traceJobExecutor_;
+
     double inputSampleClockHz_ = 13'500'000.0;
     int inputSampleWidth_ = 720;
 
     WaveformSettings settings_;
+    WaveformRenderTimings renderTimings_;
+    bool outputSizeChangedSinceRender_ = false;
+    bool outputBufferCapacityGrewSinceRender_ = false;
 
     OpenScopeSettings::AspectRatio aspectRatio_ =
         OpenScopeSettings::AspectRatio::Ratio16x9;

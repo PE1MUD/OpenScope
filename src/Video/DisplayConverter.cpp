@@ -156,6 +156,608 @@ void DisplayConverter::convertRange(
     }
 }
 
+bool DisplayConverter::convertNativeRange(
+    const Yuv444Frame& frame,
+    const std::uint16_t* luma,
+    QRgb* outputPixels,
+    int outputStridePixels,
+    int firstOutputY,
+    int lastOutputY,
+    DisplayPerformance& performance) const
+{
+    performance = {};
+
+    if (implementation_ !=
+            DisplayConversionImplementation::Avx2 ||
+        luma == nullptr ||
+        outputPixels == nullptr ||
+        outputStridePixels < frame.width ||
+        frame.width <= 0 ||
+        frame.height <= 0 ||
+        frame.u.empty() ||
+        frame.v.empty() ||
+        displayGamma_ != 1.0 ||
+        highlightedLine_ >= 0 ||
+        highlightedEndX_ >= 0)
+    {
+        return false;
+    }
+
+    firstOutputY = std::clamp(
+        firstOutputY,
+        0,
+        frame.height);
+
+    lastOutputY = std::clamp(
+        lastOutputY,
+        firstOutputY,
+        frame.height);
+
+    if (firstOutputY >= lastOutputY)
+    {
+        return true;
+    }
+
+    const std::size_t sampleCount =
+        static_cast<std::size_t>(frame.width) *
+        static_cast<std::size_t>(frame.height);
+
+    if (frame.u.size() < sampleCount ||
+        frame.v.size() < sampleCount)
+    {
+        return false;
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+
+    const __m256i yOffset =
+        _mm256_set1_epi32(16);
+
+    const __m256i chromaOffset =
+        _mm256_set1_epi32(128);
+
+    const __m256i coefficientY =
+        _mm256_set1_epi32(298);
+
+    const __m256i coefficientRV =
+        _mm256_set1_epi32(409);
+
+    const __m256i coefficientGU =
+        _mm256_set1_epi32(100);
+
+    const __m256i coefficientGV =
+        _mm256_set1_epi32(208);
+
+    const __m256i coefficientBU =
+        _mm256_set1_epi32(516);
+
+    const __m256i rounding =
+        _mm256_set1_epi32(128);
+
+    const __m256i alpha =
+        _mm256_set1_epi32(
+            static_cast<int>(0xff000000u));
+
+    performance.setupUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    timer.restart();
+
+    for (int y = firstOutputY;
+        y < lastOutputY;
+        ++y)
+    {
+        const std::size_t lineOffset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(frame.width);
+
+        const std::uint16_t* yy =
+            luma + lineOffset;
+
+        const std::uint16_t* u =
+            frame.u.data() + lineOffset;
+
+        const std::uint16_t* v =
+            frame.v.data() + lineOffset;
+
+        QRgb* dst =
+            outputPixels +
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(outputStridePixels);
+
+        int x = 0;
+
+        for (;
+            x + 7 < frame.width;
+            x += 8)
+        {
+            const __m128i y16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        yy + x));
+
+            const __m128i u16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        u + x));
+
+            const __m128i v16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        v + x));
+
+            __m256i y32 =
+                _mm256_cvtepu16_epi32(y16);
+
+            __m256i u32 =
+                _mm256_cvtepu16_epi32(u16);
+
+            __m256i v32 =
+                _mm256_cvtepu16_epi32(v16);
+
+            y32 = _mm256_sub_epi32(
+                _mm256_srli_epi32(y32, 8),
+                yOffset);
+
+            u32 = _mm256_sub_epi32(
+                _mm256_srli_epi32(u32, 8),
+                chromaOffset);
+
+            v32 = _mm256_sub_epi32(
+                _mm256_srli_epi32(v32, 8),
+                chromaOffset);
+
+            const __m256i c =
+                _mm256_mullo_epi32(
+                    y32,
+                    coefficientY);
+
+            __m256i red =
+                _mm256_srai_epi32(
+                    _mm256_add_epi32(
+                        _mm256_add_epi32(
+                            c,
+                            _mm256_mullo_epi32(
+                                v32,
+                                coefficientRV)),
+                        rounding),
+                    8);
+
+            __m256i green =
+                _mm256_srai_epi32(
+                    _mm256_add_epi32(
+                        _mm256_sub_epi32(
+                            _mm256_sub_epi32(
+                                c,
+                                _mm256_mullo_epi32(
+                                    u32,
+                                    coefficientGU)),
+                            _mm256_mullo_epi32(
+                                v32,
+                                coefficientGV)),
+                        rounding),
+                    8);
+
+            __m256i blue =
+                _mm256_srai_epi32(
+                    _mm256_add_epi32(
+                        _mm256_add_epi32(
+                            c,
+                            _mm256_mullo_epi32(
+                                u32,
+                                coefficientBU)),
+                        rounding),
+                    8);
+
+            red = clampInt32ToByteRange(red);
+            green = clampInt32ToByteRange(green);
+            blue = clampInt32ToByteRange(blue);
+
+            __m256i pixels = alpha;
+
+            pixels = _mm256_or_si256(
+                pixels,
+                _mm256_slli_epi32(
+                    red,
+                    16));
+
+            pixels = _mm256_or_si256(
+                pixels,
+                _mm256_slli_epi32(
+                    green,
+                    8));
+
+            pixels = _mm256_or_si256(
+                pixels,
+                blue);
+
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(
+                    dst + x),
+                pixels);
+        }
+
+        for (;
+            x < frame.width;
+            ++x)
+        {
+            const int y8 =
+                static_cast<int>(yy[x] >> 8) - 16;
+
+            const int u8 =
+                static_cast<int>(u[x] >> 8) - 128;
+
+            const int v8 =
+                static_cast<int>(v[x] >> 8) - 128;
+
+            const int c = 298 * y8;
+
+            const int r = std::clamp(
+                (c + 409 * v8 + 128) >> 8,
+                0,
+                255);
+
+            const int g = std::clamp(
+                (c - 100 * u8 - 208 * v8 + 128) >> 8,
+                0,
+                255);
+
+            const int b = std::clamp(
+                (c + 516 * u8 + 128) >> 8,
+                0,
+                255);
+
+            dst[x] = qRgb(r, g, b);
+        }
+    }
+
+    performance.colorConversionUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    return true;
+}
+
+bool DisplayConverter::convertNativePair(
+    const Yuv444Frame& frame,
+    const std::uint16_t* firstLuma,
+    const std::uint16_t* secondLuma,
+    QImage& firstImage,
+    QImage& secondImage,
+    DisplayPerformance& performance) const
+{
+    performance = {};
+
+    // This path is deliberately narrow. It is for the fixed 720x576
+    // video Spout path where no scaling/highlight/gamma operation is
+    // required. Falling back keeps every other display use unchanged.
+    if (implementation_ !=
+            DisplayConversionImplementation::Avx2 ||
+        firstLuma == nullptr ||
+        secondLuma == nullptr ||
+        frame.width <= 0 ||
+        frame.height <= 0 ||
+        frame.u.empty() ||
+        frame.v.empty() ||
+        displayGamma_ != 1.0 ||
+        highlightedLine_ >= 0 ||
+        highlightedEndX_ >= 0)
+    {
+        return false;
+    }
+
+    const std::size_t sampleCount =
+        static_cast<std::size_t>(frame.width) *
+        static_cast<std::size_t>(frame.height);
+
+    if (frame.u.size() < sampleCount ||
+        frame.v.size() < sampleCount)
+    {
+        return false;
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+
+    firstImage = QImage(
+        frame.width,
+        frame.height,
+        QImage::Format_RGB32);
+
+    secondImage = QImage(
+        frame.width,
+        frame.height,
+        QImage::Format_RGB32);
+
+    if (firstImage.isNull() ||
+        secondImage.isNull())
+    {
+        firstImage = {};
+        secondImage = {};
+        return false;
+    }
+
+    performance.allocationUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    timer.restart();
+
+    const __m256i yOffset =
+        _mm256_set1_epi32(16);
+
+    const __m256i chromaOffset =
+        _mm256_set1_epi32(128);
+
+    const __m256i coefficientY =
+        _mm256_set1_epi32(298);
+
+    const __m256i coefficientRV =
+        _mm256_set1_epi32(409);
+
+    const __m256i coefficientGU =
+        _mm256_set1_epi32(100);
+
+    const __m256i coefficientGV =
+        _mm256_set1_epi32(208);
+
+    const __m256i coefficientBU =
+        _mm256_set1_epi32(516);
+
+    const __m256i rounding =
+        _mm256_set1_epi32(128);
+
+    const __m256i alpha =
+        _mm256_set1_epi32(
+            static_cast<int>(0xff000000u));
+
+    performance.setupUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    timer.restart();
+
+    for (int y = 0;
+        y < frame.height;
+        ++y)
+    {
+        const std::size_t lineOffset =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(frame.width);
+
+        const std::uint16_t* y1 =
+            firstLuma + lineOffset;
+
+        const std::uint16_t* y2 =
+            secondLuma + lineOffset;
+
+        const std::uint16_t* u =
+            frame.u.data() + lineOffset;
+
+        const std::uint16_t* v =
+            frame.v.data() + lineOffset;
+
+        auto* dst1 =
+            reinterpret_cast<QRgb*>(
+                firstImage.scanLine(y));
+
+        auto* dst2 =
+            reinterpret_cast<QRgb*>(
+                secondImage.scanLine(y));
+
+        int x = 0;
+
+        for (;
+            x + 7 < frame.width;
+            x += 8)
+        {
+            const __m128i y1_16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        y1 + x));
+
+            const __m128i y2_16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        y2 + x));
+
+            const __m128i u16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        u + x));
+
+            const __m128i v16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        v + x));
+
+            __m256i yy1 =
+                _mm256_cvtepu16_epi32(y1_16);
+
+            __m256i yy2 =
+                _mm256_cvtepu16_epi32(y2_16);
+
+            __m256i uu =
+                _mm256_cvtepu16_epi32(u16);
+
+            __m256i vv =
+                _mm256_cvtepu16_epi32(v16);
+
+            yy1 = _mm256_sub_epi32(
+                _mm256_srli_epi32(yy1, 8),
+                yOffset);
+
+            yy2 = _mm256_sub_epi32(
+                _mm256_srli_epi32(yy2, 8),
+                yOffset);
+
+            uu = _mm256_sub_epi32(
+                _mm256_srli_epi32(uu, 8),
+                chromaOffset);
+
+            vv = _mm256_sub_epi32(
+                _mm256_srli_epi32(vv, 8),
+                chromaOffset);
+
+            // U/V are identical for both deinterlaced outputs. Do the
+            // chroma arithmetic once and reuse it for both field images.
+            const __m256i rv =
+                _mm256_mullo_epi32(
+                    vv,
+                    coefficientRV);
+
+            const __m256i gu =
+                _mm256_mullo_epi32(
+                    uu,
+                    coefficientGU);
+
+            const __m256i gv =
+                _mm256_mullo_epi32(
+                    vv,
+                    coefficientGV);
+
+            const __m256i bu =
+                _mm256_mullo_epi32(
+                    uu,
+                    coefficientBU);
+
+            const auto makePixels =
+                [&](const __m256i yy)
+                {
+                    const __m256i c =
+                        _mm256_mullo_epi32(
+                            yy,
+                            coefficientY);
+
+                    __m256i red =
+                        _mm256_srai_epi32(
+                            _mm256_add_epi32(
+                                _mm256_add_epi32(
+                                    c,
+                                    rv),
+                                rounding),
+                            8);
+
+                    __m256i green =
+                        _mm256_srai_epi32(
+                            _mm256_add_epi32(
+                                _mm256_sub_epi32(
+                                    _mm256_sub_epi32(
+                                        c,
+                                        gu),
+                                    gv),
+                                rounding),
+                            8);
+
+                    __m256i blue =
+                        _mm256_srai_epi32(
+                            _mm256_add_epi32(
+                                _mm256_add_epi32(
+                                    c,
+                                    bu),
+                                rounding),
+                            8);
+
+                    red = clampInt32ToByteRange(red);
+                    green = clampInt32ToByteRange(green);
+                    blue = clampInt32ToByteRange(blue);
+
+                    __m256i pixels = alpha;
+
+                    pixels = _mm256_or_si256(
+                        pixels,
+                        _mm256_slli_epi32(
+                            red,
+                            16));
+
+                    pixels = _mm256_or_si256(
+                        pixels,
+                        _mm256_slli_epi32(
+                            green,
+                            8));
+
+                    pixels = _mm256_or_si256(
+                        pixels,
+                        blue);
+
+                    return pixels;
+                };
+
+            const __m256i pixels1 =
+                makePixels(yy1);
+
+            const __m256i pixels2 =
+                makePixels(yy2);
+
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(
+                    dst1 + x),
+                pixels1);
+
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(
+                    dst2 + x),
+                pixels2);
+        }
+
+        for (;
+            x < frame.width;
+            ++x)
+        {
+            const int yy1 =
+                static_cast<int>(y1[x] >> 8) - 16;
+
+            const int yy2 =
+                static_cast<int>(y2[x] >> 8) - 16;
+
+            const int uu =
+                static_cast<int>(u[x] >> 8) - 128;
+
+            const int vv =
+                static_cast<int>(v[x] >> 8) - 128;
+
+            const int rv = 409 * vv;
+            const int gu = 100 * uu;
+            const int gv = 208 * vv;
+            const int bu = 516 * uu;
+
+            const auto makePixel =
+                [&](int yy)
+                {
+                    const int c = 298 * yy;
+
+                    const int r = std::clamp(
+                        (c + rv + 128) >> 8,
+                        0,
+                        255);
+
+                    const int g = std::clamp(
+                        (c - gu - gv + 128) >> 8,
+                        0,
+                        255);
+
+                    const int b = std::clamp(
+                        (c + bu + 128) >> 8,
+                        0,
+                        255);
+
+                    return qRgb(r, g, b);
+                };
+
+            dst1[x] = makePixel(yy1);
+            dst2[x] = makePixel(yy2);
+        }
+    }
+
+    performance.colorConversionUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    return true;
+}
+
 QImage DisplayConverter::convertScalar(
     const Yuv444Frame& frame,
     const std::uint16_t* luma,

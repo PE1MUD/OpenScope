@@ -6,6 +6,25 @@
 #include <QImage>
 #include <QObject>
 
+struct VectorscopeAnalyzerTimings
+{
+    std::uint64_t setupUs = 0;
+    std::uint64_t statisticsUs = 0;
+    std::uint64_t traceUs = 0;
+    std::uint64_t glowUs = 0;
+    std::uint64_t persistenceUs = 0;
+    std::uint32_t glowDirtyTiles = 0;
+    std::uint32_t glowTotalTiles = 0;
+    std::uint32_t glowHorizontalPass1Tiles = 0;
+    std::uint32_t glowVerticalPass1Tiles = 0;
+    std::uint32_t glowHorizontalPass2Tiles = 0;
+    std::uint32_t glowVerticalPass2Tiles = 0;
+    std::int32_t glowActiveX = 0;
+    std::int32_t glowActiveY = 0;
+    std::int32_t glowActiveWidth = 0;
+    std::int32_t glowActiveHeight = 0;
+};
+
 class VectorscopeAnalyzer : public QObject
 {
     Q_OBJECT
@@ -29,6 +48,7 @@ public:
     void analyze(const Yuv444Frame& frame);
 
     const QImage& image() const;
+    [[nodiscard]] const VectorscopeAnalyzerTimings& renderTimings() const noexcept;
 
 private:
     static constexpr int kAllLinesWidth = 360;
@@ -65,4 +85,5 @@ private:
     int glow_ = 50;
     int horizontalZoomFactor_ = 1;
     double horizontalScrollPosition_ = 0.0;
+    VectorscopeAnalyzerTimings renderTimings_;
 };

@@ -7,9 +7,31 @@
 #include <QImage>
 #include <QRectF>
 #include <QString>
+#include <cstdint>
 #include <QThread>
 
 class QPainter;
+
+struct VectorscopeRenderTimings
+{
+    std::uint64_t analyzerUs = 0;
+    std::uint64_t glowPersistenceUs = 0;
+    std::uint64_t composeUs = 0;
+    std::uint64_t overlayUs = 0;
+
+    // Glow workload instrumentation consumed by VideoEngine.
+    // Keep this interface in sync with the waveform renderer stats.
+    std::uint64_t glowDirtyTiles = 0;
+    std::uint64_t glowTotalTiles = 0;
+    std::uint64_t glowHorizontalPass1Tiles = 0;
+    std::uint64_t glowVerticalPass1Tiles = 0;
+    std::uint64_t glowHorizontalPass2Tiles = 0;
+    std::uint64_t glowVerticalPass2Tiles = 0;
+    std::uint64_t glowActiveX = 0;
+    std::uint64_t glowActiveY = 0;
+    std::uint64_t glowActiveWidth = 0;
+    std::uint64_t glowActiveHeight = 0;
+};
 
 struct VectorscopePresentationInfo
 {
@@ -45,6 +67,7 @@ public:
     void moveAnalyzerToThread(QThread* thread);
 
     [[nodiscard]] const QImage& image() const;
+    [[nodiscard]] const VectorscopeRenderTimings& renderTimings() const noexcept;
 
 private:
     [[nodiscard]] QRectF contentRect() const;
@@ -82,4 +105,6 @@ private:
     double contentScaleY_ = 1.0;
     int selectedLine_ = -1;
     int horizontalZoomFactor_ = 1;
+    double horizontalScrollPosition_ = 0.0;
+    VectorscopeRenderTimings renderTimings_;
 };

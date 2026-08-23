@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 #include <span>
 
@@ -25,6 +26,11 @@ public:
     void setImplementation(
         ResamplerImplementation implementation) noexcept;
 
+    [[nodiscard]] std::uint64_t cacheGeneration() const noexcept
+    {
+        return cacheGeneration_;
+    }
+
 private:
     static float sinc(float x);
     float kernel(float distance, float cutoff) const;
@@ -47,6 +53,7 @@ private:
 
     mutable std::vector<CachedOutputSample> cache_;
     mutable std::vector<float> cachedWeights_;
+    mutable std::uint64_t cacheGeneration_ = 0;
 
     ResamplerImplementation implementation_ =
         ResamplerImplementation::Scalar;

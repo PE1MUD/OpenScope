@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "processing/SignalReconstructor.h"
 #include "processing/VideoDeinterlacer.h"
 #include "processing/NoiseReducer.h"
+#include "processing/LumaHighFrequencyCompensator.h"
 #include "rendering/WaveformRenderer.h"
 #include "util/PerformanceStats.h"
 #include "video/DisplayConverter.h"
@@ -65,11 +67,22 @@ public:
     void setVideoHighlightEnabled(
         bool enabled);
 
+    void resetDisplayPresentation();
+
     void setNoiseReductionEnabled(
         bool enabled);
 
     void setNoiseReductionIntensity(
         int intensity);
+
+    void setLumaCompensationEnabled(
+        bool enabled);
+
+    void setLumaCompensationGainHundredthsDb(
+        int gainHundredthsDb);
+
+    void setLumaCompensationSourceEnabled(
+        bool enabled);
 
     void setWaveformOutputSize(
         int width,
@@ -113,6 +126,8 @@ public:
 
     void setVectorscopeVideoEnabled(bool enabled);
 
+    void setWaveformVideoEnabled(bool enabled);
+
     void setVectorscopePresentationInfo(
         const VectorscopePresentationInfo& info);
 
@@ -124,6 +139,11 @@ public:
 
     PerformanceSnapshot performanceSnapshot() const;
 
+    void recordVideoSpoutTiming(
+        std::uint64_t queueDelayUs,
+        std::uint64_t sendUs,
+        std::uint64_t intervalUs);
+
     QImage captureHighResolutionSnapshot();
 
 signals:
@@ -133,7 +153,8 @@ signals:
         const QImage& image);
 
     void videoSpoutChanged(
-        const QImage& image);
+        const QImage& image,
+        qint64 dispatchTimestampUs);
 
     void waveformChanged(
         const QImage& image);
@@ -202,9 +223,12 @@ private:
     enum class DisplayPhase
     {
         Idle,
+        NoiseReduction,
         Deinterlace,
         ConvertFirst,
-        ConvertSecond
+        SpoutFirst,
+        ConvertSecond,
+        SpoutSecond
     };
 
     //struct ReconstructedLumaFrameSlot
@@ -246,6 +270,18 @@ private:
 
     std::atomic<int> noiseReductionIntensity_{
         50
+    };
+
+    std::atomic<bool> lumaCompensationEnabled_{
+        false
+    };
+
+    std::atomic<int> lumaCompensationGainHundredthsDb_{
+        60
+    };
+
+    std::atomic<bool> lumaCompensationSourceEnabled_{
+        true
     };
 
     std::atomic<bool> spoutVideoEnabled_{
@@ -310,6 +346,7 @@ private:
     std::atomic<double> vectorscopeVideoContentScaleX_{ 0.80 };
     std::atomic<double> vectorscopeVideoContentScaleY_{ 0.90 };
     std::atomic_bool vectorscopeVideoEnabled_{ false };
+    std::atomic_bool waveformVideoEnabled_{ false };
 
     std::mutex vectorscopePresentationMutex_;
     VectorscopePresentationInfo vectorscopePresentationInfo_;
@@ -410,7 +447,9 @@ private:
     std::array<
         DisplayConverter,
         2> displayConverters_;
-    DisplayConverter spoutVideoConverter_;
+    std::array<
+        DisplayConverter,
+        2> spoutVideoConverters_;
     WaveformRenderer waveformScreenRenderer_;
     WaveformRenderer waveformVideoRenderer_;
     VectorscopeRenderer vectorscopeScreenRenderer_{
@@ -422,6 +461,7 @@ private:
     };
 
     NoiseReducer noiseReducer_;
+    LumaHighFrequencyCompensator lumaHighFrequencyCompensator_;
     Yuv444Frame noiseReducedFrame_;
 
     VideoDeinterlacer videoDeinterlacer_;
@@ -441,6 +481,10 @@ private:
         std::size_t workerIndex);
     void runDisplayPhase(
         DisplayPhase phase);
+    void runWaveformTraceJobs(
+        std::size_t jobCount,
+        const std::function<void(std::size_t)>& job);
+    bool tryRunWaveformAssistJob();
     void displayPresenterLoop();
     void waveformWorkerLoop();
     void vectorscopeWorkerLoop();
@@ -475,7 +519,7 @@ private:
 
     std::array<
         std::jthread,
-        1> displayPhaseWorkers_;
+        2> displayPhaseWorkers_;
 
     std::mutex displayPhaseMutex_;
     std::condition_variable displayPhaseCondition_;
@@ -490,6 +534,10 @@ private:
 
     const Yuv444Frame* displayPhaseFrame_ = nullptr;
     const std::uint16_t* displayPhaseLuma_ = nullptr;
+
+    const Yuv444Frame* displayNoiseSource_ = nullptr;
+    Yuv444Frame* displayNoiseDestination_ = nullptr;
+    int displayNoiseIntensity_ = 0;
 
     QRgb* displayPhaseOutputPixels_ = nullptr;
     int displayPhaseOutputStridePixels_ = 0;
@@ -507,6 +555,18 @@ private:
         std::atomic<std::uint64_t>,
         2> displayDeinterlaceWorkerUs_{};
 
+    // Opportunistic low-priority work for the existing display phase worker.
+    // The waveform thread also consumes these jobs itself.  Display phases
+    // always take priority; helper work is checked only between small stripes.
+    std::mutex waveformAssistMutex_;
+    std::condition_variable waveformAssistDoneCondition_;
+    std::function<void(std::size_t)> waveformAssistJob_;
+    std::size_t waveformAssistJobCount_ = 0;
+    std::size_t waveformAssistNextJob_ = 0;
+    std::size_t waveformAssistJobsRunning_ = 0;
+    bool waveformAssistActive_ = false;
+    std::atomic<std::uint64_t> waveformAssistGeneration_{ 0 };
+
     std::thread displayPresenterThread_;
     std::mutex displayPresenterMutex_;
     std::condition_variable displayPresenterCondition_;
@@ -523,6 +583,8 @@ private:
 
     QImage lastPresentedFirst_;
     QImage lastPresentedSecond_;
+    QImage lastPresentedSpoutFirst_;
+    QImage lastPresentedSpoutSecond_;
     bool lastPresentedPairValid_ = false;
 
     std::atomic<int> waveformZoomFactor_{ 1 };

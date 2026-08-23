@@ -1,10 +1,13 @@
 #include "widgets/ControlWidget.h"
 
 #include <algorithm>
+#include <functional>
+#include <utility>
 #include <QAbstractButton>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QHBoxLayout>
+#include <QFont>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
@@ -37,6 +40,20 @@ namespace
 
             setMaximumHeight(
                 22);
+        }
+
+        void setValueFormatter(
+            std::function<QString(int)> formatter)
+        {
+            valueFormatter_ =
+                std::move(formatter);
+
+            update();
+        }
+
+        void setDoubleClickResetsToMidpoint(bool enabled)
+        {
+            doubleClickResetsToMidpoint_ = enabled;
         }
 
     protected:
@@ -96,6 +113,26 @@ namespace
                 event);
         }
 
+        void mouseDoubleClickEvent(
+            QMouseEvent* event) override
+        {
+            if (doubleClickResetsToMidpoint_ &&
+                event->button() == Qt::LeftButton)
+            {
+                const int midpoint =
+                    minimum() +
+                    (maximum() - minimum()) / 2;
+
+                setValue(midpoint);
+                emit sliderReleased();
+
+                event->accept();
+                return;
+            }
+
+            QSlider::mouseDoubleClickEvent(event);
+        }
+
         void paintEvent(
             QPaintEvent* event) override
         {
@@ -113,10 +150,13 @@ namespace
                     QStyle::SC_SliderHandle,
                     this);
 
-            constexpr int kValueWidth = 38;
+            const int valueWidth =
+                valueFormatter_
+                ? 58
+                : 38;
 
             handleRect.setWidth(
-                kValueWidth);
+                valueWidth);
 
             handleRect.moveCenter(
                 style()->subControlRect(
@@ -176,19 +216,26 @@ namespace
             painter.drawText(
                 handleRect,
                 Qt::AlignCenter,
-                QString::number(
-                    value()));
+                valueFormatter_
+                ? valueFormatter_(value())
+                : QString::number(value()));
         }
 
     private:
+        std::function<QString(int)> valueFormatter_;
+        bool doubleClickResetsToMidpoint_ = false;
+
         void setValueFromMouse(
             const QPointF& position)
         {
-            constexpr int kValueWidth = 38;
+            const int valueWidth =
+                valueFormatter_
+                ? 58
+                : 38;
 
             const int span =
                 (std::max)(
-                    width() - kValueWidth,
+                    width() - valueWidth,
                     1);
 
             const int pixelPosition =
@@ -196,7 +243,7 @@ namespace
                     static_cast<int>(
                         std::lround(
                             position.x() -
-                            kValueWidth * 0.5)),
+                            valueWidth * 0.5)),
                     0,
                     span);
 
@@ -216,7 +263,8 @@ namespace
         int minimum,
         int maximum,
         int value,
-        QWidget* parent)
+        QWidget* parent,
+        std::function<QString(int)> valueFormatter = {})
     {
         auto* row =
             new QWidget(parent);
@@ -243,10 +291,16 @@ namespace
         label->setFixedWidth(
             150);
 
-        slider =
+        auto* valueSlider =
             new ValueSlider(
                 Qt::Horizontal,
                 row);
+
+        valueSlider->setValueFormatter(
+            std::move(valueFormatter));
+
+        slider =
+            valueSlider;
 
         slider->setRange(
             minimum,
@@ -367,6 +421,238 @@ ControlWidget::ControlWidget(
     tabs->addTab(
         displayTab,
         "Display");
+
+    // ------------------------------------------------------------
+    // Calibration
+    // ------------------------------------------------------------
+    auto* calibrationTab =
+        new QWidget(tabs);
+
+    auto* calibrationLayout =
+        new QVBoxLayout(calibrationTab);
+
+    calibrationLayout->setContentsMargins(
+        6,
+        4,
+        6,
+        4);
+
+    calibrationLayout->setSpacing(4);
+
+    auto* deckLinkHeading =
+        new QLabel(
+            "Blackmagic composite input gain",
+            calibrationTab);
+
+    QFont headingFont =
+        deckLinkHeading->font();
+    headingFont.setBold(true);
+    deckLinkHeading->setFont(headingFont);
+
+    calibrationLayout->addWidget(
+        deckLinkHeading);
+
+    compositeGainStatusLabel_ =
+        new QLabel(
+            "Waiting for DeckLink device...",
+            calibrationTab);
+
+    calibrationLayout->addWidget(
+        compositeGainStatusLabel_);
+
+    QWidget* compositeLumaGainRow =
+        createSliderRow(
+            "Composite luma gain",
+            compositeLumaGainSlider_,
+            0,
+            0,
+            0,
+            calibrationTab,
+            [this](int value)
+            {
+                if (compositeLumaGainSlider_ == nullptr)
+                {
+                    return QStringLiteral("1.00x");
+                }
+
+                const int minimum =
+                    compositeLumaGainSlider_->minimum();
+
+                const int maximum =
+                    compositeLumaGainSlider_->maximum();
+
+                const double gain =
+                    maximum > minimum
+                    ? 2.0 *
+                        static_cast<double>(value - minimum) /
+                        static_cast<double>(maximum - minimum)
+                    : 1.0;
+
+                return
+                    QString::number(gain, 'f', 2) +
+                    QStringLiteral("x");
+            });
+
+    static_cast<ValueSlider*>(
+        compositeLumaGainSlider_)
+        ->setDoubleClickResetsToMidpoint(true);
+
+    compositeLumaGainSlider_->setEnabled(false);
+
+    calibrationLayout->addWidget(
+        compositeLumaGainRow);
+
+    QWidget* compositeChromaGainRow =
+        createSliderRow(
+            "Composite chroma gain",
+            compositeChromaGainSlider_,
+            0,
+            0,
+            0,
+            calibrationTab,
+            [this](int value)
+            {
+                if (compositeChromaGainSlider_ == nullptr)
+                {
+                    return QStringLiteral("1.00x");
+                }
+
+                const int minimum =
+                    compositeChromaGainSlider_->minimum();
+
+                const int maximum =
+                    compositeChromaGainSlider_->maximum();
+
+                const double gain =
+                    maximum > minimum
+                    ? 2.0 *
+                        static_cast<double>(value - minimum) /
+                        static_cast<double>(maximum - minimum)
+                    : 1.0;
+
+                return
+                    QString::number(gain, 'f', 2) +
+                    QStringLiteral("x");
+            });
+
+    static_cast<ValueSlider*>(
+        compositeChromaGainSlider_)
+        ->setDoubleClickResetsToMidpoint(true);
+
+    compositeChromaGainSlider_->setEnabled(false);
+
+    calibrationLayout->addWidget(
+        compositeChromaGainRow);
+
+    auto* lumaCompensationHeading =
+        new QLabel(
+            "OpenScope luma response correction",
+            calibrationTab);
+
+    lumaCompensationHeading->setFont(headingFont);
+
+    calibrationLayout->addSpacing(8);
+    calibrationLayout->addWidget(
+        lumaCompensationHeading);
+
+    auto* lumaCompensationCheckBox =
+        new QCheckBox(
+            "Enable Blackmagic luma frequency response correction",
+            calibrationTab);
+
+    lumaCompensationCheckBox->setChecked(
+        settings.control
+            .processing
+            .lumaCompensation
+            .enabled);
+
+    calibrationLayout->addWidget(
+        lumaCompensationCheckBox);
+
+    QSlider* lumaCompensationSlider = nullptr;
+
+    QWidget* lumaCompensationRow =
+        createSliderRow(
+            "Y HF comp @ 5.8 MHz",
+            lumaCompensationSlider,
+            0,
+            100,
+            std::clamp(
+                settings.control
+                    .processing
+                    .lumaCompensation
+                    .gainHundredthsDb,
+                0,
+                100),
+            calibrationTab,
+            [](int value)
+            {
+                return
+                    QString::number(
+                        static_cast<double>(value) / 100.0,
+                        'f',
+                        2) +
+                    " dB";
+            });
+
+    static_cast<ValueSlider*>(
+        lumaCompensationSlider)
+        ->setDoubleClickResetsToMidpoint(true);
+
+    lumaCompensationSlider->setEnabled(
+        lumaCompensationCheckBox->isChecked());
+
+    calibrationLayout->addWidget(
+        lumaCompensationRow);
+
+    calibrationLayout->addStretch();
+
+    connect(
+        compositeLumaGainSlider_,
+        &QSlider::valueChanged,
+        this,
+        &ControlWidget::compositeLumaGainChanged);
+
+    connect(
+        compositeChromaGainSlider_,
+        &QSlider::valueChanged,
+        this,
+        &ControlWidget::compositeChromaGainChanged);
+
+    connect(
+        compositeLumaGainSlider_,
+        &QSlider::sliderReleased,
+        this,
+        &ControlWidget::compositeGainCommitRequested);
+
+    connect(
+        compositeChromaGainSlider_,
+        &QSlider::sliderReleased,
+        this,
+        &ControlWidget::compositeGainCommitRequested);
+
+    connect(
+        lumaCompensationCheckBox,
+        &QCheckBox::toggled,
+        lumaCompensationSlider,
+        &QSlider::setEnabled);
+
+    connect(
+        lumaCompensationCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::lumaCompensationChanged);
+
+    connect(
+        lumaCompensationSlider,
+        &QSlider::valueChanged,
+        this,
+        &ControlWidget::lumaCompensationGainChanged);
+
+    tabs->addTab(
+        calibrationTab,
+        "Calibration");
+
 
     // ------------------------------------------------------------
     // Instrument
@@ -1053,7 +1339,7 @@ void ControlWidget::setHelpTabVisible(
         tabs_->currentIndex() == helpTabIndex_)
     {
         tabs_->setCurrentIndex(
-            1);
+            2);
     }
 
     tabs_->setTabVisible(
@@ -1127,3 +1413,96 @@ void ControlWidget::setAspectRatio(
         aspectRatio ==
         OpenScopeSettings::AspectRatio::Ratio4x3);
 }
+
+void ControlWidget::setCompositeInputGainState(
+    bool lumaAvailable,
+    bool chromaAvailable,
+    int minimumHundredthsDb,
+    int maximumHundredthsDb,
+    int lumaHundredthsDb,
+    int chromaHundredthsDb)
+{
+    if (compositeLumaGainSlider_ == nullptr ||
+        compositeChromaGainSlider_ == nullptr ||
+        compositeGainStatusLabel_ == nullptr)
+    {
+        return;
+    }
+
+    if (maximumHundredthsDb < minimumHundredthsDb)
+    {
+        std::swap(
+            minimumHundredthsDb,
+            maximumHundredthsDb);
+    }
+
+    {
+        const QSignalBlocker lumaBlocker(
+            compositeLumaGainSlider_);
+
+        // When switching away from DeckLink (for example to the Philips
+        // ROM source), keep the last hardware range and thumb position
+        // visible and simply disable the control.  Collapsing the range to
+        // 0..0 made both sliders jump to the far left, which falsely looked
+        // like the calibration had changed.
+        if (lumaAvailable)
+        {
+            compositeLumaGainSlider_->setRange(
+                minimumHundredthsDb,
+                maximumHundredthsDb);
+
+            compositeLumaGainSlider_->setValue(
+                std::clamp(
+                    lumaHundredthsDb,
+                    minimumHundredthsDb,
+                    maximumHundredthsDb));
+        }
+
+        compositeLumaGainSlider_->setEnabled(
+            lumaAvailable);
+    }
+
+    {
+        const QSignalBlocker chromaBlocker(
+            compositeChromaGainSlider_);
+
+        if (chromaAvailable)
+        {
+            compositeChromaGainSlider_->setRange(
+                minimumHundredthsDb,
+                maximumHundredthsDb);
+
+            compositeChromaGainSlider_->setValue(
+                std::clamp(
+                    chromaHundredthsDb,
+                    minimumHundredthsDb,
+                    maximumHundredthsDb));
+        }
+
+        compositeChromaGainSlider_->setEnabled(
+            chromaAvailable);
+    }
+
+    if (lumaAvailable || chromaAvailable)
+    {
+        compositeGainStatusLabel_->setText(
+            QStringLiteral(
+                "DeckLink hardware control  range 0.00x to 2.00x"));
+    }
+    else
+    {
+        const bool hasRememberedDeckLinkRange =
+            compositeLumaGainSlider_->maximum() >
+                compositeLumaGainSlider_->minimum() ||
+            compositeChromaGainSlider_->maximum() >
+                compositeChromaGainSlider_->minimum();
+
+        compositeGainStatusLabel_->setText(
+            hasRememberedDeckLinkRange
+            ? QStringLiteral(
+                "Blackmagic composite gain disabled for current source")
+            : QStringLiteral(
+                "Composite gain control not available on this DeckLink device"));
+    }
+}
+

@@ -276,6 +276,30 @@ OpenScopeSettings SettingsStorage::load() const
         .toInt();
 
     result.control
+        .processing
+        .lumaCompensation
+        .enabled =
+        settings.value(
+            "Control/Processing/LumaCompensation/Enabled",
+            result.control
+            .processing
+            .lumaCompensation
+            .enabled)
+        .toBool();
+
+    result.control
+        .processing
+        .lumaCompensation
+        .gainHundredthsDb =
+        settings.value(
+            "Control/Processing/LumaCompensation/GainHundredthsDb",
+            result.control
+            .processing
+            .lumaCompensation
+            .gainHundredthsDb)
+        .toInt();
+
+    result.control
         .videoOut
         .enabled =
         settings.value(
@@ -552,6 +576,20 @@ void SettingsStorage::save(
         .processing
         .noiseFilter
         .temporalStrength);
+
+    storage.setValue(
+        "Control/Processing/LumaCompensation/Enabled",
+        settings.control
+        .processing
+        .lumaCompensation
+        .enabled);
+
+    storage.setValue(
+        "Control/Processing/LumaCompensation/GainHundredthsDb",
+        settings.control
+        .processing
+        .lumaCompensation
+        .gainHundredthsDb);
 
     storage.setValue(
         "Control/VideoOut/Enabled",

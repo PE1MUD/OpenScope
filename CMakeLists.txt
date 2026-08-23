@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.7.1
+    VERSION 0.7.2
     LANGUAGES C CXX
 )
 
@@ -152,6 +152,8 @@ src/processing/VideoDeinterlacer.cpp
 src/processing/VideoDeinterlacer.h
 src/processing/NoiseReducer.h
 src/processing/NoiseReducer.cpp
+src/processing/LumaHighFrequencyCompensator.h
+src/processing/LumaHighFrequencyCompensator.cpp
 
 src/rendering/WaveformRenderer.h
 src/rendering/WaveformRenderer.cpp

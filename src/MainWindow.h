@@ -11,6 +11,7 @@
 #include <memory>
 
 class QTimer;
+class QThread;
 
 class VectorscopeWidget;
 class VideoEngine;
@@ -22,6 +23,7 @@ class SettingsService;
 class PerformanceWidget;
 class QAction;
 class PhilipsPatternRomSource;
+class SpoutOutput;
 
 class MainWindow : public QMainWindow
 {
@@ -67,6 +69,9 @@ private:
     SettingsService* settingsService_ = nullptr;
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
+
+    QThread* videoSpoutThread_ = nullptr;
+    SpoutOutput* videoSpoutOutput_ = nullptr;
 
     std::unique_ptr<PhilipsPatternRomSource>
         philipsPatternRomSource_;

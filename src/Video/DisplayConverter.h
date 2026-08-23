@@ -36,6 +36,30 @@ public:
         int lastOutputY,
         DisplayPerformance& performance) const;
 
+    // Fast native-size path used by the display workers for one Spout
+    // field. The destination image is allocated by the coordinator; workers
+    // own non-overlapping scanline ranges.
+    bool convertNativeRange(
+        const Yuv444Frame& frame,
+        const std::uint16_t* luma,
+        QRgb* outputPixels,
+        int outputStridePixels,
+        int firstOutputY,
+        int lastOutputY,
+        DisplayPerformance& performance) const;
+
+    // Fast path for the fixed-size 50 fps video Spout output.
+    // Both deinterlaced luma fields share the same U/V planes, so
+    // convert the pair in one native-size AVX2 pass and reuse the
+    // chroma work for both output images.
+    bool convertNativePair(
+        const Yuv444Frame& frame,
+        const std::uint16_t* firstLuma,
+        const std::uint16_t* secondLuma,
+        QImage& firstImage,
+        QImage& secondImage,
+        DisplayPerformance& performance) const;
+
     void setHighlightedLine(int line);
     DisplayConverter();
     void setGamma(double gamma);

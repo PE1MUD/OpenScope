@@ -14,6 +14,7 @@ public:
 
     void setLineWidth(double width);
     void setScale(double scale);
+    void setChromaMagnitude(double normalizedMagnitude);
 
 private:
     void drawAxes(
@@ -28,4 +29,5 @@ private:
 
     double lineWidth_ = 1.0;
     double scale_ = 1.0;
+    double chromaMagnitude_ = 0.0;
 };

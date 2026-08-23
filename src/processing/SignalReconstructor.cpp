@@ -24,6 +24,7 @@ void LineResampler::rebuildCache(
 {
     cachedInputSize_ = inputSize;
     cachedOutputSize_ = outputSize;
+    ++cacheGeneration_;
 
     cache_.clear();
     cache_.resize(outputSize);

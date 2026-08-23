@@ -68,6 +68,8 @@ void VectorscopeAnalyzer::setOutputSize(
 }
 void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 {
+    renderTimings_ = {};
+
     QElapsedTimer timer;
     timer.start();
 
@@ -75,7 +77,11 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
 
     if (selectedLine_ < 0)
     {
+        timer.restart();
         renderAllLines(frame);
+        renderTimings_.traceUs =
+            static_cast<std::uint64_t>(
+                timer.nsecsElapsed() / 1000);
         return;
     }
 
@@ -151,8 +157,9 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
                     viewWidth);
     }
 
-    const qint64 setupUs =
-        timer.nsecsElapsed() / 1000;
+    renderTimings_.setupUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
 
     timer.restart();
 
@@ -283,8 +290,9 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
         maxV = std::max(maxV, frame.v[i]);
     }
 
-    const qint64 statisticsUs =
-        timer.nsecsElapsed() / 1000;
+    renderTimings_.statisticsUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
 
     timer.restart();
 
@@ -429,17 +437,30 @@ void VectorscopeAnalyzer::analyze(const Yuv444Frame& frame)
         }
     }
 
-    const qint64 renderUs =
-        timer.nsecsElapsed() / 1000;
+    renderTimings_.traceUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
 
-    Q_UNUSED(renderUs);
-
+    timer.restart();
     applyGlowPostProcess();
+    renderTimings_.glowUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    timer.restart();
     applyPersistence();
+    renderTimings_.persistenceUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
 }
 const QImage& VectorscopeAnalyzer::image() const
 {
     return image_;
+}
+
+const VectorscopeAnalyzerTimings& VectorscopeAnalyzer::renderTimings() const noexcept
+{
+    return renderTimings_;
 }
 
 void VectorscopeAnalyzer::setSelectedLine(int line)
@@ -823,6 +844,35 @@ void VectorscopeAnalyzer::applyGlowPostProcess()
         static_cast<std::size_t>(lowWidth) *
         static_cast<std::size_t>(lowHeight);
 
+    constexpr int kTileWidth = 64;
+    constexpr int kTileHeight = 32;
+    const int tilesX = (lowWidth + kTileWidth - 1) / kTileWidth;
+    const int tilesY = (lowHeight + kTileHeight - 1) / kTileHeight;
+
+    renderTimings_.glowTotalTiles =
+        static_cast<std::uint32_t>(tilesX * tilesY);
+    renderTimings_.glowHorizontalPass1Tiles = 0;
+    renderTimings_.glowVerticalPass1Tiles = 0;
+    renderTimings_.glowHorizontalPass2Tiles = 0;
+    renderTimings_.glowVerticalPass2Tiles = 0;
+
+    static thread_local std::vector<std::uint8_t> dirtyTiles;
+    dirtyTiles.assign(
+        static_cast<std::size_t>(renderTimings_.glowTotalTiles),
+        static_cast<std::uint8_t>(0));
+
+    static thread_local std::vector<std::uint32_t> sourceActivity;
+    static thread_local std::vector<std::uint32_t> horizontal1Activity;
+    static thread_local std::vector<std::uint32_t> vertical1Activity;
+    static thread_local std::vector<std::uint32_t> horizontal2Activity;
+    static thread_local std::vector<std::uint32_t> vertical2Activity;
+    sourceActivity.assign(dirtyTiles.size(), 0u);
+
+    int minActiveX = lowWidth;
+    int minActiveY = lowHeight;
+    int maxActiveX = -1;
+    int maxActiveY = -1;
+
     static thread_local std::vector<std::uint16_t> source;
     static thread_local std::vector<std::uint16_t> temp;
     static thread_local std::vector<std::uint16_t> blur;
@@ -850,89 +900,373 @@ void VectorscopeAnalyzer::applyGlowPostProcess()
             });
             source[static_cast<std::size_t>(ly) * lowWidth + lx] =
                 static_cast<std::uint16_t>(value);
+
+            if (value > 0)
+            {
+                minActiveX = std::min(minActiveX, lx);
+                minActiveY = std::min(minActiveY, ly);
+                maxActiveX = std::max(maxActiveX, lx);
+                maxActiveY = std::max(maxActiveY, ly);
+
+                const int tileX = lx / kTileWidth;
+                const int tileY = ly / kTileHeight;
+                const std::size_t tileIndex =
+                    static_cast<std::size_t>(tileY) *
+                    static_cast<std::size_t>(tilesX) +
+                    static_cast<std::size_t>(tileX);
+
+                ++sourceActivity[tileIndex];
+
+                if (dirtyTiles[tileIndex] == 0)
+                {
+                    dirtyTiles[tileIndex] = 1;
+                    ++renderTimings_.glowDirtyTiles;
+                }
+            }
         }
+    }
+
+    if (maxActiveX >= minActiveX && maxActiveY >= minActiveY)
+    {
+        renderTimings_.glowActiveX = minActiveX * 2;
+        renderTimings_.glowActiveY = minActiveY * 2;
+        renderTimings_.glowActiveWidth =
+            std::min(width - renderTimings_.glowActiveX,
+                (maxActiveX - minActiveX + 1) * 2);
+        renderTimings_.glowActiveHeight =
+            std::min(height - renderTimings_.glowActiveY,
+                (maxActiveY - minActiveY + 1) * 2);
     }
 
     const double renderScale =
         static_cast<double>(std::min(width, height)) / 576.0;
     const int radius = std::max(1, static_cast<int>(std::lround(renderScale)));
+    const int horizontalTileExpansion =
+        (radius + kTileWidth - 1) / kTileWidth;
+    const int verticalTileExpansion =
+        (radius + kTileHeight - 1) / kTileHeight;
+
+    static thread_local std::vector<std::uint8_t> horizontalMask1;
+    static thread_local std::vector<std::uint8_t> verticalMask1;
+    static thread_local std::vector<std::uint8_t> horizontalMask2;
+    static thread_local std::vector<std::uint8_t> verticalMask2;
+
+    constexpr std::uint32_t kMinimumExpansionPercent = 5;
+
+    const auto dilateTiles =
+        [lowWidth, lowHeight, tilesX, tilesY, kTileWidth, kTileHeight](
+            const std::vector<std::uint8_t>& input,
+            const std::vector<std::uint32_t>& activity,
+            std::vector<std::uint8_t>& output,
+            int expandX,
+            int expandY)
+        {
+            // The tile itself remains active. It only propagates glow to
+            // neighbouring tiles while at least 5% of that tile still
+            // contains non-zero glow data from the preceding pass.
+            output = input;
+
+            for (int tileY = 0; tileY < tilesY; ++tileY)
+            {
+                const int pixelFirstY = tileY * kTileHeight;
+                const int pixelLastY =
+                    std::min(pixelFirstY + kTileHeight, lowHeight);
+
+                for (int tileX = 0; tileX < tilesX; ++tileX)
+                {
+                    const std::size_t index =
+                        static_cast<std::size_t>(tileY) *
+                        static_cast<std::size_t>(tilesX) +
+                        static_cast<std::size_t>(tileX);
+
+                    if (input[index] == 0)
+                    {
+                        continue;
+                    }
+
+                    const int pixelFirstX = tileX * kTileWidth;
+                    const int pixelLastX =
+                        std::min(pixelFirstX + kTileWidth, lowWidth);
+                    const std::uint32_t tilePixels =
+                        static_cast<std::uint32_t>(
+                            (pixelLastX - pixelFirstX) *
+                            (pixelLastY - pixelFirstY));
+
+                    if (activity[index] * 100u <
+                        tilePixels * kMinimumExpansionPercent)
+                    {
+                        continue;
+                    }
+
+                    const int firstY = std::max(0, tileY - expandY);
+                    const int lastY = std::min(tilesY - 1, tileY + expandY);
+                    const int firstX = std::max(0, tileX - expandX);
+                    const int lastX = std::min(tilesX - 1, tileX + expandX);
+
+                    for (int y = firstY; y <= lastY; ++y)
+                    {
+                        for (int x = firstX; x <= lastX; ++x)
+                        {
+                            output[
+                                static_cast<std::size_t>(y) *
+                                static_cast<std::size_t>(tilesX) +
+                                static_cast<std::size_t>(x)] = 1;
+                        }
+                    }
+                }
+            }
+        };
+
+    const auto countActiveTiles =
+        [](const std::vector<std::uint8_t>& mask)
+        {
+            return static_cast<std::uint32_t>(
+                std::count_if(
+                    mask.begin(),
+                    mask.end(),
+                    [](std::uint8_t value)
+                    {
+                        return value != 0;
+                    }));
+        };
 
     const auto blurHorizontal =
-        [lowWidth, lowHeight, radius](
+        [lowWidth, lowHeight, radius, tilesX, kTileWidth, kTileHeight](
             const std::vector<std::uint16_t>& in,
-            std::vector<std::uint16_t>& out)
+            std::vector<std::uint16_t>& out,
+            const std::vector<std::uint8_t>& mask,
+            std::vector<std::uint32_t>& activity)
         {
-            for (int y = 0; y < lowHeight; ++y)
+            std::fill(out.begin(), out.end(), static_cast<std::uint16_t>(0));
+            activity.assign(mask.size(), 0u);
+            const std::uint32_t count =
+                static_cast<std::uint32_t>(2 * radius + 1);
+            const int tilesY =
+                (lowHeight + kTileHeight - 1) / kTileHeight;
+
+            for (int tileY = 0; tileY < tilesY; ++tileY)
             {
-                std::uint32_t sum = 0;
-                const int count = 2 * radius + 1;
-                for (int x = -radius; x <= radius; ++x)
+                const int firstY = tileY * kTileHeight;
+                const int lastY = std::min(firstY + kTileHeight, lowHeight);
+
+                for (int tileX = 0; tileX < tilesX; ++tileX)
                 {
-                    const int sx = std::clamp(x, 0, lowWidth - 1);
-                    sum += in[static_cast<std::size_t>(y) * lowWidth + sx];
-                }
-                for (int x = 0; x < lowWidth; ++x)
-                {
-                    out[static_cast<std::size_t>(y) * lowWidth + x] =
-                        static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
-                    const int removeX = std::clamp(x - radius, 0, lowWidth - 1);
-                    const int addX = std::clamp(x + radius + 1, 0, lowWidth - 1);
-                    sum -= in[static_cast<std::size_t>(y) * lowWidth + removeX];
-                    sum += in[static_cast<std::size_t>(y) * lowWidth + addX];
+                    const std::size_t tileIndex =
+                        static_cast<std::size_t>(tileY) *
+                        static_cast<std::size_t>(tilesX) +
+                        static_cast<std::size_t>(tileX);
+
+                    if (mask[tileIndex] == 0)
+                    {
+                        continue;
+                    }
+
+                    const int firstX = tileX * kTileWidth;
+                    const int lastX = std::min(firstX + kTileWidth, lowWidth);
+
+                    for (int y = firstY; y < lastY; ++y)
+                    {
+                        const std::size_t row =
+                            static_cast<std::size_t>(y) *
+                            static_cast<std::size_t>(lowWidth);
+                        std::uint32_t sum = 0;
+
+                        for (int x = firstX - radius;
+                            x <= firstX + radius;
+                            ++x)
+                        {
+                            const int sx = std::clamp(x, 0, lowWidth - 1);
+                            sum += in[row + static_cast<std::size_t>(sx)];
+                        }
+
+                        for (int x = firstX; x < lastX; ++x)
+                        {
+                            const std::uint16_t value =
+                                static_cast<std::uint16_t>(sum / count);
+                            out[row + static_cast<std::size_t>(x)] = value;
+                            if (value != 0)
+                            {
+                                ++activity[tileIndex];
+                            }
+
+                            const int removeX =
+                                std::clamp(x - radius, 0, lowWidth - 1);
+                            const int addX =
+                                std::clamp(x + radius + 1, 0, lowWidth - 1);
+                            sum -= in[row + static_cast<std::size_t>(removeX)];
+                            sum += in[row + static_cast<std::size_t>(addX)];
+                        }
+                    }
                 }
             }
         };
 
     const auto blurVertical =
-        [lowWidth, lowHeight, radius](
+        [lowWidth, lowHeight, radius, tilesX, kTileWidth, kTileHeight](
             const std::vector<std::uint16_t>& in,
-            std::vector<std::uint16_t>& out)
+            std::vector<std::uint16_t>& out,
+            const std::vector<std::uint8_t>& mask,
+            std::vector<std::uint32_t>& activity)
         {
-            for (int x = 0; x < lowWidth; ++x)
+            std::fill(out.begin(), out.end(), static_cast<std::uint16_t>(0));
+            activity.assign(mask.size(), 0u);
+            const std::uint32_t count =
+                static_cast<std::uint32_t>(2 * radius + 1);
+            const int tilesY =
+                (lowHeight + kTileHeight - 1) / kTileHeight;
+
+            for (int tileY = 0; tileY < tilesY; ++tileY)
             {
-                std::uint32_t sum = 0;
-                const int count = 2 * radius + 1;
-                for (int y = -radius; y <= radius; ++y)
+                const int firstY = tileY * kTileHeight;
+                const int lastY = std::min(firstY + kTileHeight, lowHeight);
+
+                for (int tileX = 0; tileX < tilesX; ++tileX)
                 {
-                    const int sy = std::clamp(y, 0, lowHeight - 1);
-                    sum += in[static_cast<std::size_t>(sy) * lowWidth + x];
-                }
-                for (int y = 0; y < lowHeight; ++y)
-                {
-                    out[static_cast<std::size_t>(y) * lowWidth + x] =
-                        static_cast<std::uint16_t>(sum / static_cast<std::uint32_t>(count));
-                    const int removeY = std::clamp(y - radius, 0, lowHeight - 1);
-                    const int addY = std::clamp(y + radius + 1, 0, lowHeight - 1);
-                    sum -= in[static_cast<std::size_t>(removeY) * lowWidth + x];
-                    sum += in[static_cast<std::size_t>(addY) * lowWidth + x];
+                    const std::size_t tileIndex =
+                        static_cast<std::size_t>(tileY) *
+                        static_cast<std::size_t>(tilesX) +
+                        static_cast<std::size_t>(tileX);
+
+                    if (mask[tileIndex] == 0)
+                    {
+                        continue;
+                    }
+
+                    const int firstX = tileX * kTileWidth;
+                    const int lastX = std::min(firstX + kTileWidth, lowWidth);
+
+                    for (int x = firstX; x < lastX; ++x)
+                    {
+                        std::uint32_t sum = 0;
+
+                        for (int y = firstY - radius;
+                            y <= firstY + radius;
+                            ++y)
+                        {
+                            const int sy = std::clamp(y, 0, lowHeight - 1);
+                            sum += in[
+                                static_cast<std::size_t>(sy) *
+                                static_cast<std::size_t>(lowWidth) +
+                                static_cast<std::size_t>(x)];
+                        }
+
+                        for (int y = firstY; y < lastY; ++y)
+                        {
+                            const std::size_t index =
+                                static_cast<std::size_t>(y) *
+                                static_cast<std::size_t>(lowWidth) +
+                                static_cast<std::size_t>(x);
+                            const std::uint16_t value =
+                                static_cast<std::uint16_t>(sum / count);
+                            out[index] = value;
+                            if (value != 0)
+                            {
+                                ++activity[tileIndex];
+                            }
+
+                            const int removeY =
+                                std::clamp(y - radius, 0, lowHeight - 1);
+                            const int addY =
+                                std::clamp(y + radius + 1, 0, lowHeight - 1);
+                            sum -= in[
+                                static_cast<std::size_t>(removeY) *
+                                static_cast<std::size_t>(lowWidth) +
+                                static_cast<std::size_t>(x)];
+                            sum += in[
+                                static_cast<std::size_t>(addY) *
+                                static_cast<std::size_t>(lowWidth) +
+                                static_cast<std::size_t>(x)];
+                        }
+                    }
                 }
             }
         };
 
-    blurHorizontal(source, temp);
-    blurVertical(temp, blur);
-    blurHorizontal(blur, temp);
-    blurVertical(temp, blur);
+    dilateTiles(
+        dirtyTiles,
+        sourceActivity,
+        horizontalMask1,
+        horizontalTileExpansion,
+        0);
+    renderTimings_.glowHorizontalPass1Tiles = countActiveTiles(horizontalMask1);
+    blurHorizontal(source, temp, horizontalMask1, horizontal1Activity);
+
+    dilateTiles(
+        horizontalMask1,
+        horizontal1Activity,
+        verticalMask1,
+        0,
+        verticalTileExpansion);
+    renderTimings_.glowVerticalPass1Tiles = countActiveTiles(verticalMask1);
+    blurVertical(temp, blur, verticalMask1, vertical1Activity);
+
+    dilateTiles(
+        verticalMask1,
+        vertical1Activity,
+        horizontalMask2,
+        horizontalTileExpansion,
+        0);
+    renderTimings_.glowHorizontalPass2Tiles = countActiveTiles(horizontalMask2);
+    blurHorizontal(blur, temp, horizontalMask2, horizontal2Activity);
+
+    dilateTiles(
+        horizontalMask2,
+        horizontal2Activity,
+        verticalMask2,
+        0,
+        verticalTileExpansion);
+    renderTimings_.glowVerticalPass2Tiles = countActiveTiles(verticalMask2);
+    blurVertical(temp, blur, verticalMask2, vertical2Activity);
 
     const int glowScale = std::clamp(glow_, 0, 100);
 
-    for (int y = 0; y < height; ++y)
+    for (int tileY = 0; tileY < tilesY; ++tileY)
     {
-        auto* line = reinterpret_cast<QRgb*>(image_.scanLine(y));
-        const int ly = std::min(y / 2, lowHeight - 1);
-        for (int x = 0; x < width; ++x)
+        for (int tileX = 0; tileX < tilesX; ++tileX)
         {
-            const int lx = std::min(x / 2, lowWidth - 1);
-            const int blurred = blur[static_cast<std::size_t>(ly) * lowWidth + lx];
-            const int contribution = (blurred * glowScale * 3) / 400;
-            if (contribution <= 0)
+            const std::size_t tileIndex =
+                static_cast<std::size_t>(tileY) *
+                static_cast<std::size_t>(tilesX) +
+                static_cast<std::size_t>(tileX);
+
+            if (verticalMask2[tileIndex] == 0)
             {
                 continue;
             }
-            const int value = std::min(255, qGreen(line[x]) + contribution);
-            line[x] = qRgb(value, value, value);
+
+            const int firstX = tileX * kTileWidth * 2;
+            const int lastX =
+                std::min((tileX + 1) * kTileWidth * 2, width);
+            const int firstY = tileY * kTileHeight * 2;
+            const int lastY =
+                std::min((tileY + 1) * kTileHeight * 2, height);
+
+            for (int y = firstY; y < lastY; ++y)
+            {
+                auto* line = reinterpret_cast<QRgb*>(image_.scanLine(y));
+                const int ly = std::min(y / 2, lowHeight - 1);
+
+                for (int x = firstX; x < lastX; ++x)
+                {
+                    const int lx = std::min(x / 2, lowWidth - 1);
+                    const int blurred =
+                        blur[static_cast<std::size_t>(ly) * lowWidth + lx];
+                    const int contribution =
+                        (blurred * glowScale * 3) / 400;
+
+                    if (contribution <= 0)
+                    {
+                        continue;
+                    }
+
+                    const int value =
+                        std::min(255, qGreen(line[x]) + contribution);
+                    line[x] = qRgb(value, value, value);
+                }
+            }
         }
     }
+
 }
 
 void VectorscopeAnalyzer::setGlow(

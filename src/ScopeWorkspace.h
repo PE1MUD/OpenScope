@@ -36,6 +36,14 @@ public:
     void setAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
 
+    void setCompositeInputGainState(
+        bool lumaAvailable,
+        bool chromaAvailable,
+        int minimumHundredthsDb,
+        int maximumHundredthsDb,
+        int lumaHundredthsDb,
+        int chromaHundredthsDb);
+
     bool isVideoMaximized() const;
 
     QPoint floatingSettingsPosition() const;
@@ -62,6 +70,12 @@ signals:
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);
+    void lumaCompensationChanged(bool enabled);
+    void lumaCompensationGainChanged(int gainHundredthsDb);
+
+    void compositeLumaGainChanged(int gainHundredthsDb);
+    void compositeChromaGainChanged(int gainHundredthsDb);
+    void compositeGainCommitRequested();
 
     void legacyAspectRatioChanged(bool legacyEnabled);
 
