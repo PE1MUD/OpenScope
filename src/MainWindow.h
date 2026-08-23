@@ -66,6 +66,12 @@ private:
     QRect restoreWindowGeometry_;
     bool customMaximized_ = false;
 
+    // F11 clean fullscreen state. This is intentionally separate from
+    // the custom aspect-ratio maximize handling above.
+    QRect f11RestoreWindowGeometry_;
+    bool f11FullScreen_ = false;
+    bool f11MenuBarWasVisible_ = true;
+
     SettingsService* settingsService_ = nullptr;
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;

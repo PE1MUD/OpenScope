@@ -2639,6 +2639,67 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
         auto* keyEvent =
             static_cast<QKeyEvent*>(event);
 
+        const bool f11Pressed =
+            keyEvent->key() == Qt::Key_F11 &&
+            keyEvent->modifiers() == Qt::NoModifier;
+
+        const bool escapeFromF11FullScreen =
+            f11FullScreen_ &&
+            keyEvent->key() == Qt::Key_Escape &&
+            keyEvent->modifiers() == Qt::NoModifier;
+
+        if (f11Pressed ||
+            escapeFromF11FullScreen)
+        {
+            // Ignore key-repeat so holding F11/Escape cannot cause
+            // repeated fullscreen state changes.
+            if (keyEvent->isAutoRepeat())
+            {
+                return true;
+            }
+
+            if (!f11FullScreen_)
+            {
+                // Preserve the exact current top-level geometry. This also
+                // behaves correctly when OpenScope is in its custom
+                // aspect-ratio maximized state.
+                f11RestoreWindowGeometry_ =
+                    geometry();
+
+                f11MenuBarWasVisible_ =
+                    menuBar() != nullptr &&
+                    menuBar()->isVisible();
+
+                if (menuBar() != nullptr)
+                {
+                    menuBar()->hide();
+                }
+
+                showFullScreen();
+                f11FullScreen_ = true;
+            }
+            else
+            {
+                showNormal();
+
+                if (f11RestoreWindowGeometry_.isValid())
+                {
+                    setGeometry(
+                        f11RestoreWindowGeometry_);
+                }
+
+                if (menuBar() != nullptr)
+                {
+                    menuBar()->setVisible(
+                        f11MenuBarWasVisible_);
+                }
+
+                f11FullScreen_ = false;
+            }
+
+            return true;
+        }
+
         if (keyEvent->key() == Qt::Key_F &&
             keyEvent->modifiers() == Qt::NoModifier)
         {

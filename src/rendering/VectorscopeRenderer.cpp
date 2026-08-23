@@ -1046,53 +1046,63 @@ void VectorscopeRenderer::composeScreen(
     const bool processingFitsWidth =
         processingSize.width() <= innerWidth;
 
-    const double twoCardHeight =
+    const double minimumThreeCardHeight =
         sourceSize.height() +
-        cardGap +
-        scopeSize.height();
-
-    const double threeCardHeight =
-        twoCardHeight +
-        cardGap +
+        2.0 * cardGap +
+        scopeSize.height() +
         processingSize.height();
 
     const bool processingFitsHeight =
-        threeCardHeight + 2.0 * ownerPadding <= infoRect.height();
+        minimumThreeCardHeight +
+        2.0 * ownerPadding <=
+        infoRect.height();
 
     const bool drawProcessing =
         processingFitsWidth &&
         processingFitsHeight;
 
-    const double cardsHeight =
-        drawProcessing
-        ? threeCardHeight
-        : twoCardHeight;
-
-    const double ownerHeight =
-        cardsHeight + 2.0 * ownerPadding;
+    const double minimumTwoCardHeight =
+        sourceSize.height() +
+        cardGap +
+        scopeSize.height() +
+        2.0 * ownerPadding;
 
     if (!mainGroupsFitWidth ||
-        ownerHeight > infoRect.height())
+        minimumTwoCardHeight > infoRect.height())
     {
         return;
     }
 
+    // Use the complete PC information column instead of shrinking the
+    // owner panel around a compact stack.  This lets the information cards
+    // read as three separate instrument blocks distributed over the height.
     const QRectF ownerRect(
         infoRect.left(),
         infoRect.top(),
         ownerWidth,
-        ownerHeight);
+        infoRect.height());
 
     ViewportOverlay::drawOwnerPanel(
         painter,
         ownerRect,
         false);
 
-    double y = ownerRect.top() + ownerPadding;
+    const double cardLeft =
+        ownerRect.left() + ownerPadding;
+
+    const double topY =
+        ownerRect.top() + ownerPadding;
+
+    const double bottomY =
+        ownerRect.bottom() -
+        ownerPadding -
+        (drawProcessing
+            ? processingSize.height()
+            : scopeSize.height());
 
     const QRectF first(
-        ownerRect.left() + ownerPadding,
-        y,
+        cardLeft,
+        topY,
         innerWidth,
         sourceSize.height());
 
@@ -1103,40 +1113,55 @@ void VectorscopeRenderer::composeScreen(
         bounds.height(),
         false);
 
-    y += sourceSize.height() + cardGap;
-
-    const QRectF second(
-        ownerRect.left() + ownerPadding,
-        y,
-        innerWidth,
-        scopeSize.height());
-
-    ViewportOverlay::drawInfoCard(
-        painter,
-        second,
-        scopeRows,
-        bounds.height(),
-        false);
-
-    if (!drawProcessing)
+    if (drawProcessing)
     {
-        return;
+        const double middleY =
+            ownerRect.center().y() -
+            scopeSize.height() * 0.5;
+
+        const QRectF second(
+            cardLeft,
+            middleY,
+            innerWidth,
+            scopeSize.height());
+
+        ViewportOverlay::drawInfoCard(
+            painter,
+            second,
+            scopeRows,
+            bounds.height(),
+            false);
+
+        const QRectF third(
+            cardLeft,
+            bottomY,
+            innerWidth,
+            processingSize.height());
+
+        ViewportOverlay::drawInfoCard(
+            painter,
+            third,
+            processingRows,
+            bounds.height(),
+            false);
     }
+    else
+    {
+        // Narrow/short fallback: keep the two mandatory groups separated
+        // over the available height rather than returning to a top stack.
+        const QRectF second(
+            cardLeft,
+            bottomY,
+            innerWidth,
+            scopeSize.height());
 
-    y += scopeSize.height() + cardGap;
-
-    const QRectF third(
-        ownerRect.left() + ownerPadding,
-        y,
-        innerWidth,
-        processingSize.height());
-
-    ViewportOverlay::drawInfoCard(
-        painter,
-        third,
-        processingRows,
-        bounds.height(),
-        false);
+        ViewportOverlay::drawInfoCard(
+            painter,
+            second,
+            scopeRows,
+            bounds.height(),
+            false);
+    }
 }
 
 void VectorscopeRenderer::composeVideo(
