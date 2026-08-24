@@ -508,6 +508,7 @@ void WaveformWidget::setZoomFactor(int factor)
     if (zoomFactor_ <= 1)
     {
         panActive_ = false;
+        zoomNavigatorDragging_ = false;
     }
 
     updateInteractionCursor();
@@ -536,6 +537,95 @@ QRect WaveformWidget::imageRect() const
 QRectF WaveformWidget::scopeRect(const QRect& displayRect) const
 {
     return makeGeometry(image(), displayRect, this).scopeRect;
+}
+
+QRectF WaveformWidget::zoomNavigatorTrackRect(const QRectF& scope) const
+{
+    if (zoomFactor_ <= 1 || scope.isEmpty())
+    {
+        return {};
+    }
+
+    const double y =
+        scope.bottom() -
+        (std::max)(22.0, scope.height() * 0.055);
+
+    /*
+     * The navigator represents the complete video line, so let the track
+     * span the complete waveform scope width. Any inset makes the position
+     * indicator feel disconnected from the actual line.
+     */
+    return QRectF(
+        scope.left(),
+        y - 12.0,
+        (std::max)(1.0, scope.width()),
+        24.0);
+}
+
+QRectF WaveformWidget::zoomNavigatorHandleRect(const QRectF& scope) const
+{
+    const QRectF track =
+        zoomNavigatorTrackRect(scope);
+
+    if (track.isEmpty())
+    {
+        return {};
+    }
+
+    const double visibleFraction =
+        1.0 /
+        static_cast<double>((std::max)(zoomFactor_, 1));
+
+    const double handleWidth =
+        (std::max)(8.0, track.width() * visibleFraction);
+
+    const double travel =
+        (std::max)(0.0, track.width() - handleWidth);
+
+    const double handleLeft =
+        track.left() +
+        std::clamp(scrollPosition_, 0.0, 1.0) * travel;
+
+    return QRectF(
+        handleLeft,
+        track.center().y() - 10.0,
+        handleWidth,
+        20.0);
+}
+
+void WaveformWidget::updateScrollFromNavigator(double mouseX)
+{
+    const QRectF scope =
+        scopeRect(imageRect());
+
+    const QRectF track =
+        zoomNavigatorTrackRect(scope);
+
+    const QRectF handle =
+        zoomNavigatorHandleRect(scope);
+
+    if (track.isEmpty() || handle.isEmpty())
+    {
+        return;
+    }
+
+    const double travel =
+        track.width() - handle.width();
+
+    if (travel <= 0.0)
+    {
+        setScrollPosition(0.0);
+        return;
+    }
+
+    const double requestedLeft =
+        mouseX - zoomNavigatorDragOffsetX_;
+
+    const double position =
+        (requestedLeft - track.left()) / travel;
+
+    setScrollPosition(
+        std::clamp(position, 0.0, 1.0));
 }
 
 void WaveformWidget::updateHover(const QPointF& position)
@@ -1832,6 +1922,43 @@ void WaveformWidget::mousePressEvent(QMouseEvent* event)
     const QRectF scope = scopeRect(displayRect);
 
     if (!areaMode_ && !referenceMode_ &&
+        zoomFactor_ > 1 &&
+        event->button() == Qt::LeftButton)
+    {
+        const QRectF track =
+            zoomNavigatorTrackRect(scope);
+
+        const QRectF handle =
+            zoomNavigatorHandleRect(scope);
+
+        if (handle.contains(event->position()))
+        {
+            zoomNavigatorDragging_ = true;
+            zoomNavigatorDragOffsetX_ =
+                event->position().x() -
+                handle.left();
+            hoverActive_ = false;
+            setCursor(Qt::SizeHorCursor);
+            event->accept();
+            return;
+        }
+
+        if (track.contains(event->position()))
+        {
+            zoomNavigatorDragging_ = true;
+            zoomNavigatorDragOffsetX_ =
+                handle.width() * 0.5;
+            updateScrollFromNavigator(
+                event->position().x());
+            hoverActive_ = false;
+            setCursor(Qt::SizeHorCursor);
+            event->accept();
+            update();
+            return;
+        }
+    }
+
+    if (!areaMode_ && !referenceMode_ &&
         event->button() == Qt::LeftButton)
     {
         if (!measurementTableRect_.isEmpty() &&
@@ -1950,6 +2077,17 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 {
     const QRect displayRect = imageRect();
     const QRectF scope = scopeRect(displayRect);
+
+    if (zoomNavigatorDragging_ &&
+        (event->buttons() & Qt::LeftButton) != 0)
+    {
+        updateScrollFromNavigator(
+            event->position().x());
+        setCursor(Qt::SizeHorCursor);
+        event->accept();
+        update();
+        return;
+    }
 
     if (measurementTableDragging_ &&
         (event->buttons() & Qt::LeftButton) != 0)
@@ -2115,7 +2253,16 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 
     if (event->buttons() == Qt::NoButton)
     {
+        const QRectF navigatorTrack =
+            zoomNavigatorTrackRect(scope);
+
         if (!areaMode_ && !referenceMode_ &&
+            zoomFactor_ > 1 &&
+            navigatorTrack.contains(event->position()))
+        {
+            setCursor(Qt::SizeHorCursor);
+        }
+        else if (!areaMode_ && !referenceMode_ &&
             !measurementTableRect_.isEmpty() &&
             measurementTableRect_.contains(
                 event->position()))
@@ -2142,6 +2289,16 @@ void WaveformWidget::mouseMoveEvent(QMouseEvent* event)
 
 void WaveformWidget::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (zoomNavigatorDragging_ &&
+        event->button() == Qt::LeftButton)
+    {
+        zoomNavigatorDragging_ = false;
+        updateInteractionCursor();
+        event->accept();
+        update();
+        return;
+    }
+
     if (measurementTableDragging_ &&
         event->button() == Qt::LeftButton)
     {
@@ -4467,7 +4624,24 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
     }
 
     const QRect displayRect = imageRect();
-    painter.drawImage(displayRect, image());
+
+    // image() contains the waveform at physical-pixel resolution.  Mark the
+    // presentation copy with this widget's DPR and draw it at its natural
+    // device-independent size.  With matching widget/image DPR this becomes a
+    // physical-pixel-for-physical-pixel blit instead of a second QPainter
+    // resample from the high-resolution render into the logical rectangle.
+    QImage presentedImage = image();
+    const qreal presentationDpr =
+        (std::max)(qreal(1.0), devicePixelRatioF());
+    presentedImage.setDevicePixelRatio(presentationDpr);
+
+    painter.save();
+    painter.setClipRect(displayRect);
+    painter.drawImage(
+        QPointF(displayRect.topLeft()),
+        presentedImage);
+    painter.restore();
+
 
     const WaveformGeometry geometry = makeGeometry(image(), displayRect, this);
 
@@ -5637,6 +5811,52 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         painter.restore();
     }
 
+    if (zoomFactor_ > 1)
+    {
+        const QRectF navigatorTrack =
+            zoomNavigatorTrackRect(geometry.scopeRect);
+
+        const QRectF navigatorHandle =
+            zoomNavigatorHandleRect(geometry.scopeRect);
+
+        if (!navigatorTrack.isEmpty() &&
+            !navigatorHandle.isEmpty())
+        {
+            painter.save();
+            painter.setRenderHint(
+                QPainter::Antialiasing,
+                true);
+
+            painter.setPen(
+                QPen(
+                    QColor(255, 255, 255, 190),
+                    1.5));
+
+            painter.drawLine(
+                QPointF(
+                    navigatorTrack.left(),
+                    navigatorTrack.center().y()),
+                QPointF(
+                    navigatorTrack.right(),
+                    navigatorTrack.center().y()));
+
+            painter.setPen(
+                QPen(
+                    QColor(255, 255, 255, 220),
+                    1.0));
+
+            painter.setBrush(
+                QColor(255, 255, 255, 105));
+
+            painter.drawRoundedRect(
+                navigatorHandle,
+                2.0,
+                2.0);
+
+            painter.restore();
+        }
+    }
+
     if (!hoverActive_ || panActive_ || areaMode_ || referenceMode_ || !displayRect.contains(hoverPosition_.toPoint()))
     {
         return;
@@ -5656,56 +5876,36 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         .arg(millivolts)
         .arg(formatPercent(percent));
 
-    if (probeDetailsMode_)
-    {
-        const double sourcePixelPosition =
-            displayXToSourcePixels(
-                hoverPosition_.x());
-
-        const int sourcePixel =
-            std::clamp(
-                static_cast<int>(
-                    std::lround(sourcePixelPosition)),
-                0,
-                geometry.standard.sampleWidth - 1);
-
-        const double lineTimeMicroseconds =
-            static_cast<double>(sourcePixel) /
-            inputSampleClockHz_ *
-            1.0e6;
-
-        text +=
-            QStringLiteral("   %1 us   px %2")
-            .arg(lineTimeMicroseconds, 0, 'f', 2)
-            .arg(sourcePixel);
-    }
-
     painter.save();
     painter.setFont(measurementLabelFont);
 
-    const QFontMetricsF metrics(measurementLabelFont, painter.device());
-    constexpr double kPaddingX = 10.0;
-    constexpr double kPaddingY = 6.0;
-    constexpr double kCursorGap = 12.0;
-    const QSizeF textSize(metrics.horizontalAdvance(text), metrics.height());
+    const QFontMetricsF metrics(
+        measurementLabelFont,
+        painter.device());
+
+    constexpr double kPaddingX = 7.0;
+    constexpr double kPaddingY = 4.0;
+
+    const QSizeF textSize(
+        metrics.horizontalAdvance(text),
+        metrics.height());
 
     QRectF labelRect(
-        hoverPosition_.x() - (textSize.width() + 2.0 * kPaddingX) * 0.5,
+        geometry.scopeRect.left(),
         infoBandTop,
         textSize.width() + 2.0 * kPaddingX,
         textSize.height() + 2.0 * kPaddingY);
 
     if (labelRect.right() > geometry.scopeRect.right())
     {
-        labelRect.moveRight(geometry.scopeRect.right());
+        labelRect.setRight(
+            geometry.scopeRect.right());
     }
-    if (labelRect.left() < geometry.scopeRect.left())
-    {
-        labelRect.moveLeft(geometry.scopeRect.left());
-    }
+
     if (labelRect.bottom() > geometry.scopeRect.bottom())
     {
-        labelRect.moveBottom(geometry.scopeRect.bottom());
+        labelRect.moveBottom(
+            geometry.scopeRect.bottom());
     }
     painter.setPen(QPen(QColor(80, 170, 255), 1.5));
     painter.setBrush(QColor(0, 0, 0, 210));
@@ -5715,6 +5915,7 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         Qt::AlignCenter,
         text);
     painter.restore();
+
 }
 
 void WaveformWidget::resizeEvent(QResizeEvent* event)

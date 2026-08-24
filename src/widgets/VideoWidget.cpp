@@ -539,13 +539,13 @@ void VideoWidget::wheelEvent(
     while (wheelHorizontalRemainder_ >= threshold)
     {
         wheelHorizontalRemainder_ -= threshold;
-        emit panRightRequested();
+        emit panLeftRequested();
     }
 
     while (wheelHorizontalRemainder_ <= -threshold)
     {
         wheelHorizontalRemainder_ += threshold;
-        emit panLeftRequested();
+        emit panRightRequested();
     }
 
     if (!delta.isNull())

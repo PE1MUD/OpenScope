@@ -54,6 +54,7 @@ signals:
     void lineNumberChanged(int lineNumber);
     void waveformZoomChanged(int zoomFactor);
     void waveformPersistenceChanged(int persistence);
+    void waveformCoreIntensityChanged(int intensity);
     void vectorscopeGlowChanged(int glow);
 
     void waveformChromaFillIntensityChanged(int intensity);

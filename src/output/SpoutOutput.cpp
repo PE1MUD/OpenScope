@@ -40,6 +40,11 @@ public:
 
     bool ensureStarted()
     {
+        if (!enabled)
+        {
+            return false;
+        }
+
         if (active)
         {
             return true;
@@ -162,6 +167,7 @@ public:
     int textureWidth = 0;
     int textureHeight = 0;
 
+    bool enabled = false;
     bool active = false;
     bool openFailureReported = false;
     qint64 lastSubmitTimestampUs = 0;
@@ -223,7 +229,11 @@ void SpoutOutput::submitTimedImage(
 
     QElapsedTimer sendTimer;
     sendTimer.start();
-    if (image.isNull())
+
+    // A queued frame can still arrive after the UI has disabled a
+    // Spout output. Never let such a stale frame reopen the sender.
+    if (!d_->enabled ||
+        image.isNull())
     {
         return;
     }
@@ -305,9 +315,25 @@ void SpoutOutput::setInputSignalValid(bool valid)
     d_->inputSignalValid = valid;
 }
 
+void SpoutOutput::setEnabled(bool enabled)
+{
+    if (d_ == nullptr)
+    {
+        return;
+    }
+
+    d_->enabled = enabled;
+
+    if (!enabled)
+    {
+        d_->stop();
+    }
+}
+
 bool SpoutOutput::submitTexture(ID3D11Texture2D* texture)
 {
-    if (texture == nullptr)
+    if (!d_->enabled ||
+        texture == nullptr)
     {
         return false;
     }

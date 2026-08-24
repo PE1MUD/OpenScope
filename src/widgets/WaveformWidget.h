@@ -126,6 +126,9 @@ private:
 
     QRect imageRect() const;
     QRectF scopeRect(const QRect& displayRect) const;
+    QRectF zoomNavigatorTrackRect(const QRectF& scope) const;
+    QRectF zoomNavigatorHandleRect(const QRectF& scope) const;
+    void updateScrollFromNavigator(double mouseX);
     void updateHover(const QPointF& position);
     void updateInteractionCursor();
     void clearAreaAnalysis();
@@ -161,6 +164,9 @@ private:
     bool panActive_ = false;
     double panStartX_ = 0.0;
     double panStartScrollPosition_ = 0.0;
+
+    bool zoomNavigatorDragging_ = false;
+    double zoomNavigatorDragOffsetX_ = 0.0;
 
     bool hoverActive_ = false;
     QPointF hoverPosition_;

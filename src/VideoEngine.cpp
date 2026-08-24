@@ -307,15 +307,15 @@ void VideoEngine::cancelWriteFrame()
 
 void VideoEngine::setSelectedLine(int line)
 {
-    const int previousLine =
-        selectedLine_.exchange(
-            line,
-            std::memory_order_acq_rel);
-
-    if (previousLine != line)
-    {
-        resetDisplayPresentation();
-    }
+    // Line selection is navigation state. The display workers read the
+    // latest selected line atomically for the next frame, so there is no
+    // reason to invalidate the currently presented video frame here.
+    //
+    // Clearing the presenter on every wheel tick, key repeat or mouse-drag
+    // step caused the visible video stalls while moving through the image.
+    selectedLine_.store(
+        line,
+        std::memory_order_release);
 }
 
 
@@ -429,6 +429,18 @@ void VideoEngine::setWaveformPersistence(int persistence)
 
     vectorscopePersistence_.store(
         clampedPersistence,
+        std::memory_order_release);
+}
+
+
+void VideoEngine::setWaveformCoreIntensity(
+    int intensity)
+{
+    waveformCoreIntensity_.store(
+        std::clamp(
+            intensity,
+            50,
+            200),
         std::memory_order_release);
 }
 
@@ -2386,6 +2398,10 @@ void VideoEngine::waveformWorkerLoop()
             waveformPersistence_.load(
                 std::memory_order_acquire);
 
+        const int waveformCoreIntensity =
+            waveformCoreIntensity_.load(
+                std::memory_order_acquire);
+
         const int glow =
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
@@ -2413,6 +2429,9 @@ void VideoEngine::waveformWorkerLoop()
 
             waveformScreenRenderer_.setPersistence(
                 waveformPersistence);
+
+            waveformScreenRenderer_.setCoreIntensity(
+                waveformCoreIntensity);
 
             waveformScreenRenderer_.setGlow(
                 glow);
@@ -2562,11 +2581,26 @@ void VideoEngine::waveformWorkerLoop()
             waveformVideoRenderer_.setSelectedLine(
                 selectedLine);
 
+            // The 720x576 video/Spout target needs less temporal build-up
+            // than the high-resolution PC target.  Keep one shared UI, but
+            // tune the video renderer to 60% of the same user setting.
+            const int waveformVideoPersistence =
+                (waveformPersistence * 3 + 2) / 5;
+
             waveformVideoRenderer_.setPersistence(
-                waveformPersistence);
+                waveformVideoPersistence);
+
+            waveformVideoRenderer_.setCoreIntensity(
+                waveformCoreIntensity);
+
+            // Same renderer, different target: the SD video output needs
+            // less halo energy.  UI 50 therefore behaves like UI 30 on the
+            // video/Spout instance while the PC instance remains unchanged.
+            const int waveformVideoGlow =
+                (glow * 3 + 2) / 5;
 
             waveformVideoRenderer_.setGlow(
-                glow);
+                waveformVideoGlow);
 
             QElapsedTimer videoTimer;
             videoTimer.start();

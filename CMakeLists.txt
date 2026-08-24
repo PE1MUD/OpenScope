@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.7.3
+    VERSION 0.8.0
     LANGUAGES C CXX
 )
 
@@ -233,6 +233,12 @@ set_source_files_properties(
 
 set_source_files_properties(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/NoiseReducer.cpp"
+    PROPERTIES
+    COMPILE_OPTIONS "/arch:AVX2"
+)
+
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/rendering/WaveformRenderer.cpp"
     PROPERTIES
     COMPILE_OPTIONS "/arch:AVX2"
 )

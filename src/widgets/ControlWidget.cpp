@@ -1,6 +1,7 @@
 #include "widgets/ControlWidget.h"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <utility>
 #include <QAbstractButton>
@@ -25,6 +26,50 @@
 
 namespace
 {
+    int chromaUiToInternal(int value)
+    {
+        value = std::clamp(value, 0, 100);
+
+        if (value == 0)
+        {
+            return 0;
+        }
+
+        // UI 1..100 maps to the previously useful UI range 20..100.
+        const double oldUiValue =
+            20.0 +
+            static_cast<double>(value - 1) *
+                (80.0 / 99.0);
+
+        return std::clamp(
+            static_cast<int>(
+                std::lround(oldUiValue * 2.0)),
+            40,
+            200);
+    }
+
+    int chromaInternalToUi(int intensity)
+    {
+        intensity = std::clamp(intensity, 0, 200);
+
+        if (intensity == 0)
+        {
+            return 0;
+        }
+
+        const double oldUiValue =
+            static_cast<double>(intensity) / 2.0;
+
+        return std::clamp(
+            1 +
+                static_cast<int>(
+                    std::lround(
+                        (oldUiValue - 20.0) *
+                        (99.0 / 80.0))),
+            1,
+            100);
+    }
+
     class ValueSlider final : public QSlider
     {
     public:
@@ -136,37 +181,60 @@ namespace
         void paintEvent(
             QPaintEvent* event) override
         {
-            QSlider::paintEvent(
-                event);
+            Q_UNUSED(event);
 
             QStyleOptionSlider option;
             initStyleOption(
                 &option);
 
-            QRect handleRect =
-                style()->subControlRect(
-                    QStyle::CC_Slider,
-                    &option,
-                    QStyle::SC_SliderHandle,
-                    this);
+            QPainter painter(
+                this);
+
+            /*
+             * Draw the native groove, but not the native handle.  The value
+             * bubble below is the actual handle and needs a wider safe travel
+             * range than the platform handle.  Letting Qt place the small
+             * native handle at the absolute end while centring our wider
+             * bubble on it caused the bubble to be clipped at 0 / 100.
+             */
+            QStyleOptionSlider grooveOption = option;
+            grooveOption.subControls =
+                QStyle::SC_SliderGroove;
+
+            style()->drawComplexControl(
+                QStyle::CC_Slider,
+                &grooveOption,
+                &painter,
+                this);
 
             const int valueWidth =
                 valueFormatter_
                 ? 58
                 : 38;
 
-            handleRect.setWidth(
-                valueWidth);
+            const int valueHeight =
+                std::max(
+                    18,
+                    height() - 2);
 
-            handleRect.moveCenter(
-                style()->subControlRect(
-                    QStyle::CC_Slider,
-                    &option,
-                    QStyle::SC_SliderHandle,
-                    this).center());
+            const int span =
+                std::max(
+                    width() - valueWidth,
+                    1);
 
-            QPainter painter(
-                this);
+            const int sliderPosition =
+                QStyle::sliderPositionFromValue(
+                    minimum(),
+                    maximum(),
+                    value(),
+                    span,
+                    invertedAppearance());
+
+            QRect handleRect(
+                sliderPosition,
+                (height() - valueHeight) / 2,
+                valueWidth,
+                valueHeight);
 
             painter.setRenderHint(
                 QPainter::Antialiasing);
@@ -861,14 +929,11 @@ ControlWidget::ControlWidget(
             chromaIntensitySlider,
             0,
             100,
-            std::clamp(
+            chromaInternalToUi(
                 settings.control
                     .instrument
                     .waveform
-                    .chromaRenderIntensity,
-                0,
-                200) /
-                2,
+                    .chromaRenderIntensity),
             instrumentTab);
 
     instrumentLayout->addWidget(
@@ -894,6 +959,26 @@ ControlWidget::ControlWidget(
 
     instrumentLayout->addWidget(
         persistenceRow);
+
+    QSlider* coreIntensitySlider = nullptr;
+
+    QWidget* coreIntensityRow =
+        createSliderRow(
+            "Core intensity",
+            coreIntensitySlider,
+            0,
+            100,
+            std::clamp(
+                settings.control
+                    .instrument
+                    .waveform
+                    .coreIntensity,
+                0,
+                100),
+            instrumentTab);
+
+    instrumentLayout->addWidget(
+        coreIntensityRow);
 
     QSlider* vectorscopeGlowSlider = nullptr;
 
@@ -944,7 +1029,7 @@ ControlWidget::ControlWidget(
         22);
 
     defaultsButton->setToolTip(
-        "Set Color carrier intensity, Scopephor and Beam Glow to 50");
+        "Reset waveform display controls to defaults");
 
     defaultsLayout->addWidget(
         defaultsButton);
@@ -1014,6 +1099,12 @@ ControlWidget::ControlWidget(
         });
 
     connect(
+        coreIntensitySlider,
+        &QSlider::valueChanged,
+        this,
+        &ControlWidget::waveformCoreIntensityChanged);
+
+    connect(
         vectorscopeGlowSlider,
         &QSlider::valueChanged,
         this,
@@ -1031,15 +1122,8 @@ ControlWidget::ControlWidget(
         this,
         [this](int value)
         {
-            const int normalizedValue =
-                std::clamp(
-                    value,
-                    0,
-                    100);
-
             emit chromaRenderIntensityChanged(
-                normalizedValue *
-                2);
+                chromaUiToInternal(value));
         });
 
     connect(
@@ -1048,16 +1132,20 @@ ControlWidget::ControlWidget(
         this,
         [chromaIntensitySlider,
          persistenceSlider,
+         coreIntensitySlider,
          vectorscopeGlowSlider,
          vintageCheckBox]()
         {
             constexpr int defaultValue = 50;
 
             chromaIntensitySlider->setValue(
-                defaultValue);
+                50);
 
             persistenceSlider->setValue(
                 defaultValue);
+
+            coreIntensitySlider->setValue(
+                100);
 
             vectorscopeGlowSlider->setValue(
                 defaultValue);
@@ -1280,7 +1368,7 @@ Selects one video line. <b>All</b> shows all lines and disables X5/X10.</p>
 Horizontal waveform zoom only. In X5/X10, drag with the <b>right mouse button</b> to pan left/right.</p>
 
 <p><b>Color carrier intensity</b><br>
-Sets the strength of the chroma-envelope rendering.</p>
+0 disables the chroma-envelope rendering. Values 1-100 span the useful color range.</p>
 
 <p><b>Scopephor</b><br>
 Controls trace persistence.</p>

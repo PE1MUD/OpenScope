@@ -41,6 +41,7 @@ public slots:
         const QImage& image,
         qint64 dispatchTimestampUs);
     void setInputSignalValid(bool valid);
+    void setEnabled(bool enabled);
     void stop();
 
 public:

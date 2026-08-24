@@ -155,6 +155,12 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::waveformCoreIntensityChanged,
+        this,
+        &ScopeWorkspace::waveformCoreIntensityChanged);
+
+    connect(
+        controlWidget_,
         &ControlWidget::vectorscopeGlowChanged,
         this,
         &ScopeWorkspace::vectorscopeGlowChanged);

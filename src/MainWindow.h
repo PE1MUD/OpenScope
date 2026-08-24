@@ -76,6 +76,12 @@ private:
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
 
+    // Persist selected-line changes only after navigation has settled.
+    // Mouse drag / wheel / key repeat can otherwise cause a synchronous
+    // OpenScope.ini write for every intermediate line.
+    QTimer* lineNumberPersistTimer_ = nullptr;
+    int pendingLineNumber_ = -1;
+
     QThread* videoSpoutThread_ = nullptr;
     SpoutOutput* videoSpoutOutput_ = nullptr;
 

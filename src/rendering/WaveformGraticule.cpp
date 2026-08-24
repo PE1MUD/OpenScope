@@ -32,6 +32,101 @@ namespace
     }};
 }
 
+
+WaveformGraticuleLayout WaveformGraticule::layout(
+    const QRectF& canvasRect,
+    const QFont& baseFont,
+    const QPaintDevice* device,
+    double displayAspectRatio,
+    bool fitAspectRatio,
+    double contentScaleX,
+    double contentScaleY) const
+{
+    const double canvasWidth =
+        std::max(1.0, canvasRect.width());
+
+    const double canvasHeight =
+        std::max(1.0, canvasRect.height());
+
+    double viewportWidth = canvasWidth;
+    double viewportHeight = canvasHeight;
+
+    if (fitAspectRatio)
+    {
+        const double safeAspectRatio =
+            std::max(1.0e-9, displayAspectRatio);
+
+        viewportHeight =
+            viewportWidth / safeAspectRatio;
+
+        if (viewportHeight > canvasHeight)
+        {
+            viewportHeight = canvasHeight;
+            viewportWidth =
+                viewportHeight * safeAspectRatio;
+        }
+    }
+
+    viewportWidth *=
+        std::clamp(contentScaleX, 0.1, 1.0);
+
+    viewportHeight *=
+        std::clamp(contentScaleY, 0.1, 1.0);
+
+    const double viewportLeft =
+        canvasRect.left() +
+        (canvasWidth - viewportWidth) * 0.5;
+
+    const double viewportTop =
+        canvasRect.top() +
+        (canvasHeight - viewportHeight) * 0.5;
+
+    const QRectF viewportRect(
+        viewportLeft,
+        viewportTop,
+        viewportWidth,
+        viewportHeight);
+
+    const double inset =
+        leftInset(
+            baseFont,
+            device,
+            viewportRect.height());
+
+    const double scopeLeft =
+        viewportRect.left() + inset;
+
+    const QRectF scopeRect(
+        scopeLeft,
+        viewportRect.top(),
+        std::max(1.0, viewportRect.right() - scopeLeft),
+        viewportRect.height());
+
+    const QFont font =
+        labelFont(
+            baseFont,
+            scopeRect.height());
+
+    const QFontMetricsF metrics(
+        font,
+        device);
+
+    const double labelHeight =
+        metrics.height();
+
+    const QRectF plotRect(
+        scopeRect.left(),
+        scopeRect.top() + labelHeight * 0.5,
+        scopeRect.width(),
+        std::max(1.0, scopeRect.height() - labelHeight));
+
+    return
+    {
+        viewportRect,
+        plotRect
+    };
+}
+
 void WaveformGraticule::draw(
     QPainter& painter,
     const QRectF& scopeRect,

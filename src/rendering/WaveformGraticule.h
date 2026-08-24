@@ -7,9 +7,24 @@
 #include <QPainter>
 #include <QRectF>
 
+struct WaveformGraticuleLayout
+{
+    QRectF viewportRect;
+    QRectF plotRect;
+};
+
 class WaveformGraticule
 {
 public:
+    [[nodiscard]] WaveformGraticuleLayout layout(
+        const QRectF& canvasRect,
+        const QFont& baseFont,
+        const QPaintDevice* device,
+        double displayAspectRatio,
+        bool fitAspectRatio,
+        double contentScaleX,
+        double contentScaleY) const;
+
     void draw(
         QPainter& painter,
         const QRectF& scopeRect,

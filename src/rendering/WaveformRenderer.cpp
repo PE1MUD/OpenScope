@@ -5,19 +5,28 @@
 
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QPen>
 #include <QtGlobal>
 #include <QApplication>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <numbers>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 #include <utility>
 #include <vector>
 
+#include <immintrin.h>
+
 namespace
 {
+
+
+
     struct GlowWorkload
     {
         std::uint32_t dirtyTiles = 0;
@@ -811,28 +820,6 @@ void WaveformRenderer::setOutputSize(
 
     image_.fill(Qt::black);
 
-    // Cache the core width once per output-size change.  The hot trace loop
-    // must not recalculate sqrt/clamp for every line segment.
-    const double renderDimension =
-        static_cast<double>(
-            std::max(
-                1,
-                std::min(width, height)));
-
-    const double beamScale =
-        std::clamp(
-            std::sqrt(
-                renderDimension /
-                576.0),
-            1.0,
-            1.90);
-
-    constexpr double kReferenceCoreRadiusPx = 0.82;
-
-    beamCoreRadiusPx_ =
-        kReferenceCoreRadiusPx *
-        beamScale;
-
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) *
         static_cast<std::size_t>(height);
@@ -873,6 +860,9 @@ void WaveformRenderer::setOutputSize(
         static_cast<std::size_t>(
             width));
 
+    // Scopephor stores already-rendered images at the target resolution.
+    // A target-size change therefore invalidates the complete phosphor stack.
+    clearScopephorFrames();
 }
 
 void WaveformRenderer::setZoomed(
@@ -1077,102 +1067,35 @@ void WaveformRenderer::clearOrFadeTrace()
         chromaPersistence);
 }
 
-QRectF WaveformRenderer::viewportRect() const
+WaveformGraticuleLayout WaveformRenderer::graticuleLayout() const
 {
-    const double widgetWidth =
+    const QRectF canvasRect(
+        0.0,
+        0.0,
         static_cast<double>(
-            image_.width() - 1);
-
-    const double widgetHeight =
+            std::max(1, image_.width() - 1)),
         static_cast<double>(
-            image_.height() - 1);
+            std::max(1, image_.height() - 1)));
 
-    double width =
-        widgetWidth;
-
-    double height =
-        widgetHeight;
-
-    if (fitAspectRatio_)
-    {
-        const double aspectRatio =
-            OpenScopeSettings::aspectRatioValue(
-                aspectRatio_);
-
-        height =
-            width /
-            aspectRatio;
-
-        if (height > widgetHeight)
-        {
-            height =
-                widgetHeight;
-
-            width =
-                height *
-                aspectRatio;
-        }
-    }
-
-    width *= contentScaleX_;
-    height *= contentScaleY_;
-
-    const double left =
-        (widgetWidth - width) *
-        0.5;
-
-    const double top =
-        (widgetHeight - height) *
-        0.5;
-
-    return QRectF(
-        left,
-        top,
-        width,
-        height);
+    return graticule_.layout(
+        canvasRect,
+        QApplication::font(),
+        &image_,
+        OpenScopeSettings::aspectRatioValue(
+            aspectRatio_),
+        fitAspectRatio_,
+        contentScaleX_,
+        contentScaleY_);
 }
 
-QRectF WaveformRenderer::scopeRect() const
+QRectF WaveformRenderer::viewportRect() const
 {
-    const QRectF viewport =
-        viewportRect();
-
-    const double left =
-        viewport.left() +
-        graticule_.leftInset(
-            QApplication::font(),
-            &image_,
-            viewport.height());
-
-    return QRectF(
-        left,
-        viewport.top(),
-        viewport.right() - left,
-        viewport.height());
+    return graticuleLayout().viewportRect;
 }
 
 QRectF WaveformRenderer::scaledScopeRect() const
 {
-    const QRectF scope =
-        scopeRect();
-
-    const QFont font =
-        graticule_.labelFont(
-            QApplication::font(),
-            scope.height());
-
-    const QFontMetricsF metrics(
-        font,
-        &image_);
-
-    const double labelHeight =
-        metrics.height();
-
-    return QRectF(
-        scope.left(),
-        scope.top() + labelHeight * 0.5,
-        scope.width(),
-        scope.height() - labelHeight);
+    return graticuleLayout().plotRect;
 }
 
 void WaveformRenderer::renderSingleLine(
@@ -1197,23 +1120,10 @@ void WaveformRenderer::renderSingleLine(
     QElapsedTimer phaseTimer;
     phaseTimer.start();
 
-    clearOrFadeTrace();
-
-    renderTimings_.persistenceUs =
-        static_cast<std::uint64_t>(
-            phaseTimer.nsecsElapsed() / 1000);
-
-    phaseTimer.restart();
-
     const std::size_t sourceWidth =
         static_cast<std::size_t>(
             frame.width);
 
-    // Always reconstruct luminance to 4x the native line width.
-    // X1 needs the reconstructed samples too: when the reconstructed
-    // line is wider than the render canvas, the min/max reducer can
-    // preserve high-frequency burst energy that would otherwise alias
-    // away between display columns.
     const std::size_t reconstructedWidth =
         sourceWidth * 4u;
 
@@ -1222,11 +1132,8 @@ void WaveformRenderer::renderSingleLine(
             selectedLine_) *
         sourceWidth;
 
-    singleLineSource_.resize(
-        sourceWidth);
-
-    singleLineReconstructed_.resize(
-        reconstructedWidth);
+    singleLineSource_.resize(sourceWidth);
+    singleLineReconstructed_.resize(reconstructedWidth);
 
     for (std::size_t x = 0;
         x < sourceWidth;
@@ -1234,9 +1141,7 @@ void WaveformRenderer::renderSingleLine(
     {
         singleLineSource_[x] =
             static_cast<float>(
-                frame.y[
-                    sourceLineOffset +
-                        x]);
+                frame.y[sourceLineOffset + x]);
     }
 
     const std::uint64_t resamplerGenerationBefore =
@@ -1250,45 +1155,7 @@ void WaveformRenderer::renderSingleLine(
         singleLineReconstructor_.cacheGeneration() !=
         resamplerGenerationBefore;
 
-    /*
-     * Determine which part of the reconstructed line
-     * is visible.
-     *
-     * X1:
-     *     complete reconstructed 2880-sample line.
-     *
-     * X5/X10:
-     *     the corresponding fraction of that same reconstructed line.
-     */
-    std::size_t reconstructedViewWidth =
-        reconstructedWidth;
-
-    std::size_t reconstructedViewOffset = 0u;
-
-    if (zoomFactor_ > 1)
-    {
-        reconstructedViewWidth =
-            std::max<std::size_t>(
-                reconstructedWidth /
-                static_cast<std::size_t>(zoomFactor_),
-                1u);
-
-        const std::size_t maximumOffset =
-            reconstructedWidth -
-            reconstructedViewWidth;
-
-        reconstructedViewOffset =
-            static_cast<std::size_t>(
-                scrollPosition_ *
-                static_cast<double>(
-                    maximumOffset));
-    }
-
-    sourceY_.resize(
-        reconstructedViewWidth);
-
-    fullLumaVolts_.resize(
-        reconstructedWidth);
+    fullLumaVolts_.resize(reconstructedWidth);
 
     const auto digitalLevels =
         levels(VideoStandard::pal625());
@@ -1307,12 +1174,9 @@ void WaveformRenderer::renderSingleLine(
         x < reconstructedWidth;
         ++x)
     {
-        const double y16 =
-            static_cast<double>(
-                singleLineReconstructed_[x]);
-
         const double y10 =
-            y16 /
+            static_cast<double>(
+                singleLineReconstructed_[x]) /
             64.0;
 
         fullLumaVolts_[x] =
@@ -1322,6 +1186,29 @@ void WaveformRenderer::renderSingleLine(
                 voltsPerCode);
     }
 
+    std::size_t reconstructedViewWidth =
+        reconstructedWidth;
+    std::size_t reconstructedViewOffset = 0u;
+
+    if (zoomFactor_ > 1)
+    {
+        reconstructedViewWidth =
+            std::max<std::size_t>(
+                reconstructedWidth /
+                    static_cast<std::size_t>(zoomFactor_),
+                1u);
+
+        const std::size_t maximumOffset =
+            reconstructedWidth -
+            reconstructedViewWidth;
+
+        reconstructedViewOffset =
+            static_cast<std::size_t>(
+                scrollPosition_ *
+                static_cast<double>(maximumOffset));
+    }
+
+    sourceY_.resize(reconstructedViewWidth);
     for (std::size_t x = 0;
         x < reconstructedViewWidth;
         ++x)
@@ -1329,15 +1216,11 @@ void WaveformRenderer::renderSingleLine(
         sourceY_[x] =
             fullLumaVolts_[
                 reconstructedViewOffset + x];
-    }    /*
-     * U/V are still native 720-sample data.
-     * Map the same visible interval from the
-     * reconstructed coordinate system back into
-     * the native source coordinate system.
-     */
-    std::size_t sourceViewWidth =
-        sourceWidth;
+    }
 
+    // Chroma remains a current-frame envelope.  Scopephor history is the
+    // reconstructed 2880-sample luminance beam only.
+    std::size_t sourceViewWidth = sourceWidth;
     std::size_t sourceViewOffset = 0u;
 
     if (zoomFactor_ > 1)
@@ -1345,34 +1228,27 @@ void WaveformRenderer::renderSingleLine(
         sourceViewWidth =
             std::max<std::size_t>(
                 sourceWidth /
-                static_cast<std::size_t>(zoomFactor_),
+                    static_cast<std::size_t>(zoomFactor_),
                 1u);
 
         const std::size_t maximumSourceOffset =
-            sourceWidth -
-            sourceViewWidth;
+            sourceWidth - sourceViewWidth;
 
         const double normalisedPosition =
-            reconstructedWidth > 1u
-            ? static_cast<double>(
-                reconstructedViewOffset) /
-            static_cast<double>(
-                reconstructedWidth -
-                reconstructedViewWidth)
+            reconstructedWidth > reconstructedViewWidth
+            ? static_cast<double>(reconstructedViewOffset) /
+                static_cast<double>(
+                    reconstructedWidth - reconstructedViewWidth)
             : 0.0;
 
         sourceViewOffset =
             static_cast<std::size_t>(
                 normalisedPosition *
-                static_cast<double>(
-                    maximumSourceOffset));
+                static_cast<double>(maximumSourceOffset));
     }
 
-    sourceU_.resize(
-        sourceViewWidth);
-
-    sourceV_.resize(
-        sourceViewWidth);
+    sourceU_.resize(sourceViewWidth);
+    sourceV_.resize(sourceViewWidth);
 
     for (std::size_t x = 0;
         x < sourceViewWidth;
@@ -1384,606 +1260,749 @@ void WaveformRenderer::renderSingleLine(
                 sourceWidth - 1u);
 
         const std::size_t sampleIndex =
-            sourceLineOffset +
-            sourceX;
+            sourceLineOffset + sourceX;
 
         sourceU_[x] =
-            static_cast<float>(
-                frame.u[sampleIndex]);
-
+            static_cast<float>(frame.u[sampleIndex]);
         sourceV_[x] =
-            static_cast<float>(
-                frame.v[sampleIndex]);
+            static_cast<float>(frame.v[sampleIndex]);
     }
+
+    displayY_.resize(
+        static_cast<std::size_t>(image_.width()));
+    displayU_.resize(
+        static_cast<std::size_t>(image_.width()));
+    displayV_.resize(
+        static_cast<std::size_t>(image_.width()));
+
+    resampleLinear(sourceY_, displayY_);
+    resampleLinear(sourceU_, displayU_);
+    resampleLinear(sourceV_, displayV_);
+
+    const QRectF scope = scaledScopeRect();
+
+    // Beam geometry must scale from the actual graticule plot area, not
+    // from the outer transport canvas.  This keeps PC and PAL/Spout targets
+    // physically consistent even when labels, aspect fitting or underscan
+    // reduce the usable plot raster.
+    const double plotRenderDimension =
+        std::max(
+            1.0,
+            std::min(
+                scope.width(),
+                scope.height()));
+
+    const double plotBeamScale =
+        std::clamp(
+            std::sqrt(
+                plotRenderDimension / 576.0),
+            1.0,
+            1.90);
+
+    constexpr double kReferenceCoreRadiusPx = 0.82;
+    beamCoreRadiusPx_ =
+        kReferenceCoreRadiusPx * plotBeamScale;
+
+    renderTimings_.beamCoreRadiusPx =
+        beamCoreRadiusPx_;
+    renderTimings_.beamCoreMarginPx =
+        std::max(
+            1,
+            static_cast<int>(
+                std::floor(beamCoreRadiusPx_)));
+
+    // -----------------------------------------------------------------
+    // New Scopephor model:
+    //
+    //   current 2880-sample Y line
+    //       -> one Catmull-Rom path in THIS target resolution
+    //       -> render core + glow ONCE
+    //       -> store the rendered target-resolution phosphor image
+    //
+    // Old phosphor memories are never splined or glowed again.
+    // Display persistence is only a weighted sum of those stored images.
+    // -----------------------------------------------------------------
+
+    phaseTimer.restart();
+
+    const std::vector<BeamPoint> currentLumaPolyline =
+        buildCurrentLumaPolyline(
+            scope,
+            reconstructedViewOffset,
+            reconstructedViewWidth);
+
+    renderTimings_.tracePrepUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    std::uint64_t currentGlowUs = 0u;
+    std::uint64_t currentCoreUs = 0u;
+
+    int phosphorMinX = image_.width();
+    int phosphorMinY = image_.height();
+    int phosphorMaxX = -1;
+    int phosphorMaxY = -1;
+
+    std::vector<std::uint16_t> currentPhosphorEnergy =
+        renderCurrentPhosphorEnergy(
+            currentLumaPolyline,
+            scope,
+            currentGlowUs,
+            currentCoreUs,
+            phosphorMinX,
+            phosphorMinY,
+            phosphorMaxX,
+            phosphorMaxY);
 
     /*
-     * Resample only the visible interval to the
-     * actual display width.
+     * PRE-SCOPEPHOR AA RESOLVE
+     * ------------------------
+     *
+     * The analytic 2x2 core is substantially cheaper than the 4x4 quality
+     * experiment, but still leaves a small pixel-phase modulation which
+     * Scopephor can otherwise preserve and make more visible.
+     *
+     * Resolve only the active beam bbox with a tiny separable 3-tap filter:
+     *
+     *     0.15   0.70   0.15
+     *
+     * Horizontal + vertical passes give a smooth subpixel filament before
+     * temporal feedback, without touching the full framebuffer.  The kernel
+     * sums to one, so beam energy is redistributed rather than amplified.
      */
-    if (sourceY_.size() >
-        displayY_.size())
+    if (phosphorMaxX >= phosphorMinX &&
+        phosphorMaxY >= phosphorMinY &&
+        !currentPhosphorEnergy.empty())
     {
-        resampleMinMax(
-            sourceY_,
-            displayYMin_,
-            displayYMax_);
+        const int resolveWidth = image_.width();
+        const int resolveHeight = image_.height();
 
-        resampleLinear(
-            sourceY_,
-            displayY_);
-    }
-    else
-    {
-        resampleLinear(
-            sourceY_,
-            displayY_);
-    }
-
-    resampleLinear(
-        sourceU_,
-        displayU_);
-
-    resampleLinear(
-        sourceV_,
-        displayV_);
-
-    const int displayWidth =
-        image_.width();
-
-    std::vector<double> chromaUpperY(
-        static_cast<std::size_t>(displayWidth));
-
-    std::vector<double> chromaLowerY(
-        static_cast<std::size_t>(displayWidth));
-
-    std::vector<int> chromaRed(
-        static_cast<std::size_t>(displayWidth));
-
-    std::vector<int> chromaGreen(
-        static_cast<std::size_t>(displayWidth));
-
-    std::vector<int> chromaBlue(
-        static_cast<std::size_t>(displayWidth));
-
-    const QRectF scope =
-        scaledScopeRect();
-
-    const double voltsToPixels =
-        scope.height() /
-        analog.graticuleMaxVolts;
-
-    const double chromaXScale =
-        scope.width() /
-        static_cast<double>(
-            displayWidth - 1);
-
-    for (int x = 0;
-        x < displayWidth;
-        ++x)
-    {
-        const std::size_t index =
-            static_cast<std::size_t>(
-                x);
-
-        const double plotX =
-            scope.left() +
-            static_cast<double>(x) *
-            chromaXScale;
-
-        const double yValue =
+        const int resolveMinX =
             std::clamp(
-                static_cast<double>(
-                    displayY_[index]),
-                0.0,
-                kMaximumSampleValue);
+                phosphorMinX - 1,
+                0,
+                resolveWidth - 1);
 
-        const double uValue =
+        const int resolveMaxX =
             std::clamp(
-                static_cast<double>(
-                    displayU_[index]),
-                0.0,
-                kMaximumSampleValue);
+                phosphorMaxX + 1,
+                0,
+                resolveWidth - 1);
 
-        const double vValue =
+        const int resolveMinY =
             std::clamp(
-                static_cast<double>(
-                    displayV_[index]),
-                0.0,
-                kMaximumSampleValue);
+                phosphorMinY - 1,
+                0,
+                resolveHeight - 1);
 
-        const double neutralChroma =
-            static_cast<double>(
-                digitalLevels.chromaNeutral) *
-            64.0;
+        const int resolveMaxY =
+            std::clamp(
+                phosphorMaxY + 1,
+                0,
+                resolveHeight - 1);
 
-        const double chromaNoiseThreshold =
-            neutralChroma *
-            kChromaNoiseThresholdFraction;
+        const int resolveSpan =
+            resolveMaxX -
+            resolveMinX + 1;
 
-        double chromaU =
-            uValue -
-            neutralChroma;
+        std::vector<std::uint16_t> resolveHorizontal(
+            static_cast<std::size_t>(resolveSpan) *
+                static_cast<std::size_t>(
+                    resolveMaxY - resolveMinY + 1),
+            0u);
 
-        double chromaV =
-            vValue -
-            neutralChroma;
+        constexpr std::uint32_t kSideQ8 = 38u;   // 0.1484375
+        constexpr std::uint32_t kCenterQ8 = 180u; // 0.703125
 
-        const auto palChroma =
-            palChromaCoefficients(
-                VideoColorStandard::Rec601_625);
-
-        const double palU =
-            chromaU *
-            palChroma.cbToU;
-
-        const double palV =
-            chromaV *
-            palChroma.crToV;
-
-        const double chromaMagnitude =
-            std::hypot(
-                palU,
-                palV);
-
-        if (chromaMagnitude <
-            chromaNoiseThreshold)
+        for (int y = resolveMinY;
+            y <= resolveMaxY;
+            ++y)
         {
-            chromaU = 0.0;
-            chromaV = 0.0;
+            const std::size_t sourceRow =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(resolveWidth);
+
+            const std::size_t targetRow =
+                static_cast<std::size_t>(y - resolveMinY) *
+                static_cast<std::size_t>(resolveSpan);
+
+            for (int x = resolveMinX;
+                x <= resolveMaxX;
+                ++x)
+            {
+                const int leftX =
+                    std::max(
+                        resolveMinX,
+                        x - 1);
+
+                const int rightX =
+                    std::min(
+                        resolveMaxX,
+                        x + 1);
+
+                const std::uint32_t left =
+                    currentPhosphorEnergy[
+                        sourceRow +
+                        static_cast<std::size_t>(leftX)];
+
+                const std::uint32_t center =
+                    currentPhosphorEnergy[
+                        sourceRow +
+                        static_cast<std::size_t>(x)];
+
+                const std::uint32_t right =
+                    currentPhosphorEnergy[
+                        sourceRow +
+                        static_cast<std::size_t>(rightX)];
+
+                resolveHorizontal[
+                    targetRow +
+                    static_cast<std::size_t>(x - resolveMinX)] =
+                    static_cast<std::uint16_t>(
+                        (left * kSideQ8 +
+                         center * kCenterQ8 +
+                         right * kSideQ8 +
+                         128u) >> 8);
+            }
         }
 
-        const double plotY =
-            scope.bottom() -
-            yValue *
-            voltsToPixels;
-
-        const double nominalChromaExcursion =
-            static_cast<double>(
-                digitalLevels.chromaPositiveExcursion) *
-            64.0;
-
-        const double chromaVolts =
-            std::hypot(
-                palU,
-                palV) *
-            analog.chromaPeakVolts /
-            nominalChromaExcursion;
-
-        const double spread =
-            chromaVolts *
-            voltsToPixels;
-
-        chromaUpperY[index] =
-            plotY - spread;
-
-        chromaLowerY[index] =
-            plotY + spread;
-
-        const auto rgb =
-            yuvToRgbCoefficients(
-                VideoColorStandard::Rec601_625);
-
-        double redValue =
-            rgb.rCr * chromaV;
-
-        double greenValue =
-            rgb.gCb * chromaU +
-            rgb.gCr * chromaV;
-
-        double blueValue =
-            rgb.bCb * chromaU;
-
-        const double minimum =
-            std::min({
-                redValue,
-                greenValue,
-                blueValue
-                });
-
-        redValue -= minimum;
-        greenValue -= minimum;
-        blueValue -= minimum;
-
-        const double maximum =
-            std::max({
-                redValue,
-                greenValue,
-                blueValue
-                });
-
-        int red = 0;
-        int green = 0;
-        int blue = 0;
-
-        if (maximum > 0.0)
+        for (int y = resolveMinY;
+            y <= resolveMaxY;
+            ++y)
         {
-            red =
-                static_cast<int>(
-                    std::clamp(
-                        redValue *
-                        255.0 /
-                        maximum,
-                        0.0,
-                        255.0));
+            const int topY =
+                std::max(
+                    resolveMinY,
+                    y - 1);
 
-            green =
-                static_cast<int>(
-                    std::clamp(
-                        greenValue *
-                        255.0 /
-                        maximum,
-                        0.0,
-                        255.0));
+            const int bottomY =
+                std::min(
+                    resolveMaxY,
+                    y + 1);
 
-            blue =
-                static_cast<int>(
-                    std::clamp(
-                        blueValue *
-                        255.0 /
-                        maximum,
-                        0.0,
-                        255.0));
+            const std::size_t topRow =
+                static_cast<std::size_t>(topY - resolveMinY) *
+                static_cast<std::size_t>(resolveSpan);
+
+            const std::size_t centerRow =
+                static_cast<std::size_t>(y - resolveMinY) *
+                static_cast<std::size_t>(resolveSpan);
+
+            const std::size_t bottomRow =
+                static_cast<std::size_t>(bottomY - resolveMinY) *
+                static_cast<std::size_t>(resolveSpan);
+
+            const std::size_t destinationRow =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(resolveWidth);
+
+            for (int x = resolveMinX;
+                x <= resolveMaxX;
+                ++x)
+            {
+                const std::size_t localX =
+                    static_cast<std::size_t>(
+                        x - resolveMinX);
+
+                const std::uint32_t top =
+                    resolveHorizontal[
+                        topRow + localX];
+
+                const std::uint32_t center =
+                    resolveHorizontal[
+                        centerRow + localX];
+
+                const std::uint32_t bottom =
+                    resolveHorizontal[
+                        bottomRow + localX];
+
+                currentPhosphorEnergy[
+                    destinationRow +
+                    static_cast<std::size_t>(x)] =
+                    static_cast<std::uint16_t>(
+                        (top * kSideQ8 +
+                         center * kCenterQ8 +
+                         bottom * kSideQ8 +
+                         128u) >> 8);
+            }
+        }
+
+        phosphorMinX = resolveMinX;
+        phosphorMaxX = resolveMaxX;
+        phosphorMinY = resolveMinY;
+        phosphorMaxY = resolveMaxY;
+    }
+
+    renderTimings_.glowUs =
+        currentGlowUs;
+
+    renderTimings_.traceRasterUs =
+        currentCoreUs;
+
+    phaseTimer.restart();
+
+    applyScopephorFeedback(
+        currentPhosphorEnergy,
+        phosphorMinX,
+        phosphorMinY,
+        phosphorMaxX,
+        phosphorMaxY);
+
+    // image_ is only the final Qt transport surface. Phosphor math is raw.
+    image_.fill(Qt::black);
+
+    // Draw the graticule first. Signal traces are composed afterwards so
+    // the beam remains visually in front of the graticule.
+    {
+        QPainter graticulePainter(&image_);
+        graticule_.draw(
+            graticulePainter,
+            scope,
+            VideoStandard::pal625());
+    }
+
+    renderTimings_.persistenceUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    if (chromaFillIntensity_ > 0)
+    {
+        /*
+         * Chroma is deliberately NOT part of Scopephor.
+         *
+         * Restore the pre-Scopephor current-frame chroma renderer verbatim in
+         * spirit:
+         *   - current U/V only
+         *   - old envelope geometry
+         *   - old RGB derivation
+         *   - direct vertical RGB spans using the same display LUT
+         *
+         * Chroma is written directly into the current target. It therefore
+         * has no persistence, no age weighting and no glow.
+         */
+        phaseTimer.restart();
+
+        const int displayWidth =
+            image_.width();
+
+        std::vector<double> chromaUpperY(
+            static_cast<std::size_t>(displayWidth));
+
+        std::vector<double> chromaLowerY(
+            static_cast<std::size_t>(displayWidth));
+
+        std::vector<int> chromaRed(
+            static_cast<std::size_t>(displayWidth));
+
+        std::vector<int> chromaGreen(
+            static_cast<std::size_t>(displayWidth));
+
+        std::vector<int> chromaBlue(
+            static_cast<std::size_t>(displayWidth));
+
+        const double voltsToPixels =
+            scope.height() /
+            analog.graticuleMaxVolts;
+
+        const double chromaXScale =
+            scope.width() /
+            static_cast<double>(
+                std::max(1, displayWidth - 1));
+
+        for (int x = 0;
+            x < displayWidth;
+            ++x)
+        {
+            const std::size_t index =
+                static_cast<std::size_t>(x);
+
+            const double yValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayY_[index]),
+                    0.0,
+                    kMaximumSampleValue);
+
+            const double uValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayU_[index]),
+                    0.0,
+                    kMaximumSampleValue);
+
+            const double vValue =
+                std::clamp(
+                    static_cast<double>(
+                        displayV_[index]),
+                    0.0,
+                    kMaximumSampleValue);
+
+            const double neutralChroma =
+                static_cast<double>(
+                    digitalLevels.chromaNeutral) *
+                64.0;
+
+            const double chromaNoiseThreshold =
+                neutralChroma *
+                kChromaNoiseThresholdFraction;
+
+            double chromaU =
+                uValue -
+                neutralChroma;
+
+            double chromaV =
+                vValue -
+                neutralChroma;
+
+            const auto palChroma =
+                palChromaCoefficients(
+                    VideoColorStandard::Rec601_625);
+
+            const double palU =
+                chromaU *
+                palChroma.cbToU;
+
+            const double palV =
+                chromaV *
+                palChroma.crToV;
+
+            const double chromaMagnitude =
+                std::hypot(
+                    palU,
+                    palV);
+
+            if (chromaMagnitude <
+                chromaNoiseThreshold)
+            {
+                chromaU = 0.0;
+                chromaV = 0.0;
+            }
+
+            const double plotY =
+                scope.bottom() -
+                yValue *
+                voltsToPixels;
+
+            const double nominalChromaExcursion =
+                static_cast<double>(
+                    digitalLevels.chromaPositiveExcursion) *
+                64.0;
+
+            const double chromaVolts =
+                std::hypot(
+                    palU,
+                    palV) *
+                analog.chromaPeakVolts /
+                nominalChromaExcursion;
+
+            const double spread =
+                chromaVolts *
+                voltsToPixels;
+
+            chromaUpperY[index] =
+                plotY - spread;
+
+            chromaLowerY[index] =
+                plotY + spread;
+
+            const auto rgb =
+                yuvToRgbCoefficients(
+                    VideoColorStandard::Rec601_625);
+
+            double redValue =
+                rgb.rCr * chromaV;
+
+            double greenValue =
+                rgb.gCb * chromaU +
+                rgb.gCr * chromaV;
+
+            double blueValue =
+                rgb.bCb * chromaU;
+
+            const double minimum =
+                std::min({
+                    redValue,
+                    greenValue,
+                    blueValue
+                    });
+
+            redValue -= minimum;
+            greenValue -= minimum;
+            blueValue -= minimum;
+
+            const double maximum =
+                std::max({
+                    redValue,
+                    greenValue,
+                    blueValue
+                    });
+
+            int red = 0;
+            int green = 0;
+            int blue = 0;
+
+            if (maximum > 0.0)
+            {
+                red =
+                    static_cast<int>(
+                        std::clamp(
+                            redValue *
+                            255.0 /
+                            maximum,
+                            0.0,
+                            255.0));
+
+                green =
+                    static_cast<int>(
+                        std::clamp(
+                            greenValue *
+                            255.0 /
+                            maximum,
+                            0.0,
+                            255.0));
+
+                blue =
+                    static_cast<int>(
+                        std::clamp(
+                            blueValue *
+                            255.0 /
+                            maximum,
+                            0.0,
+                            255.0));
+            }
+
             chromaRed[index] = red;
             chromaGreen[index] = green;
             chromaBlue[index] = blue;
         }
 
-        //if (maximum > 0.0 &&
-        //    spread > 0.0)
-        //{
-        //    plotBeam(
-        //        plotX,
-        //        plotY - spread,
-        //        kChromaBeamIntensity,
-        //        red,
-        //        green,
-        //        blue);
+        const int firstScreenX =
+            std::clamp(
+                static_cast<int>(
+                    std::ceil(scope.left())),
+                0,
+                image_.width());
 
-        //    plotBeam(
-        //        plotX,
-        //        plotY + spread,
-        //        kChromaBeamIntensity,
-        //        red,
-        //        green,
-        //        blue);
-        //}
-    }
+        const int lastScreenXExclusive =
+            std::clamp(
+                static_cast<int>(
+                    std::floor(scope.right())) + 1,
+                firstScreenX,
+                image_.width());
 
-
-    const int firstScreenX =
-        std::clamp(
-            static_cast<int>(
-                std::ceil(scope.left())),
-            0,
-            image_.width());
-
-    const int lastScreenXExclusive =
-        std::clamp(
-            static_cast<int>(
-                std::floor(scope.right())) + 1,
-            firstScreenX,
-            image_.width());
-
-    // Large screen waveforms are split into narrow vertical stripes.  Each
-    // stripe exclusively owns its destination X range; the luminance beam
-    // may inspect a small source halo, but writes are clipped to the stripe.
-    // That makes the jobs race-free without private full-frame buffers.
-    constexpr int kParallelTraceStripeWidth = 128;
-
-    const int traceWidth =
-        image_.width();
-
-    const int traceStripeWidth =
-        traceJobExecutor_
-        ? kParallelTraceStripeWidth
-        : std::max(1, traceWidth);
-
-    const std::size_t traceJobCount =
-        traceWidth > 0
-        ? static_cast<std::size_t>(
-            (traceWidth +
-                traceStripeWidth - 1) /
-            traceStripeWidth)
-        : 0u;
-
-    const auto renderTraceStripe =
-        [this,
-        &scope,
-        &chromaUpperY,
-        &chromaLowerY,
-        &chromaRed,
-        &chromaGreen,
-        &chromaBlue,
-        displayWidth,
-        firstScreenX,
-        lastScreenXExclusive,
-        traceStripeWidth](std::size_t jobIndex)
+        for (int screenX = firstScreenX;
+            screenX < lastScreenXExclusive;
+            ++screenX)
         {
-            const int stripeFirstX =
-                std::min(
-                    static_cast<int>(jobIndex) *
-                    traceStripeWidth,
-                    image_.width());
+            const double normalisedX =
+                (static_cast<double>(screenX) -
+                    scope.left()) /
+                scope.width();
 
-            const int stripeLastX =
-                std::min(
-                    stripeFirstX +
-                    traceStripeWidth,
-                    image_.width());
-
-            if (stripeFirstX >= stripeLastX)
-            {
-                return;
-            }
-
-            plotLuminanceTraceRange(
-                stripeFirstX,
-                stripeLastX);
-
-            const int chromaFirstX =
-                std::max(
-                    stripeFirstX,
-                    firstScreenX);
-
-            const int chromaLastX =
-                std::min(
-                    stripeLastX,
-                    lastScreenXExclusive);
-
-            for (int screenX = chromaFirstX;
-                screenX < chromaLastX;
-                ++screenX)
-            {
-                const double normalisedX =
-                    (static_cast<double>(screenX) -
-                        scope.left()) /
-                    scope.width();
-
-                const std::size_t index =
-                    std::min(
-                        static_cast<std::size_t>(
-                            std::clamp(
-                                normalisedX,
-                                0.0,
-                                1.0) *
-                            static_cast<double>(
-                                displayWidth - 1)),
-                        static_cast<std::size_t>(
-                            displayWidth - 1));
-
-                const int firstY =
-                    std::clamp(
-                        static_cast<int>(
-                            std::ceil(
-                                chromaUpperY[index])),
-                        0,
-                        image_.height() - 1);
-
-                const int lastY =
-                    std::clamp(
-                        static_cast<int>(
-                            std::floor(
-                                chromaLowerY[index])),
-                        0,
-                        image_.height() - 1);
-
-                for (int y = firstY;
-                    y <= lastY;
-                    ++y)
-                {
-                    addChromaFillPixel(
-                        screenX,
-                        y,
-                        chromaRed[index],
-                        chromaGreen[index],
-                        chromaBlue[index],
-                        chromaFillIntensity_);
-                }
-            }
-        };
-
-    // Worker dispatch has a measurable fixed cost on small viewports.
-    // Keep those renders scalar and only ask the idle display worker to
-    // assist once the PC waveform canvas is large enough to amortise it.
-    constexpr std::int64_t kParallelTraceMinimumPixels = 2'000'000;
-
-    const std::int64_t traceCanvasPixels =
-        static_cast<std::int64_t>(image_.width()) *
-        static_cast<std::int64_t>(image_.height());
-
-    const bool useParallelTrace =
-        traceCanvasPixels >= kParallelTraceMinimumPixels &&
-        traceJobCount > 1u &&
-        static_cast<bool>(traceJobExecutor_);
-
-    renderTimings_.traceParallel = useParallelTrace;
-    renderTimings_.traceJobCount =
-        static_cast<std::uint32_t>(traceJobCount);
-
-    const std::uint64_t tracePrepUs =
-        static_cast<std::uint64_t>(
-            phaseTimer.nsecsElapsed() / 1000);
-
-    QElapsedTimer rasterTimer;
-    rasterTimer.start();
-
-    if (useParallelTrace)
-    {
-        traceJobExecutor_(
-            traceJobCount,
-            renderTraceStripe);
-    }
-    else
-    {
-        for (std::size_t jobIndex = 0;
-            jobIndex < traceJobCount;
-            ++jobIndex)
-        {
-            renderTraceStripe(jobIndex);
-        }
-    }
-    renderTimings_.traceRasterUs =
-        static_cast<std::uint64_t>(
-            rasterTimer.nsecsElapsed() / 1000);
-    renderTimings_.traceUs =
-        static_cast<std::uint64_t>(
-            phaseTimer.nsecsElapsed() / 1000);
-    renderTimings_.tracePrepUs =
-        std::min(
-            tracePrepUs,
-            renderTimings_.traceUs);
-
-    phaseTimer.restart();
-    composeTraceImage();
-    renderTimings_.composeUs =
-        static_cast<std::uint64_t>(
-            phaseTimer.nsecsElapsed() / 1000);
-
-    phaseTimer.restart();
-    if (selectedLine_ >= 0 && glow_ > 0)
-    {
-        const GlowWorkload workload =
-            applyHalfResolutionWhiteGlow(image_, glow_);
-
-        renderTimings_.glowDirtyTiles = workload.dirtyTiles;
-        renderTimings_.glowTotalTiles = workload.totalTiles;
-        renderTimings_.glowHorizontalPass1Tiles = workload.horizontalPass1Tiles;
-        renderTimings_.glowVerticalPass1Tiles = workload.verticalPass1Tiles;
-        renderTimings_.glowHorizontalPass2Tiles = workload.horizontalPass2Tiles;
-        renderTimings_.glowVerticalPass2Tiles = workload.verticalPass2Tiles;
-        renderTimings_.glowActiveX = workload.activeX;
-        renderTimings_.glowActiveY = workload.activeY;
-        renderTimings_.glowActiveWidth = workload.activeWidth;
-        renderTimings_.glowActiveHeight = workload.activeHeight;
-    }
-    renderTimings_.glowUs =
-        static_cast<std::uint64_t>(
-            phaseTimer.nsecsElapsed() / 1000);
-
-    phaseTimer.restart();
-    QPainter painter(&image_);
-
-    graticule_.draw(
-        painter,
-        scope,
-        VideoStandard::pal625());
-
-    // The trace is the measurement, so its core must win over the
-    // graticule at intersections.  Glow is intentionally left below the
-    // graticule; only the actual beam/core is repainted on top.
-    painter.end();
-
-    const int firstX =
-        std::clamp(
-            static_cast<int>(std::floor(scope.left())),
-            0,
-            image_.width() - 1);
-    const int lastX =
-        std::clamp(
-            static_cast<int>(std::ceil(scope.right())),
-            firstX,
-            image_.width() - 1);
-    const int firstY =
-        std::clamp(
-            static_cast<int>(std::floor(scope.top())),
-            0,
-            image_.height() - 1);
-    const int lastY =
-        std::clamp(
-            static_cast<int>(std::ceil(scope.bottom())),
-            firstY,
-            image_.height() - 1);
-
-    for (int y = firstY; y <= lastY; ++y)
-    {
-        auto* destination =
-            reinterpret_cast<QRgb*>(
-                image_.scanLine(y));
-
-        for (int x = firstX; x <= lastX; ++x)
-        {
             const std::size_t index =
-                static_cast<std::size_t>(y) *
-                static_cast<std::size_t>(image_.width()) +
-                static_cast<std::size_t>(x);
+                std::min(
+                    static_cast<std::size_t>(
+                        std::clamp(
+                            normalisedX,
+                            0.0,
+                            1.0) *
+                        static_cast<double>(
+                            displayWidth - 1)),
+                    static_cast<std::size_t>(
+                        displayWidth - 1));
 
-            const TracePixel& lumaPixel =
-                trace_[index];
-            const TracePixel& chromaPixel =
-                chromaTrace_[index];
+            const int firstY =
+                std::clamp(
+                    static_cast<int>(
+                        std::ceil(
+                            chromaUpperY[index])),
+                    0,
+                    image_.height() - 1);
 
-            const bool hasLuma =
-                lumaPixel.red != 0 ||
-                lumaPixel.green != 0 ||
-                lumaPixel.blue != 0;
-            const bool hasChroma =
-                chromaPixel.red != 0 ||
-                chromaPixel.green != 0 ||
-                chromaPixel.blue != 0;
+            const int lastY =
+                std::clamp(
+                    static_cast<int>(
+                        std::floor(
+                            chromaLowerY[index])),
+                    0,
+                    image_.height() - 1);
 
-            if (!hasLuma && !hasChroma)
+            if (lastY < firstY)
             {
                 continue;
             }
 
-            if (settings_.color)
-            {
-                const auto combinedChannel =
-                    [this](
-                        std::uint16_t luma,
-                        std::uint16_t chroma)
-                    {
-                        const std::uint32_t combined =
-                            std::min<std::uint32_t>(
-                                65535u,
-                                static_cast<std::uint32_t>(luma) +
-                                static_cast<std::uint32_t>(chroma));
+            const auto chromaLevel =
+                [this](int channel) -> int
+                {
+                    const std::uint32_t contribution =
+                        static_cast<std::uint32_t>(
+                            std::clamp(
+                                channel,
+                                0,
+                                255)) *
+                        static_cast<std::uint32_t>(
+                            chromaFillIntensity_) /
+                        255u;
 
-                        return displayLut_[combined];
-                    };
+                    return displayLut_[
+                        static_cast<std::uint16_t>(
+                            std::min<std::uint32_t>(
+                                kMaximumChromaLevel,
+                                contribution))];
+                };
+
+            const int redContribution =
+                chromaLevel(
+                    chromaRed[index]);
+
+            const int greenContribution =
+                chromaLevel(
+                    chromaGreen[index]);
+
+            const int blueContribution =
+                chromaLevel(
+                    chromaBlue[index]);
+
+            const int monoContribution =
+                std::max({
+                    redContribution,
+                    greenContribution,
+                    blueContribution
+                    });
+
+            for (int y = firstY;
+                y <= lastY;
+                ++y)
+            {
+                auto* destination =
+                    reinterpret_cast<QRgb*>(
+                        image_.scanLine(y));
+
+                if (settings_.color)
+                {
+                    destination[screenX] =
+                        qRgb(
+                            redContribution,
+                            greenContribution,
+                            blueContribution);
+                }
+                else
+                {
+                    destination[screenX] =
+                        qRgb(
+                            monoContribution,
+                            monoContribution,
+                            monoContribution);
+                }
+            }
+        }
+
+        // Chroma was written directly as vertical spans above.
+        renderTimings_.composeUs =
+            static_cast<std::uint64_t>(
+                phaseTimer.nsecsElapsed() / 1000);
+    }
+    else
+    {
+        renderTimings_.composeUs = 0u;
+    }
+
+    // Raw phosphor energy -> QImage transport surface.
+    // No QPainter and no Qt image blending.
+    phaseTimer.restart();
+
+    const int phosphorWidth =
+        image_.width();
+
+    const int phosphorHeight =
+        image_.height();
+
+    if (currentPhosphorEnergy.size() ==
+            static_cast<std::size_t>(phosphorWidth) *
+            static_cast<std::size_t>(phosphorHeight) &&
+        phosphorMaxX >= phosphorMinX &&
+        phosphorMaxY >= phosphorMinY)
+    {
+        phosphorMinX = std::clamp(phosphorMinX, 0, phosphorWidth - 1);
+        phosphorMaxX = std::clamp(phosphorMaxX, 0, phosphorWidth - 1);
+        phosphorMinY = std::clamp(phosphorMinY, 0, phosphorHeight - 1);
+        phosphorMaxY = std::clamp(phosphorMaxY, 0, phosphorHeight - 1);
+
+        for (int y = phosphorMinY;
+            y <= phosphorMaxY;
+            ++y)
+        {
+            auto* destination =
+                reinterpret_cast<QRgb*>(
+                    image_.scanLine(y));
+
+            const std::size_t row =
+                static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(
+                    phosphorWidth);
+
+            for (int x = phosphorMinX;
+                x <= phosphorMaxX;
+                ++x)
+            {
+                const std::uint16_t energy =
+                    currentPhosphorEnergy[
+                        row +
+                        static_cast<std::size_t>(x)];
+
+                if (energy == 0u)
+                {
+                    continue;
+                }
+
+                // Q-less display gain.  The previous >>8 mapping made the
+                // 16-bit beam energy almost black (255*7 -> only ~6).
+                // >>3 restores a hot white core while preserving headroom
+                // for glow and phosphor accumulation.
+                const int tracePeakWhite =
+                    lineInfoOverlayPalOutput_
+                    ? 191
+                    : 255;
+
+                const int value =
+                    std::min(
+                        tracePeakWhite,
+                        static_cast<int>(
+                            energy >> 3));
+
+                const QRgb old =
+                    destination[x];
 
                 destination[x] =
                     qRgb(
-                        combinedChannel(
-                            lumaPixel.red,
-                            chromaPixel.red),
-                        combinedChannel(
-                            lumaPixel.green,
-                            chromaPixel.green),
-                        combinedChannel(
-                            lumaPixel.blue,
-                            chromaPixel.blue));
-            }
-            else
-            {
-                const std::uint32_t luma =
-                    std::max({
-                        static_cast<std::uint32_t>(lumaPixel.red),
-                        static_cast<std::uint32_t>(lumaPixel.green),
-                        static_cast<std::uint32_t>(lumaPixel.blue)
-                    });
-
-                const std::uint32_t chroma =
-                    std::max({
-                        static_cast<std::uint32_t>(chromaPixel.red),
-                        static_cast<std::uint32_t>(chromaPixel.green),
-                        static_cast<std::uint32_t>(chromaPixel.blue)
-                    });
-
-                const std::uint32_t combined =
-                    std::min<std::uint32_t>(
-                        65535u,
-                        luma + chroma);
-
-                const int value =
-                    displayLut_[combined];
-
-                destination[x] =
-                    qRgb(value, value, value);
+                        std::min(
+                            255,
+                            qRed(old) + value),
+                        std::min(
+                            255,
+                            qGreen(old) + value),
+                        std::min(
+                            255,
+                            qBlue(old) + value));
             }
         }
     }
 
+    renderTimings_.persistenceUs +=
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+
+    // Luma Scopephor was already composed before the current-frame chroma
+    // overlay.  Do not re-render any historical beam geometry here.
+    renderTimings_.traceUs =
+        renderTimings_.tracePrepUs +
+        renderTimings_.traceRasterUs;
+    renderTimings_.traceParallel = false;
+    renderTimings_.traceJobCount = 1u;
+
+    phaseTimer.restart();
     QPainter overlayPainter(&image_);
     drawLineInfoOverlay(overlayPainter);
     renderTimings_.overlayUs =
@@ -1991,6 +2010,1506 @@ void WaveformRenderer::renderSingleLine(
             phaseTimer.nsecsElapsed() / 1000);
 }
 
+
+
+std::vector<WaveformRenderer::BeamPoint> WaveformRenderer::buildCurrentLumaPolyline(
+    const QRectF& scope,
+    std::size_t viewOffset,
+    std::size_t viewWidth) const
+{
+    std::vector<BeamPoint> polyline;
+
+    if (viewWidth < 2u ||
+        fullLumaVolts_.size() <
+            viewOffset + viewWidth)
+    {
+        return polyline;
+    }
+
+    const auto analog =
+        analogLevels(
+            VideoColorStandard::Rec601_625);
+
+    const double voltsToPixels =
+        scope.height() /
+        analog.graticuleMaxVolts;
+
+    const double xScale =
+        scope.width() /
+        static_cast<double>(
+            viewWidth - 1u);
+
+    const auto pointAt =
+        [this,
+         viewOffset,
+         viewWidth,
+         &scope,
+         voltsToPixels,
+         xScale](std::int64_t sample) -> BeamPoint
+        {
+            sample =
+                std::clamp<std::int64_t>(
+                    sample,
+                    0,
+                    static_cast<std::int64_t>(
+                        viewWidth) - 1);
+
+            const std::size_t index =
+                viewOffset +
+                static_cast<std::size_t>(
+                    sample);
+
+            return BeamPoint
+            {
+                scope.left() +
+                    static_cast<double>(sample) *
+                    xScale,
+
+                scope.bottom() -
+                    static_cast<double>(
+                        fullLumaVolts_[index]) *
+                    voltsToPixels
+            };
+        };
+
+    const auto catmull =
+        [](const BeamPoint& p0,
+           const BeamPoint& p1,
+           const BeamPoint& p2,
+           const BeamPoint& p3,
+           double t) -> BeamPoint
+        {
+            const double t2 = t * t;
+            const double t3 = t2 * t;
+
+            return BeamPoint
+            {
+                0.5 *
+                ((2.0 * p1.x) +
+                 (-p0.x + p2.x) * t +
+                 (2.0 * p0.x -
+                  5.0 * p1.x +
+                  4.0 * p2.x -
+                  p3.x) * t2 +
+                 (-p0.x +
+                  3.0 * p1.x -
+                  3.0 * p2.x +
+                  p3.x) * t3),
+
+                0.5 *
+                ((2.0 * p1.y) +
+                 (-p0.y + p2.y) * t +
+                 (2.0 * p0.y -
+                  5.0 * p1.y +
+                  4.0 * p2.y -
+                  p3.y) * t2 +
+                 (-p0.y +
+                  3.0 * p1.y -
+                  3.0 * p2.y +
+                  p3.y) * t3)
+            };
+        };
+
+    polyline.reserve(
+        viewWidth * 2u);
+
+    polyline.push_back(
+        pointAt(0));
+
+    for (std::size_t i = 0u;
+        i + 1u < viewWidth;
+        ++i)
+    {
+        const BeamPoint p0 =
+            pointAt(
+                static_cast<std::int64_t>(i) - 1);
+
+        const BeamPoint p1 =
+            pointAt(
+                static_cast<std::int64_t>(i));
+
+        const BeamPoint p2 =
+            pointAt(
+                static_cast<std::int64_t>(i) + 1);
+
+        const BeamPoint p3 =
+            pointAt(
+                static_cast<std::int64_t>(i) + 2);
+
+        polyline.push_back(
+            catmull(
+                p0,
+                p1,
+                p2,
+                p3,
+                0.5));
+
+        polyline.push_back(p2);
+    }
+
+    return polyline;
+}
+
+std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
+    const std::vector<BeamPoint>& polyline,
+    const QRectF& plotRect,
+    std::uint64_t& glowUs,
+    std::uint64_t& coreUs,
+    int& activeMinX,
+    int& activeMinY,
+    int& activeMaxX,
+    int& activeMaxY) const
+{
+    glowUs = 0u;
+    coreUs = 0u;
+
+    const int width =
+        image_.width();
+
+    const int height =
+        image_.height();
+
+    if (polyline.size() < 2u ||
+        width <= 0 ||
+        height <= 0)
+    {
+        return {};
+    }
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) *
+        static_cast<std::size_t>(height);
+
+    // Monochrome 16-bit beam-energy target buffer.
+    std::vector<std::uint16_t> currentEnergy(
+        pixelCount,
+        0u);
+
+    const double renderDimension =
+        std::max(
+            1.0,
+            std::min(
+                plotRect.width(),
+                plotRect.height()));
+
+    /*
+     * CATWUZLE ANALYTIC CORE + LOCAL GLOW
+     * ------------------------------------
+     *
+     * The white beam core is NOT made from point stamps anymore.
+     *
+     * Every Catweazle polyline segment is rasterised directly against the
+     * target pixel grid using the shortest distance from a target pixel
+     * centre to the actual segment.  A one-pixel analytic coverage ramp
+     * provides subpixel antialiasing continuously for every possible angle.
+     *
+     * This removes the two weaknesses that became visible after thinning the
+     * large-target beam:
+     *
+     *   - phase/angle "stairs" on steep slopes
+     *   - occasional holes between one-pixel-spaced point stamps
+     *
+     * Beam Glow remains deliberately cheap: it is still a small local 5x5
+     * radial stamp sampled along the trace.  Glow is garnish; the visible
+     * white core now comes from the analytic line rasteriser.
+     */
+    constexpr int kGlowKernelSize = 5;
+    constexpr int kGlowKernelRadius =
+        kGlowKernelSize / 2;
+
+    constexpr int kSubpixelPhases = 8;
+    constexpr int kSubpixelKernelCount =
+        kSubpixelPhases * kSubpixelPhases;
+
+    using GlowKernel =
+        std::array<std::uint16_t,
+            kGlowKernelSize * kGlowKernelSize>;
+
+    const double linearTargetScale =
+        std::clamp(
+            plotRect.height() /
+            1080.0,
+            0.05,
+            1.0);
+
+    const double targetScale =
+        std::pow(
+            linearTargetScale,
+            2.35);
+
+    const double midpoint =
+        0.03 +
+        0.97 * targetScale;
+
+    const double glowGain =
+        static_cast<double>(
+            std::clamp(glow_, 0, 100)) /
+        100.0;
+
+    /*
+     * Keep the accepted mini-view width and the recently accepted thin
+     * full-size beam.
+     *
+     * This is now interpreted as an approximate optical core width rather
+     * than a Gaussian stamp sigma.
+     */
+    const double largeTargetBeamTaper =
+        1.0 -
+        0.6551724137931034 *
+        midpoint * midpoint;
+
+    const double legacyCoreSigma =
+        0.18 +
+        0.58 * midpoint *
+        largeTargetBeamTaper;
+
+    /*
+     * Approximate half-width of the bright beam core.
+     *
+     * The lower clamp prevents tiny targets from becoming discontinuous,
+     * while the full-size value stays close to the accepted ~half-width
+     * look.  Antialias coverage extends another half pixel around this
+     * geometric core.
+     */
+    /*
+     * Small views may not fatten single traces unnecessarily.  Preserve the
+     * accepted full-size beam, but taper the analytic core slightly on small
+     * targets so mini views stay crisp without reintroducing gaps.
+     */
+    const double miniViewBlend =
+        std::clamp(
+            (renderDimension - 260.0) /
+                640.0,
+            0.0,
+            1.0);
+
+    const double miniViewThinFactor =
+        0.74 +
+        0.26 * miniViewBlend;
+
+    const double coreHalfWidth =
+        std::clamp(
+            legacyCoreSigma * 0.78 * miniViewThinFactor,
+            0.13,
+            0.34);
+
+    const double glowSigma =
+        0.58 +
+        0.92 * midpoint;
+
+    /*
+     * White core energy.  The old stamp path multiplied its kernel energy
+     * by seven before accumulation.  This peak keeps the new core in the
+     * same visual brightness ballpark without forcing overlapping segments
+     * to become brighter at joins.
+     */
+    /*
+     * Final Q-less energy -> display conversion uses energy >> 3.
+     * 2040 therefore maps exactly to display white (255) without relying
+     * on saturation.
+     */
+    constexpr std::uint16_t kCorePeakEnergy =
+        2040u;
+
+    std::array<GlowKernel,
+        kSubpixelKernelCount> glowKernels{};
+
+    /*
+     * Glow only.  No white core lives in these kernels anymore.
+     */
+    if (glowGain > 0.0)
+    {
+        constexpr int kCoverageSamples = 4;
+        constexpr double kCoverageInv =
+            1.0 /
+            static_cast<double>(
+                kCoverageSamples *
+                kCoverageSamples);
+
+        for (int phaseY = 0;
+            phaseY < kSubpixelPhases;
+            ++phaseY)
+        {
+            const double fy =
+                static_cast<double>(phaseY) /
+                static_cast<double>(kSubpixelPhases);
+
+            for (int phaseX = 0;
+                phaseX < kSubpixelPhases;
+                ++phaseX)
+            {
+                const double fx =
+                    static_cast<double>(phaseX) /
+                    static_cast<double>(kSubpixelPhases);
+
+                GlowKernel& kernel =
+                    glowKernels[
+                        static_cast<std::size_t>(
+                            phaseY * kSubpixelPhases +
+                            phaseX)];
+
+                for (int ky = -kGlowKernelRadius;
+                    ky <= kGlowKernelRadius;
+                    ++ky)
+                {
+                    for (int kx = -kGlowKernelRadius;
+                        kx <= kGlowKernelRadius;
+                        ++kx)
+                    {
+                        double accumulatedGlow = 0.0;
+
+                        for (int sy = 0;
+                            sy < kCoverageSamples;
+                            ++sy)
+                        {
+                            const double py =
+                                static_cast<double>(ky) -
+                                0.5 +
+                                (static_cast<double>(sy) + 0.5) /
+                                static_cast<double>(kCoverageSamples);
+
+                            for (int sx = 0;
+                                sx < kCoverageSamples;
+                                ++sx)
+                            {
+                                const double px =
+                                    static_cast<double>(kx) -
+                                    0.5 +
+                                    (static_cast<double>(sx) + 0.5) /
+                                    static_cast<double>(kCoverageSamples);
+
+                                const double dx =
+                                    px - fx;
+
+                                const double dy =
+                                    py - fy;
+
+                                const double distance =
+                                    std::hypot(
+                                        dx,
+                                        dy);
+
+                                const double shoulder =
+                                    std::clamp(
+                                        (distance - midpoint) /
+                                        std::max(
+                                            0.18,
+                                            1.70 - midpoint),
+                                        0.0,
+                                        1.0);
+
+                                accumulatedGlow +=
+                                    std::exp(
+                                        -0.5 *
+                                        (distance * distance) /
+                                        (glowSigma * glowSigma)) *
+                                    shoulder;
+                            }
+                        }
+
+                        const double glowCoverage =
+                            accumulatedGlow *
+                            kCoverageInv;
+
+                        const double glowEnergy =
+                            240.0 *
+                            glowGain *
+                            glowCoverage;
+
+                        kernel[
+                            static_cast<std::size_t>(
+                                (ky + kGlowKernelRadius) *
+                                    kGlowKernelSize +
+                                (kx + kGlowKernelRadius))] =
+                            static_cast<std::uint16_t>(
+                                std::clamp(
+                                    static_cast<int>(
+                                        std::lround(
+                                            glowEnergy)),
+                                    0,
+                                    1023));
+                    }
+                }
+            }
+        }
+    }
+
+    const auto addEnergy =
+        [&currentEnergy,
+         width,
+         height](
+            int x,
+            int y,
+            int contribution)
+        {
+            if (x < 0 ||
+                x >= width ||
+                y < 0 ||
+                y >= height ||
+                contribution <= 0)
+            {
+                return;
+            }
+
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+
+            const std::uint32_t sum =
+                static_cast<std::uint32_t>(
+                    currentEnergy[index]) +
+                static_cast<std::uint32_t>(
+                    contribution);
+
+            currentEnergy[index] =
+                static_cast<std::uint16_t>(
+                    std::min<std::uint32_t>(
+                        sum,
+                        65535u));
+        };
+
+    const auto maxCoreEnergy =
+        [&currentEnergy,
+         width,
+         height](
+            int x,
+            int y,
+            std::uint16_t contribution)
+        {
+            if (x < 0 ||
+                x >= width ||
+                y < 0 ||
+                y >= height ||
+                contribution == 0u)
+            {
+                return;
+            }
+
+            const std::size_t index =
+                static_cast<std::size_t>(y) *
+                    static_cast<std::size_t>(width) +
+                static_cast<std::size_t>(x);
+
+            currentEnergy[index] =
+                std::max(
+                    currentEnergy[index],
+                    contribution);
+        };
+
+    constexpr int kCoreCoverageSamples = 2;
+    constexpr double kCoreCoverageInv =
+        1.0 /
+        static_cast<double>(
+            kCoreCoverageSamples *
+            kCoreCoverageSamples);
+
+    QElapsedTimer timer;
+    timer.start();
+
+    activeMinX = width;
+    activeMinY = height;
+    activeMaxX = -1;
+    activeMaxY = -1;
+
+    /*
+     * Analytic white core.
+     *
+     * Pixel coordinates in this renderer are centred on integer target
+     * coordinates.  For every Catweazle segment we visit only the small
+     * bounding rectangle around that segment and evaluate the exact shortest
+     * distance from the pixel centre to the segment.
+     *
+     * Coverage:
+     *   <= halfWidth - 0.5  : fully covered
+     *   >= halfWidth + 0.5  : not covered
+     *   between             : linear subpixel edge coverage
+     *
+     * This is orientation-independent and cannot leave gaps between
+     * consecutive connected segments.
+     */
+    const double aaRadius =
+        coreHalfWidth +
+        0.5;
+
+    for (std::size_t i = 1u;
+        i < polyline.size();
+        ++i)
+    {
+        const BeamPoint& first =
+            polyline[i - 1u];
+
+        const BeamPoint& second =
+            polyline[i];
+
+        const double segmentDx =
+            second.x -
+            first.x;
+
+        const double segmentDy =
+            second.y -
+            first.y;
+
+        const double segmentLengthSquared =
+            segmentDx * segmentDx +
+            segmentDy * segmentDy;
+
+        if (segmentLengthSquared <= 1.0e-18)
+        {
+            continue;
+        }
+
+        const int minX =
+            std::max(
+                0,
+                static_cast<int>(
+                    std::floor(
+                        std::min(first.x, second.x) -
+                        aaRadius)));
+
+        const int maxX =
+            std::min(
+                width - 1,
+                static_cast<int>(
+                    std::ceil(
+                        std::max(first.x, second.x) +
+                        aaRadius)));
+
+        const int minY =
+            std::max(
+                0,
+                static_cast<int>(
+                    std::floor(
+                        std::min(first.y, second.y) -
+                        aaRadius)));
+
+        const int maxY =
+            std::min(
+                height - 1,
+                static_cast<int>(
+                    std::ceil(
+                        std::max(first.y, second.y) +
+                        aaRadius)));
+
+        activeMinX =
+            std::min(
+                activeMinX,
+                minX);
+
+        activeMaxX =
+            std::max(
+                activeMaxX,
+                maxX);
+
+        activeMinY =
+            std::min(
+                activeMinY,
+                minY);
+
+        activeMaxY =
+            std::max(
+                activeMaxY,
+                maxY);
+
+        for (int y = minY;
+            y <= maxY;
+            ++y)
+        {
+            const double py =
+                static_cast<double>(y);
+
+            for (int x = minX;
+                x <= maxX;
+                ++x)
+            {
+                const double px =
+                    static_cast<double>(x);
+
+                /*
+                 * Pearl-fix pass:
+                 *
+                 * The first analytic CatWuzle core sampled only the pixel
+                 * centre.  That kept the geometry continuous, but on dim
+                 * traces it still left a subtle beaded / pearly modulation
+                 * because neighbouring x-columns could land on slightly
+                 * different centre distances.
+                 *
+                 * Sample a tiny 2x2 subpixel grid inside each target pixel
+                 * and average the local analytic coverage.  This keeps the
+                 * same thin beam geometry, but turns the centre-sample result
+                 * into a small area estimate so adjacent columns vary much
+                 * less in intensity.
+                 */
+                const double maximumCoverage =
+                    coreHalfWidth +
+                    0.5;
+
+                double coverage = 0.0;
+
+                for (int sampleY = 0;
+                    sampleY < kCoreCoverageSamples;
+                    ++sampleY)
+                {
+                    const double subpixelY =
+                        py - 0.5 +
+                        (static_cast<double>(sampleY) + 0.5) /
+                            static_cast<double>(kCoreCoverageSamples);
+
+                    for (int sampleX = 0;
+                        sampleX < kCoreCoverageSamples;
+                        ++sampleX)
+                    {
+                        const double subpixelX =
+                            px - 0.5 +
+                            (static_cast<double>(sampleX) + 0.5) /
+                                static_cast<double>(kCoreCoverageSamples);
+
+                        const double pointDx =
+                            subpixelX -
+                            first.x;
+
+                        const double pointDy =
+                            subpixelY -
+                            first.y;
+
+                        const double projection =
+                            std::clamp(
+                                (pointDx * segmentDx +
+                                 pointDy * segmentDy) /
+                                    segmentLengthSquared,
+                                0.0,
+                                1.0);
+
+                        const double closestX =
+                            first.x +
+                            projection *
+                                segmentDx;
+
+                        const double closestY =
+                            first.y +
+                            projection *
+                                segmentDy;
+
+                        const double dx =
+                            subpixelX -
+                            closestX;
+
+                        const double dy =
+                            subpixelY -
+                            closestY;
+
+                        const double distance =
+                            std::hypot(
+                                dx,
+                                dy);
+
+                        coverage +=
+                            std::clamp(
+                                (maximumCoverage -
+                                    distance) /
+                                    maximumCoverage,
+                                0.0,
+                                1.0);
+                    }
+                }
+
+                coverage *= kCoreCoverageInv;
+
+                /*
+                 * Conservative pixel-square guard.
+                 *
+                 * The 2x2 subpixel estimator remains the primary AA result.
+                 * However, at an unlucky target phase a very thin segment can
+                 * pass through a pixel square while missing all four 2x2
+                 * sample locations.  That produces the stationary black
+                 * "hole" seen at one X position.
+                 *
+                 * Use a cheap slab intersection against the actual target
+                 * pixel square.  If the CatWuzle centreline geometrically
+                 * crosses that square, enforce only a small minimum coverage.
+                 * Normal pixels whose 2x2 coverage is already higher remain
+                 * completely unchanged.
+                 */
+                {
+                    const double pixelMinX = px - 0.5;
+                    const double pixelMaxX = px + 0.5;
+                    const double pixelMinY = py - 0.5;
+                    const double pixelMaxY = py + 0.5;
+
+                    double enterT = 0.0;
+                    double exitT = 1.0;
+
+                    const auto clipAxis =
+                        [&enterT,
+                         &exitT](
+                            double origin,
+                            double delta,
+                            double minimum,
+                            double maximum) -> bool
+                        {
+                            constexpr double kTiny = 1.0e-12;
+
+                            if (std::abs(delta) <= kTiny)
+                            {
+                                return
+                                    origin >= minimum &&
+                                    origin <= maximum;
+                            }
+
+                            double firstT =
+                                (minimum - origin) /
+                                delta;
+
+                            double secondT =
+                                (maximum - origin) /
+                                delta;
+
+                            if (firstT > secondT)
+                            {
+                                std::swap(
+                                    firstT,
+                                    secondT);
+                            }
+
+                            enterT =
+                                std::max(
+                                    enterT,
+                                    firstT);
+
+                            exitT =
+                                std::min(
+                                    exitT,
+                                    secondT);
+
+                            return enterT <= exitT;
+                        };
+
+                    const bool crossesPixel =
+                        clipAxis(
+                            first.x,
+                            segmentDx,
+                            pixelMinX,
+                            pixelMaxX) &&
+                        clipAxis(
+                            first.y,
+                            segmentDy,
+                            pixelMinY,
+                            pixelMaxY) &&
+                        exitT >= 0.0 &&
+                        enterT <= 1.0;
+
+                    if (crossesPixel)
+                    {
+                        constexpr double kMinimumCrossingCoverage =
+                            0.20;
+
+                        coverage =
+                            std::max(
+                                coverage,
+                                kMinimumCrossingCoverage);
+                    }
+                }
+
+                /*
+                 * A gentle curve lifts the mid-coverage part of the AA ramp
+                 * so the thin beam keeps a continuous luminous filament in
+                 * dim regions, without materially widening the trace.
+                 */
+                const double coverageLift =
+                    1.16 +
+                    0.12 * miniViewBlend;
+
+                coverage =
+                    1.0 -
+                    std::pow(
+                        1.0 - coverage,
+                        coverageLift);
+
+                if (coverage <= 0.0)
+                {
+                    continue;
+                }
+
+                const std::uint16_t energy =
+                    static_cast<std::uint16_t>(
+                        std::clamp(
+                            static_cast<int>(
+                                std::lround(
+                                    coverage *
+                                    static_cast<double>(
+                                        kCorePeakEnergy) *
+                                    static_cast<double>(
+                                        coreIntensity_) /
+                                    100.0)),
+                            0,
+                            static_cast<int>(
+                                kCorePeakEnergy) * 4));
+
+                maxCoreEnergy(
+                    x,
+                    y,
+                    energy);
+            }
+        }
+    }
+
+
+    /*
+     * CATWUZLE ROUND-JOIN COVERAGE
+     * ----------------------------
+     *
+     * The 2x2 area coverage above is evaluated per segment and the final
+     * pixel energy is combined with max().  At an interior polyline vertex,
+     * subpixel samples can be split across the two neighbouring segments:
+     * neither segment alone sees the complete covered area, even though the
+     * union of both segments does.  That produces a stationary local notch
+     * (the visible "bite") at some joins.
+     *
+     * Rasterise the mathematically correct round join at every interior
+     * Catweazle vertex.  It uses exactly the same core radius, 2x2 area
+     * coverage, shaping and intensity as the segment core, and combines via
+     * max(), so it fills only missing join coverage without widening the
+     * normal stroke.
+     */
+    for (std::size_t i = 1u;
+        i + 1u < polyline.size();
+        ++i)
+    {
+        const BeamPoint& vertex =
+            polyline[i];
+
+        const int minX =
+            std::max(
+                0,
+                static_cast<int>(
+                    std::floor(
+                        vertex.x -
+                        aaRadius)));
+
+        const int maxX =
+            std::min(
+                width - 1,
+                static_cast<int>(
+                    std::ceil(
+                        vertex.x +
+                        aaRadius)));
+
+        const int minY =
+            std::max(
+                0,
+                static_cast<int>(
+                    std::floor(
+                        vertex.y -
+                        aaRadius)));
+
+        const int maxY =
+            std::min(
+                height - 1,
+                static_cast<int>(
+                    std::ceil(
+                        vertex.y +
+                        aaRadius)));
+
+        for (int y = minY;
+            y <= maxY;
+            ++y)
+        {
+            const double py =
+                static_cast<double>(y);
+
+            for (int x = minX;
+                x <= maxX;
+                ++x)
+            {
+                const double px =
+                    static_cast<double>(x);
+
+                const double maximumCoverage =
+                    coreHalfWidth +
+                    0.5;
+
+                double coverage = 0.0;
+
+                for (int sampleY = 0;
+                    sampleY < kCoreCoverageSamples;
+                    ++sampleY)
+                {
+                    const double subpixelY =
+                        py - 0.5 +
+                        (static_cast<double>(sampleY) + 0.5) /
+                            static_cast<double>(kCoreCoverageSamples);
+
+                    for (int sampleX = 0;
+                        sampleX < kCoreCoverageSamples;
+                        ++sampleX)
+                    {
+                        const double subpixelX =
+                            px - 0.5 +
+                            (static_cast<double>(sampleX) + 0.5) /
+                                static_cast<double>(kCoreCoverageSamples);
+
+                        const double dx =
+                            subpixelX -
+                            vertex.x;
+
+                        const double dy =
+                            subpixelY -
+                            vertex.y;
+
+                        const double distance =
+                            std::hypot(
+                                dx,
+                                dy);
+
+                        coverage +=
+                            std::clamp(
+                                (maximumCoverage -
+                                    distance) /
+                                    maximumCoverage,
+                                0.0,
+                                1.0);
+                    }
+                }
+
+                coverage *=
+                    kCoreCoverageInv;
+
+                const double coverageLift =
+                    1.16 +
+                    0.12 * miniViewBlend;
+
+                coverage =
+                    1.0 -
+                    std::pow(
+                        1.0 - coverage,
+                        coverageLift);
+
+                if (coverage <= 0.0)
+                {
+                    continue;
+                }
+
+                const std::uint16_t energy =
+                    static_cast<std::uint16_t>(
+                        std::clamp(
+                            static_cast<int>(
+                                std::lround(
+                                    coverage *
+                                    static_cast<double>(
+                                        kCorePeakEnergy) *
+                                    static_cast<double>(
+                                        coreIntensity_) /
+                                    100.0)),
+                            0,
+                            static_cast<int>(
+                                kCorePeakEnergy) * 4));
+
+                maxCoreEnergy(
+                    x,
+                    y,
+                    energy);
+            }
+        }
+    }
+
+    coreUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    /*
+     * Cheap local glow pass.
+     *
+     * Sample at ~1 target-pixel spacing.  Because this pass contains only
+     * diffuse halo energy, tiny gaps/phase differences are not visible in
+     * the white beam core.
+     */
+    timer.restart();
+
+    if (glowGain > 0.0)
+    {
+        for (std::size_t i = 1u;
+            i < polyline.size();
+            ++i)
+        {
+            const BeamPoint& first =
+                polyline[i - 1u];
+
+            const BeamPoint& second =
+                polyline[i];
+
+            const double segmentDx =
+                second.x -
+                first.x;
+
+            const double segmentDy =
+                second.y -
+                first.y;
+
+            const double segmentLength =
+                std::hypot(
+                    segmentDx,
+                    segmentDy);
+
+            if (segmentLength <= 1.0e-9)
+            {
+                continue;
+            }
+
+            const int steps =
+                std::max(
+                    1,
+                    static_cast<int>(
+                        std::ceil(
+                            segmentLength)));
+
+            const int firstStep =
+                i == 1u
+                ? 0
+                : 1;
+
+            for (int step = firstStep;
+                step <= steps;
+                ++step)
+            {
+                const double t =
+                    static_cast<double>(step) /
+                    static_cast<double>(steps);
+
+                const double beamX =
+                    first.x +
+                    segmentDx * t;
+
+                const double beamY =
+                    first.y +
+                    segmentDy * t;
+
+                int centerX =
+                    static_cast<int>(
+                        std::floor(
+                            beamX));
+
+                int centerY =
+                    static_cast<int>(
+                        std::floor(
+                            beamY));
+
+                const double fracX =
+                    beamX -
+                    static_cast<double>(
+                        centerX);
+
+                const double fracY =
+                    beamY -
+                    static_cast<double>(
+                        centerY);
+
+                int phaseX =
+                    static_cast<int>(
+                        std::lround(
+                            fracX *
+                            static_cast<double>(
+                                kSubpixelPhases)));
+
+                int phaseY =
+                    static_cast<int>(
+                        std::lround(
+                            fracY *
+                            static_cast<double>(
+                                kSubpixelPhases)));
+
+                if (phaseX >= kSubpixelPhases)
+                {
+                    phaseX = 0;
+                    ++centerX;
+                }
+
+                if (phaseY >= kSubpixelPhases)
+                {
+                    phaseY = 0;
+                    ++centerY;
+                }
+
+                const GlowKernel& glowKernel =
+                    glowKernels[
+                        static_cast<std::size_t>(
+                            phaseY *
+                                kSubpixelPhases +
+                            phaseX)];
+
+                activeMinX =
+                    std::min(
+                        activeMinX,
+                        centerX -
+                            kGlowKernelRadius);
+
+                activeMaxX =
+                    std::max(
+                        activeMaxX,
+                        centerX +
+                            kGlowKernelRadius);
+
+                activeMinY =
+                    std::min(
+                        activeMinY,
+                        centerY -
+                            kGlowKernelRadius);
+
+                activeMaxY =
+                    std::max(
+                        activeMaxY,
+                        centerY +
+                            kGlowKernelRadius);
+
+                for (int ky = -kGlowKernelRadius;
+                    ky <= kGlowKernelRadius;
+                    ++ky)
+                {
+                    for (int kx = -kGlowKernelRadius;
+                        kx <= kGlowKernelRadius;
+                        ++kx)
+                    {
+                        const int value =
+                            glowKernel[
+                                static_cast<std::size_t>(
+                                    (ky + kGlowKernelRadius) *
+                                        kGlowKernelSize +
+                                    (kx + kGlowKernelRadius))];
+
+                        if (value <= 0)
+                        {
+                            continue;
+                        }
+
+                        addEnergy(
+                            centerX + kx,
+                            centerY + ky,
+                            value * 7);
+                    }
+                }
+            }
+        }
+    }
+
+    glowUs =
+        static_cast<std::uint64_t>(
+            timer.nsecsElapsed() / 1000);
+
+    return currentEnergy;
+}
+
+void WaveformRenderer::clearScopephorFrames()
+{
+    scopephorPreviousEnergy_.clear();
+    scopephorPreviousMinX_ = 0;
+    scopephorPreviousMinY_ = 0;
+    scopephorPreviousMaxX_ = -1;
+    scopephorPreviousMaxY_ = -1;
+}
+
+void WaveformRenderer::applyScopephorFeedback(
+    std::vector<std::uint16_t>& currentEnergy,
+    int& activeMinX,
+    int& activeMinY,
+    int& activeMaxX,
+    int& activeMaxY)
+{
+    if (currentEnergy.empty())
+    {
+        return;
+    }
+
+    const int width = image_.width();
+    const int height = image_.height();
+
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    if (persistence_ <= 0)
+    {
+        scopephorPreviousEnergy_.clear();
+        scopephorPreviousMinX_ = 0;
+        scopephorPreviousMinY_ = 0;
+        scopephorPreviousMaxX_ = -1;
+        scopephorPreviousMaxY_ = -1;
+        return;
+    }
+
+    const double slider =
+        static_cast<double>(
+            std::clamp(persistence_, 0, 100)) /
+        100.0;
+
+    /*
+     * ScopePhor should now hang a bit longer.
+     *
+     * Keep the same general curve shape, but raise the retention factor
+     * modestly so low/mid settings remain useful while the default setting
+     * clearly glows longer on screen.
+     */
+    const double decay =
+        0.72 *
+        std::pow(slider, 0.36);
+
+    if (scopephorPreviousEnergy_.size() !=
+        currentEnergy.size())
+    {
+        scopephorPreviousEnergy_.assign(
+            currentEnergy.size(),
+            0u);
+
+        scopephorPreviousMinX_ = 0;
+        scopephorPreviousMinY_ = 0;
+        scopephorPreviousMaxX_ = -1;
+        scopephorPreviousMaxY_ = -1;
+    }
+
+    int unionMinX = activeMinX;
+    int unionMinY = activeMinY;
+    int unionMaxX = activeMaxX;
+    int unionMaxY = activeMaxY;
+
+    const bool previousValid =
+        scopephorPreviousMaxX_ >= scopephorPreviousMinX_ &&
+        scopephorPreviousMaxY_ >= scopephorPreviousMinY_;
+
+    const bool currentValid =
+        unionMaxX >= unionMinX &&
+        unionMaxY >= unionMinY;
+
+    if (previousValid)
+    {
+        if (!currentValid)
+        {
+            unionMinX = scopephorPreviousMinX_;
+            unionMinY = scopephorPreviousMinY_;
+            unionMaxX = scopephorPreviousMaxX_;
+            unionMaxY = scopephorPreviousMaxY_;
+        }
+        else
+        {
+            unionMinX = std::min(unionMinX, scopephorPreviousMinX_);
+            unionMinY = std::min(unionMinY, scopephorPreviousMinY_);
+            unionMaxX = std::max(unionMaxX, scopephorPreviousMaxX_);
+            unionMaxY = std::max(unionMaxY, scopephorPreviousMaxY_);
+        }
+    }
+
+    if (unionMaxX < unionMinX ||
+        unionMaxY < unionMinY)
+    {
+        return;
+    }
+
+    unionMinX = std::clamp(unionMinX, 0, width - 1);
+    unionMaxX = std::clamp(unionMaxX, 0, width - 1);
+    unionMinY = std::clamp(unionMinY, 0, height - 1);
+    unionMaxY = std::clamp(unionMaxY, 0, height - 1);
+
+    const std::uint32_t decayQ16 =
+        static_cast<std::uint32_t>(
+            std::clamp(
+                static_cast<int>(
+                    std::lround(decay * 65536.0)),
+                0,
+                65536));
+
+    int nextMinX = width;
+    int nextMinY = height;
+    int nextMaxX = -1;
+    int nextMaxY = -1;
+
+    const __m256i decayVector =
+        _mm256_set1_epi32(
+            static_cast<int>(
+                decayQ16));
+
+    const __m256i thresholdVector =
+        _mm256_set1_epi32(7);
+
+    const __m256i maxEnergyVector =
+        _mm256_set1_epi32(65535);
+
+    for (int y = unionMinY;
+        y <= unionMaxY;
+        ++y)
+    {
+        const std::size_t row =
+            static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(width);
+
+        int x = unionMinX;
+        bool rowHasEnergy = false;
+
+        for (;
+            x + 7 <= unionMaxX;
+            x += 8)
+        {
+            const std::size_t index =
+                row +
+                static_cast<std::size_t>(x);
+
+            const __m128i old16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        scopephorPreviousEnergy_.data() +
+                        index));
+
+            const __m128i current16 =
+                _mm_loadu_si128(
+                    reinterpret_cast<const __m128i*>(
+                        currentEnergy.data() +
+                        index));
+
+            const __m256i old32 =
+                _mm256_cvtepu16_epi32(old16);
+
+            const __m256i current32 =
+                _mm256_cvtepu16_epi32(current16);
+
+            const __m256i oldScaled =
+                _mm256_srli_epi32(
+                    _mm256_mullo_epi32(
+                        old32,
+                        decayVector),
+                    16);
+
+            __m256i mixed =
+                _mm256_add_epi32(
+                    current32,
+                    oldScaled);
+
+            mixed =
+                _mm256_min_epi32(
+                    mixed,
+                    maxEnergyVector);
+
+            // Kill sub-visible residual phosphor.
+            const __m256i visibleMask =
+                _mm256_cmpgt_epi32(
+                    mixed,
+                    thresholdVector);
+
+            mixed =
+                _mm256_and_si256(
+                    mixed,
+                    visibleMask);
+
+            const __m128i mixedLow =
+                _mm256_castsi256_si128(
+                    mixed);
+
+            const __m128i mixedHigh =
+                _mm256_extracti128_si256(
+                    mixed,
+                    1);
+
+            const __m128i packed =
+                _mm_packus_epi32(
+                    mixedLow,
+                    mixedHigh);
+
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(
+                    currentEnergy.data() +
+                    index),
+                packed);
+
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(
+                    scopephorPreviousEnergy_.data() +
+                    index),
+                packed);
+
+            if (_mm256_movemask_epi8(
+                    visibleMask) != 0)
+            {
+                rowHasEnergy = true;
+                nextMinX =
+                    std::min(
+                        nextMinX,
+                        x);
+
+                nextMaxX =
+                    std::max(
+                        nextMaxX,
+                        x + 7);
+            }
+        }
+
+        for (;
+            x <= unionMaxX;
+            ++x)
+        {
+            const std::size_t index =
+                row +
+                static_cast<std::size_t>(x);
+
+            const std::uint32_t oldContribution =
+                (static_cast<std::uint32_t>(
+                    scopephorPreviousEnergy_[index]) *
+                 decayQ16) >>
+                16;
+
+            const std::uint32_t mixed =
+                static_cast<std::uint32_t>(
+                    currentEnergy[index]) +
+                oldContribution;
+
+            std::uint16_t value =
+                static_cast<std::uint16_t>(
+                    std::min<std::uint32_t>(
+                        mixed,
+                        65535u));
+
+            if (value < 8u)
+            {
+                value = 0u;
+            }
+
+            currentEnergy[index] = value;
+            scopephorPreviousEnergy_[index] = value;
+
+            if (value != 0u)
+            {
+                rowHasEnergy = true;
+                nextMinX =
+                    std::min(
+                        nextMinX,
+                        x);
+
+                nextMaxX =
+                    std::max(
+                        nextMaxX,
+                        x);
+            }
+        }
+
+        if (rowHasEnergy)
+        {
+            nextMinY =
+                std::min(
+                    nextMinY,
+                    y);
+
+            nextMaxY =
+                std::max(
+                    nextMaxY,
+                    y);
+        }
+    }
+
+    scopephorPreviousMinX_ = nextMinX;
+    scopephorPreviousMinY_ = nextMinY;
+    scopephorPreviousMaxX_ = nextMaxX;
+    scopephorPreviousMaxY_ = nextMaxY;
+
+    activeMinX = nextMinX;
+    activeMinY = nextMinY;
+    activeMaxX = nextMaxX;
+    activeMaxY = nextMaxY;
+}
 
 void WaveformRenderer::drawLineInfoOverlay(QPainter& painter)
 {
@@ -2034,9 +3553,11 @@ void WaveformRenderer::drawLineInfoOverlay(QPainter& painter)
             4.0,
             viewport.height() * 0.008);
 
+    // Keep the line/zoom readout at the top-right.  The top-left is
+    // intentionally left free for the automatic SNR readout.
     const QRectF cardRect(
         scope.right() - cardSize.width(),
-        scope.bottom() - lineGap - cardSize.height(),
+        scope.top() + lineGap,
         cardSize.width(),
         cardSize.height());
 
@@ -2048,466 +3569,6 @@ void WaveformRenderer::drawLineInfoOverlay(QPainter& painter)
         lineInfoOverlayPalOutput_);
 }
 
-
-void WaveformRenderer::plotLuminanceTraceRange(
-    int firstPixelX,
-    int lastPixelX)
-{
-    const int width =
-        image_.width();
-
-    const int height =
-        image_.height();
-
-    const QRectF scope =
-        scaledScopeRect();
-
-    if (width < 2 ||
-        displayY_.size() <
-        static_cast<std::size_t>(
-            width))
-    {
-        return;
-    }
-
-    firstPixelX =
-        std::clamp(
-            firstPixelX,
-            0,
-            width);
-
-    lastPixelX =
-        std::clamp(
-            lastPixelX,
-            firstPixelX,
-            width);
-
-    if (firstPixelX >= lastPixelX)
-    {
-        return;
-    }
-
-    const auto analog =
-        analogLevels(
-            VideoColorStandard::Rec601_625);
-
-    const double voltsToPixels =
-        scope.height() /
-        analog.graticuleMaxVolts;
-
-    const auto sampleToPlotY =
-        [scope,
-        voltsToPixels](double volts)
-        {
-            return
-                scope.bottom() -
-                volts *
-                voltsToPixels;
-        };
-
-    const auto sampleCenter =
-        [this, &sampleToPlotY](int x)
-        {
-            x =
-                std::clamp(
-                    x,
-                    0,
-                    image_.width() - 1);
-
-            return
-                sampleToPlotY(
-                    static_cast<double>(
-                        displayY_[
-                            static_cast<std::size_t>(
-                                x)]));
-        };
-
-    const auto sampleZoomed =
-        [this, &sampleToPlotY](int x)
-        {
-            x =
-                std::clamp(
-                    x,
-                    0,
-                    static_cast<int>(
-                        sourceY_.size()) - 1);
-
-            return
-                sampleToPlotY(
-                    static_cast<double>(
-                        sourceY_[
-                            static_cast<std::size_t>(
-                                x)]));
-        };
-
-    const auto plotSmoothCurveRange =
-        [this,
-        scope,
-        firstPixelX,
-        lastPixelX](
-            const auto& sampleY,
-            int sampleCount,
-            int intensity)
-        {
-            if (sampleCount < 2)
-            {
-                return;
-            }
-
-            constexpr double targetStepPixels = 0.5;
-
-            const double curveXScale =
-                scope.width() /
-                static_cast<double>(
-                    sampleCount - 1);
-
-            if (curveXScale <= 0.0)
-            {
-                return;
-            }
-
-            // Include enough source segments to cover the beam core at the
-            // stripe edge. Writes are still clipped to this stripe, so two
-            // workers never touch the same TracePixel.
-            const double halo =
-                beamCoreRadiusPx_ + 2.0;
-
-            const int firstSegment =
-                std::clamp(
-                    static_cast<int>(
-                        std::floor(
-                            (static_cast<double>(firstPixelX) -
-                                halo - scope.left()) /
-                            curveXScale)) - 1,
-                    0,
-                    sampleCount - 2);
-
-            const int lastSegment =
-                std::clamp(
-                    static_cast<int>(
-                        std::ceil(
-                            (static_cast<double>(lastPixelX) +
-                                halo - scope.left()) /
-                            curveXScale)) + 1,
-                    0,
-                    sampleCount - 2);
-
-            for (int x = firstSegment;
-                x <= lastSegment;
-                ++x)
-            {
-                const double p0 =
-                    sampleY(x - 1);
-
-                const double p1 =
-                    sampleY(x);
-
-                const double p2 =
-                    sampleY(x + 1);
-
-                const double p3 =
-                    sampleY(x + 2);
-
-                const double distance =
-                    std::hypot(
-                        1.0,
-                        p2 - p1);
-
-                const int subdivisions =
-                    std::clamp(
-                        static_cast<int>(
-                            std::ceil(
-                                distance /
-                                targetStepPixels)),
-                        1,
-                        256);
-
-                double previousX =
-                    scope.left() +
-                    static_cast<double>(x) *
-                    curveXScale;
-
-                double previousY =
-                    p1;
-
-                for (int step = 0;
-                    step <= subdivisions;
-                    ++step)
-                {
-                    const double t =
-                        static_cast<double>(step) /
-                        static_cast<double>(
-                            subdivisions);
-
-                    const double t2 =
-                        t * t;
-
-                    const double t3 =
-                        t2 * t;
-
-                    const double y =
-                        0.5 *
-                        (
-                            2.0 * p1 +
-                            (-p0 + p2) * t +
-                            (2.0 * p0 -
-                                5.0 * p1 +
-                                4.0 * p2 -
-                                p3) * t2 +
-                            (-p0 +
-                                3.0 * p1 -
-                                3.0 * p2 +
-                                p3) * t3
-                            );
-
-                    const double plotX =
-                        scope.left() +
-                        (
-                            static_cast<double>(x) +
-                            t
-                            ) *
-                        curveXScale;
-
-                    if (step > 0)
-                    {
-                        plotSegment(
-                            previousX,
-                            previousY,
-                            plotX,
-                            y,
-                            intensity,
-                            255,
-                            255,
-                            255,
-                            firstPixelX,
-                            lastPixelX);
-                    }
-
-                    previousX = plotX;
-                    previousY = y;
-                }
-            }
-        };
-
-    if (zoomFactor_ > 1)
-    {
-        plotSmoothCurveRange(
-            sampleZoomed,
-            static_cast<int>(
-                sourceY_.size()),
-            kLuminanceBeamIntensity);
-    }
-    else
-    {
-        plotSmoothCurveRange(
-            sampleCenter,
-            width,
-            kLuminanceBeamIntensity);
-    }
-
-    if (sourceY_.size() <=
-        displayY_.size())
-    {
-        return;
-    }
-
-    constexpr double kMinMaxFillThresholdPixels = 3.0;
-
-    const double xScale =
-        scope.width() /
-        static_cast<double>(
-            width - 1);
-
-    if (xScale <= 0.0)
-    {
-        return;
-    }
-
-    const int firstDisplayX =
-        std::clamp(
-            static_cast<int>(
-                std::floor(
-                    (static_cast<double>(firstPixelX) -
-                        2.0 - scope.left()) /
-                    xScale)),
-            0,
-            width - 1);
-
-    const int lastDisplayX =
-        std::clamp(
-            static_cast<int>(
-                std::ceil(
-                    (static_cast<double>(lastPixelX) +
-                        2.0 - scope.left()) /
-                    xScale)),
-            0,
-            width - 1);
-
-    for (int x = firstDisplayX;
-        x <= lastDisplayX;
-        ++x)
-    {
-        const std::size_t index =
-            static_cast<std::size_t>(x);
-
-        const double upperY =
-            sampleToPlotY(
-                static_cast<double>(
-                    displayYMax_[index]));
-
-        const double lowerY =
-            sampleToPlotY(
-                static_cast<double>(
-                    displayYMin_[index]));
-
-        const double spanPixels =
-            std::abs(
-                lowerY - upperY);
-
-        if (spanPixels <
-            kMinMaxFillThresholdPixels)
-        {
-            continue;
-        }
-
-        const int firstY =
-            std::clamp(
-                static_cast<int>(
-                    std::ceil(
-                        std::min(
-                            upperY,
-                            lowerY))),
-                0,
-                height - 1);
-
-        const int lastY =
-            std::clamp(
-                static_cast<int>(
-                    std::floor(
-                        std::max(
-                            upperY,
-                            lowerY))),
-                0,
-                height - 1);
-
-        for (int y = firstY;
-            y <= lastY;
-            ++y)
-        {
-            plotBeam(
-                scope.left() +
-                static_cast<double>(x) *
-                xScale,
-                static_cast<double>(y),
-                kLuminanceBeamIntensity,
-                255,
-                255,
-                255,
-                firstPixelX,
-                lastPixelX);
-        }
-    }
-}
-
-void WaveformRenderer::composeTraceImage()
-{
-    const int width =
-        image_.width();
-
-    const int height =
-        image_.height();
-
-    for (int y = 0;
-        y < height;
-        ++y)
-    {
-        auto* destination =
-            reinterpret_cast<QRgb*>(
-                image_.scanLine(y));
-
-        for (int x = 0;
-            x < width;
-            ++x)
-        {
-            const std::size_t index =
-                static_cast<std::size_t>(y) *
-                static_cast<std::size_t>(width) +
-                static_cast<std::size_t>(x);
-
-            const TracePixel& lumaPixel =
-                trace_[index];
-
-            const TracePixel& chromaPixel =
-                chromaTrace_[index];
-
-            if (settings_.color)
-            {
-                const auto combinedChannel =
-                    [this](
-                        std::uint16_t luma,
-                        std::uint16_t chroma)
-                    {
-                        const std::uint32_t combined =
-                            std::min<std::uint32_t>(
-                                65535u,
-                                static_cast<std::uint32_t>(luma) +
-                                static_cast<std::uint32_t>(chroma));
-
-                        return
-                            displayLut_[combined];
-                    };
-
-                destination[x] =
-                    qRgb(
-                        combinedChannel(
-                            lumaPixel.red,
-                            chromaPixel.red),
-                        combinedChannel(
-                            lumaPixel.green,
-                            chromaPixel.green),
-                        combinedChannel(
-                            lumaPixel.blue,
-                            chromaPixel.blue));
-            }
-            else
-            {
-                const std::uint32_t luma =
-                    std::max({
-                        static_cast<std::uint32_t>(
-                            lumaPixel.red),
-                        static_cast<std::uint32_t>(
-                            lumaPixel.green),
-                        static_cast<std::uint32_t>(
-                            lumaPixel.blue)
-                        });
-
-                const std::uint32_t chroma =
-                    std::max({
-                        static_cast<std::uint32_t>(
-                            chromaPixel.red),
-                        static_cast<std::uint32_t>(
-                            chromaPixel.green),
-                        static_cast<std::uint32_t>(
-                            chromaPixel.blue)
-                        });
-
-                const std::uint32_t combined =
-                    std::min<std::uint32_t>(
-                        65535u,
-                        luma + chroma);
-
-                const int value =
-                    displayLut_[combined];
-
-                destination[x] =
-                    qRgb(
-                        value,
-                        value,
-                        value);
-            }
-        }
-    }
-}
 
 void WaveformRenderer::renderAllLines(
     const Yuv444Frame& frame)
@@ -2538,6 +3599,32 @@ void WaveformRenderer::renderAllLines(
 
     const QRectF scope =
         scaledScopeRect();
+
+    const double plotRenderDimension =
+        std::max(
+            1.0,
+            std::min(
+                scope.width(),
+                scope.height()));
+
+    const double plotBeamScale =
+        std::clamp(
+            std::sqrt(
+                plotRenderDimension / 576.0),
+            1.0,
+            1.90);
+
+    constexpr double kReferenceCoreRadiusPx = 0.82;
+    beamCoreRadiusPx_ =
+        kReferenceCoreRadiusPx * plotBeamScale;
+
+    renderTimings_.beamCoreRadiusPx =
+        beamCoreRadiusPx_;
+    renderTimings_.beamCoreMarginPx =
+        std::max(
+            1,
+            static_cast<int>(
+                std::floor(beamCoreRadiusPx_)));
 
     const int firstScopeX =
         std::clamp(
@@ -2749,9 +3836,14 @@ void WaveformRenderer::renderAllLines(
                     currentDensity;
             }
 
+            const std::uint32_t tracePeakWhite =
+                lineInfoOverlayPalOutput_
+                ? 191u
+                : 255u;
+
             const std::uint32_t intensity =
                 std::min<std::uint32_t>(
-                    255u,
+                    tracePeakWhite,
                     static_cast<std::uint32_t>(
                         temporalDensity / 256.0f) *
                     8u);
@@ -3202,10 +4294,20 @@ void WaveformRenderer::setSelectedLine(
 
     selectedLine_ = line;
 
-    // A trace accumulated for another source line must never survive a
-    // line change.  This is especially visible with persistence enabled
-    // and when switching between matrix and fullscreen views.
-    clearTrace();
+    // A phosphor image belongs to exactly one selected source line.
+    // Never feed the previous line into the first frame of the new line.
+    clearScopephorFrames();
+
+    // Also clear the legacy/current-frame trace buffers.
+    std::fill(
+        trace_.begin(),
+        trace_.end(),
+        TracePixel{});
+
+    std::fill(
+        chromaTrace_.begin(),
+        chromaTrace_.end(),
+        TracePixel{});
 }
 
 void WaveformRenderer::setPersistence(
@@ -3218,15 +4320,35 @@ void WaveformRenderer::setPersistence(
             200);
 }
 
+void WaveformRenderer::setCoreIntensity(
+    int intensity)
+{
+    const int normalizedIntensity =
+        std::clamp(
+            intensity,
+            0,
+            100);
+
+    // UI 100% is the accepted High-Q beam level, historically 200%.
+    coreIntensity_ =
+        normalizedIntensity * 2;
+}
+
 void WaveformRenderer::setGlow(
     int glow)
 {
-    glow_ =
+    const int uiGlow =
         std::clamp(
             glow,
             0,
             100);
 
+    // Keep the UI consistent at 0..100, but use only the visually useful
+    // waveform Beam Glow range internally.  UI 50 is therefore the default
+    // effective glow of 10, while UI 100 reaches the deliberately wild 20.
+    glow_ =
+        (uiGlow * 20 + 50) /
+        100;
 }
 
 const QImage& WaveformRenderer::image() const
@@ -3264,6 +4386,8 @@ double WaveformRenderer::traceBandwidthMHz() const
 
 void WaveformRenderer::clearTrace()
 {
+    clearScopephorFrames();
+
     std::fill(
         trace_.begin(),
         trace_.end(),

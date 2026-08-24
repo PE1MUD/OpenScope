@@ -9,6 +9,7 @@
 #include <QImage>
 #include <QRectF>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -63,6 +64,7 @@ public:
 
     void setSelectedLine(int line);
     void setPersistence(int persistence);
+    void setCoreIntensity(int intensity);
     void setGlow(int glow);
     void setOutputSize(
         int width,
@@ -100,12 +102,41 @@ public:
         OpenScopeSettings::AspectRatio aspectRatio);
 
 private:
+    struct BeamPoint
+    {
+        double x = 0.0;
+        double y = 0.0;
+    };
+
     struct TracePixel
     {
         std::uint16_t red = 0;
         std::uint16_t green = 0;
         std::uint16_t blue = 0;
     };
+
+    [[nodiscard]] std::vector<BeamPoint> buildCurrentLumaPolyline(
+        const QRectF& scope,
+        std::size_t viewOffset,
+        std::size_t viewWidth) const;
+
+    [[nodiscard]] std::vector<std::uint16_t> renderCurrentPhosphorEnergy(
+        const std::vector<BeamPoint>& polyline,
+        const QRectF& plotRect,
+        std::uint64_t& glowUs,
+        std::uint64_t& coreUs,
+        int& activeMinX,
+        int& activeMinY,
+        int& activeMaxX,
+        int& activeMaxY) const;
+
+    void clearScopephorFrames();
+    void applyScopephorFeedback(
+        std::vector<std::uint16_t>& currentEnergy,
+        int& activeMinX,
+        int& activeMinY,
+        int& activeMaxX,
+        int& activeMaxY);
 
     void clearOrFadeTrace();
     void clearTrace();
@@ -156,11 +187,11 @@ private:
     kLumaReconstructionCutoff
     };
 
+    [[nodiscard]] WaveformGraticuleLayout graticuleLayout() const;
     QRectF scaledScopeRect() const;
     QImage image_;
 
     WaveformGraticule graticule_;
-    QRectF scopeRect() const;
     QRectF viewportRect() const;
 
     //    LineResampler singleLineReconstructor_;
@@ -183,6 +214,12 @@ private:
     std::vector<float> singleLineReconstructed_;
     std::vector<float> fullLumaVolts_;
 
+    std::vector<std::uint16_t> scopephorPreviousEnergy_;
+    int scopephorPreviousMinX_ = 0;
+    int scopephorPreviousMinY_ = 0;
+    int scopephorPreviousMaxX_ = -1;
+    int scopephorPreviousMaxY_ = -1;
+
     std::array<std::uint8_t, 65536> displayLut_{};
 
     static constexpr int kLumaReconstructionRadius = 24;
@@ -190,7 +227,8 @@ private:
 
     int selectedLine_ = -1;
     int persistence_ = 0;
-    int glow_ = 50;
+    int coreIntensity_ = 200;
+    int glow_ = 10;
     double beamCoreRadiusPx_ = 0.82;
 
     int zoomFactor_ = 1;

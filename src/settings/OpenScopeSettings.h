@@ -41,6 +41,7 @@ struct OpenScopeSettings
                 int chromaRenderIntensity = 150;
 
                 int persistenceFrames = 5;
+                int coreIntensity = 100;
             };
 
             struct Vectorscope

@@ -205,6 +205,42 @@ OpenScopeSettings SettingsStorage::load() const
 
     result.control
         .instrument
+        .waveform
+        .coreIntensity =
+        settings.value(
+            "Control/Instrument/Waveform/CoreIntensity",
+            result.control
+            .instrument
+            .waveform
+            .coreIntensity)
+        .toInt();
+
+    // Migration from the temporary 0..400 tuning scale:
+    // old 200% is the new normal 100% beam level.
+    if (result.control
+        .instrument
+        .waveform
+        .coreIntensity > 100)
+    {
+        result.control
+            .instrument
+            .waveform
+            .coreIntensity = 100;
+    }
+
+    if (result.control
+        .instrument
+        .waveform
+        .coreIntensity < 0)
+    {
+        result.control
+            .instrument
+            .waveform
+            .coreIntensity = 0;
+    }
+
+    result.control
+        .instrument
         .vectorscope
         .showHundredPercentTargets =
         settings.value(
@@ -534,6 +570,13 @@ void SettingsStorage::save(
         .instrument
         .waveform
         .persistenceFrames);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/CoreIntensity",
+        settings.control
+        .instrument
+        .waveform
+        .coreIntensity);
 
     storage.setValue(
         "Control/Instrument/Vectorscope/ShowHundredPercentTargets",

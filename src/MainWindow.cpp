@@ -155,6 +155,39 @@ MainWindow::MainWindow(QWidget* parent)
     const OpenScopeSettings& initialSettings =
         settingsService_->settings();
 
+    pendingLineNumber_ =
+        initialSettings.control
+            .instrument
+            .lineNumber;
+
+    lineNumberPersistTimer_ =
+        new QTimer(this);
+
+    lineNumberPersistTimer_->setSingleShot(
+        true);
+
+    lineNumberPersistTimer_->setInterval(
+        300);
+
+    connect(
+        lineNumberPersistTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            const int lineNumber =
+                pendingLineNumber_;
+
+            settingsService_->update(
+                [lineNumber](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .lineNumber =
+                        lineNumber;
+                });
+        });
+
     const auto displayAspectRatio =
         initialSettings.local
             .display
@@ -479,8 +512,8 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this]()
         {
-            if (activeRenderView_ !=
-                RenderView::Matrix)
+            if (activeRenderView_ != RenderView::Matrix &&
+                activeRenderView_ != RenderView::Video)
             {
                 preVideoClickStateValid_ =
                     false;
@@ -512,8 +545,8 @@ MainWindow::MainWindow(QWidget* parent)
         [this]()
         {
             if (!preVideoClickStateValid_ ||
-                activeRenderView_ !=
-                    RenderView::Matrix)
+                (activeRenderView_ != RenderView::Matrix &&
+                 activeRenderView_ != RenderView::Video))
             {
                 return;
             }
@@ -535,10 +568,11 @@ MainWindow::MainWindow(QWidget* parent)
         [this](double normalizedX,
                double normalizedY)
         {
-            // Point-and-measure is intentionally a matrix-only action.
-            // A single click in a maximized video viewer remains inert.
-            if (activeRenderView_ !=
-                RenderView::Matrix)
+            // Point-and-measure is valid both in matrix view and when the
+            // video viewport is maximized. The selected line and X position
+            // are instrument state, not a matrix-only UI action.
+            if (activeRenderView_ != RenderView::Matrix &&
+                activeRenderView_ != RenderView::Video)
             {
                 return;
             }
@@ -640,7 +674,8 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this]()
         {
-            if (activeRenderView_ != RenderView::Matrix)
+            if (activeRenderView_ != RenderView::Matrix &&
+                activeRenderView_ != RenderView::Video)
             {
                 return;
             }
@@ -658,7 +693,8 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this]()
         {
-            if (activeRenderView_ != RenderView::Matrix)
+            if (activeRenderView_ != RenderView::Matrix &&
+                activeRenderView_ != RenderView::Video)
             {
                 return;
             }
@@ -678,11 +714,14 @@ MainWindow::MainWindow(QWidget* parent)
             constexpr int kFirstPalLine = 0;
             constexpr int kLastPalLine = 575;
 
+            /*
+             * Use the live navigation value, not the persisted settings
+             * snapshot. Settings persistence is deliberately debounced,
+             * so reading SettingsService here would make key/wheel repeat
+             * advance only once per debounce interval.
+             */
             const int currentLine =
-                settingsService_->settings()
-                    .control
-                    .instrument
-                    .lineNumber;
+                pendingLineNumber_;
 
             const int baseLine =
                 currentLine < kFirstPalLine
@@ -802,6 +841,11 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this](int width, int height)
         {
+            // Render the screen waveform at the widget's physical-pixel
+            // resolution.  WaveformWidget::paintEvent() tags that QImage with
+            // the matching DPR before presentation, so Qt maps physical image
+            // pixels to physical screen pixels instead of resampling the image
+            // as though it were a logical-pixel bitmap.
             const QSize renderSize =
                 devicePixelRenderSize(
                     waveformWidget_,
@@ -886,13 +930,13 @@ MainWindow::MainWindow(QWidget* parent)
     const auto setVideoSpoutEnabled =
         [this, videoSpoutOutput](bool enabled)
         {
-            videoEngine_->setSpoutVideoEnabled(
+            // Gate the sender itself as well as the renderer. This prevents
+            // an already queued frame from reopening Spout after OFF.
+            videoSpoutOutput->setEnabled(
                 enabled);
 
-            if (!enabled)
-            {
-                videoSpoutOutput->stop();
-            }
+            videoEngine_->setSpoutVideoEnabled(
+                enabled);
         };
 
     connect(
@@ -1003,6 +1047,15 @@ MainWindow::MainWindow(QWidget* parent)
             *waveformSpoutConnection =
                 QMetaObject::Connection();
 
+            waveformSpoutOutput->setEnabled(
+                enabled);
+
+            // The waveform PAL/video renderer is demand driven. Without
+            // this call waveformVideoEnabled_ remains false and no
+            // waveformVideoChanged frames are ever produced.
+            videoEngine_->setWaveformVideoEnabled(
+                enabled);
+
             if (enabled)
             {
                 *waveformSpoutConnection =
@@ -1012,10 +1065,6 @@ MainWindow::MainWindow(QWidget* parent)
                         waveformSpoutOutput,
                         &SpoutOutput::submitImage,
                         Qt::QueuedConnection);
-            }
-            else
-            {
-                waveformSpoutOutput->stop();
             }
         };
 
@@ -1105,6 +1154,9 @@ MainWindow::MainWindow(QWidget* parent)
                 videoStandard.safeWidthScale,
                 videoStandard.safeHeightScale);
 
+            vectorscopeSpoutOutput->setEnabled(
+                enabled);
+
             videoEngine_->setVectorscopeVideoEnabled(
                 enabled);
 
@@ -1117,10 +1169,6 @@ MainWindow::MainWindow(QWidget* parent)
                         vectorscopeSpoutOutput,
                         &SpoutOutput::submitImage,
                         Qt::QueuedConnection);
-            }
-            else
-            {
-                vectorscopeSpoutOutput->stop();
             }
         };
 
@@ -1195,6 +1243,12 @@ MainWindow::MainWindow(QWidget* parent)
             .waveform
             .persistenceFrames);
 
+    videoEngine_->setWaveformCoreIntensity(
+        initialSettings.control
+            .instrument
+            .waveform
+            .coreIntensity);
+
     videoEngine_->setWaveformVideoContentScale(
         initialSettings.control
             .videoOut
@@ -1251,14 +1305,15 @@ MainWindow::MainWindow(QWidget* parent)
         this,
         [this](int lineNumber)
         {
-            settingsService_->update(
-                [lineNumber](OpenScopeSettings& settings)
-                {
-                    settings.control
-                        .instrument
-                        .lineNumber =
-                        lineNumber;
-                });
+            // Navigation must stay cheap: publish the latest selected line
+            // immediately and coalesce persistent settings writes.
+            pendingLineNumber_ =
+                lineNumber;
+
+            if (lineNumberPersistTimer_ != nullptr)
+            {
+                lineNumberPersistTimer_->start();
+            }
 
             videoEngine_->setSelectedLine(
                 lineNumber);
@@ -1328,6 +1383,32 @@ MainWindow::MainWindow(QWidget* parent)
 
             videoEngine_->setWaveformPersistence(
                 persistence);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::waveformCoreIntensityChanged,
+        this,
+        [this](int intensity)
+        {
+            const int clampedIntensity =
+                std::clamp(
+                    intensity,
+                    0,
+                    100);
+
+            settingsService_->update(
+                [clampedIntensity](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .coreIntensity =
+                        clampedIntensity;
+                });
+
+            videoEngine_->setWaveformCoreIntensity(
+                clampedIntensity);
         });
 
     connect(
@@ -2719,6 +2800,11 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 void MainWindow::closeEvent(
     QCloseEvent* event)
 {
+    if (lineNumberPersistTimer_ != nullptr)
+    {
+        lineNumberPersistTimer_->stop();
+    }
+
     const QRect geometry =
         normalGeometry();
 
@@ -2747,6 +2833,11 @@ void MainWindow::closeEvent(
          settingsPosition,
          settingsPositionValid](OpenScopeSettings& settings)
         {
+            settings.control
+                .instrument
+                .lineNumber =
+                pendingLineNumber_;
+
             settings.local.window.x =
                 geometry.x();
 
