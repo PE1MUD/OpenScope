@@ -1214,13 +1214,48 @@ void VideoEngine::displayWorkerLoop()
             spoutVideoEnabled_.load(
                 std::memory_order_acquire);
 
+        // Keep the worker timeline honest when a consumer is disabled.
+        // ConvertFirst/ConvertSecond are screen-only work; SpoutFirst/
+        // SpoutSecond are Spout-only work.  The actual phases are already
+        // gated below, but without clearing their metrics the performance
+        // window keeps showing the most recent non-zero C1/C2/S1/S2 sample
+        // and makes idle workers look busy.
+        if (!screenRenderEnabled)
+        {
+            performanceStats_.displayWorker0Convert1.update(0);
+            performanceStats_.displayWorker0Convert2.update(0);
+            performanceStats_.displayWorker1Convert1.update(0);
+            performanceStats_.displayWorker1Convert2.update(0);
+        }
+
+        if (!spoutRenderEnabled)
+        {
+            performanceStats_.displayWorker0Spout1.update(0);
+            performanceStats_.displayWorker0Spout2.update(0);
+            performanceStats_.displayWorker1Spout1.update(0);
+            performanceStats_.displayWorker1Spout2.update(0);
+        }
+
         if (!screenRenderEnabled &&
             !spoutRenderEnabled)
         {
+            // No video consumer exists for this frame, so the display
+            // workers do no N/D/C/S work at all.  Clear every worker phase
+            // metric so the performance view represents that idle state.
+            performanceStats_.displayWorker0Noise.update(0);
+            performanceStats_.displayWorker1Noise.update(0);
+            performanceStats_.displayWorker0Deinterlace.update(0);
+            performanceStats_.displayWorker1Deinterlace.update(0);
+            performanceStats_.deinterlaceWorker0.update(0);
+            performanceStats_.deinterlaceWorker1.update(0);
+            performanceStats_.noiseReduction.update(0);
+            performanceStats_.deinterlace.update(0);
             performanceStats_.videoScreen.update(0);
             performanceStats_.displayFirst.update(0);
             performanceStats_.displaySecond.update(0);
             performanceStats_.displayCompose.update(0);
+            performanceStats_.spoutConvertFirst.update(0);
+            performanceStats_.spoutConvertSecond.update(0);
             continue;
         }
 
@@ -3171,6 +3206,19 @@ void VideoEngine::setWaveformColor(bool enabled)
 {
     waveformScreenRenderer_.setColor(enabled);
     waveformVideoRenderer_.setColor(enabled);
+}
+
+void VideoEngine::setWaveformMeasurementProbePresentation(
+    bool enabled,
+    double normalizedX,
+    double volts)
+{
+    // Measurement highlighting is a PC presentation aid only. Keep the
+    // independent PAL/Spout renderer completely unchanged.
+    waveformScreenRenderer_.setMeasurementProbePresentation(
+        enabled,
+        normalizedX,
+        volts);
 }
 
 void VideoEngine::recordVideoSpoutTiming(

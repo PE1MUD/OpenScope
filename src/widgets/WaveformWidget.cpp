@@ -1651,6 +1651,84 @@ void WaveformWidget::setMeasurementLuma(
 {
     measurementLuma_ = samples;
 
+    /*
+     * X-driven measurement cursor.
+     *
+     * The mouse supplies only the X coordinate. Y comes directly from the
+     * actual reconstructed waveform sample at that X. The probe is armed
+     * only inside the plot, to the right of the Y axis, and above the 0.0 V
+     * line. Parking the mouse low or left suppresses the readout.
+     */
+    const QRect displayRect = imageRect();
+    const WaveformGeometry hoverGeometry =
+        makeGeometry(image(), displayRect, this);
+
+    const bool hoverProbeArmed =
+        probeMeasurementMode_ &&
+        hoverActive_ &&
+        !panActive_ &&
+        !areaMode_ &&
+        !referenceMode_ &&
+        !measurementLuma_.isEmpty() &&
+        hoverPosition_.x() >= hoverGeometry.scopeRect.left() &&
+        hoverPosition_.x() <= hoverGeometry.scopeRect.right() &&
+        hoverPosition_.y() >= hoverGeometry.scopeRect.top() &&
+        hoverPosition_.y() < hoverGeometry.zeroVoltY;
+
+    if (hoverProbeArmed)
+    {
+        const double normalizedX =
+            std::clamp(
+                (hoverPosition_.x() - hoverGeometry.scopeRect.left()) /
+                    (std::max)(hoverGeometry.scopeRect.width(), 1.0),
+                0.0,
+                1.0);
+
+        hoverMeasurementSampleIndex_ =
+            std::clamp(
+                static_cast<int>(
+                    std::lround(
+                        normalizedX *
+                        static_cast<double>(
+                            measurementLuma_.size() - 1))),
+                0,
+                static_cast<int>(measurementLuma_.size()) - 1);
+
+        hoverMeasuredVolts_ =
+            static_cast<double>(
+                measurementLuma_[hoverMeasurementSampleIndex_]);
+
+        hoverMeasurementValid_ = true;
+    }
+    else
+    {
+        hoverMeasurementSampleIndex_ = -1;
+        hoverMeasurementValid_ = false;
+    }
+
+    if (hoverMeasurementValid_)
+    {
+        probePresentationActive_ = true;
+
+        const double probeNormalizedX =
+            measurementLuma_.size() > 1
+            ? static_cast<double>(hoverMeasurementSampleIndex_) /
+                static_cast<double>(measurementLuma_.size() - 1)
+            : 0.0;
+
+        // Update every measurement frame, not only when the probe is armed.
+        // The waveform Y value may move while the mouse remains stationary.
+        emit probePresentationChanged(
+            true,
+            probeNormalizedX,
+            hoverMeasuredVolts_);
+    }
+    else if (probePresentationActive_)
+    {
+        probePresentationActive_ = false;
+        emit probePresentationChanged(false, 0.0, 0.0);
+    }
+
     if (multiburstValidityCollecting_)
     {
         accumulateMultiburstValidityFingerprint();
@@ -1821,6 +1899,14 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
         return;
     }
 
+    if (event->key() == Qt::Key_V && !event->isAutoRepeat())
+    {
+        probeMeasurementMode_ = true;
+        update();
+        event->accept();
+        return;
+    }
+
     if (event->key() == Qt::Key_D && !event->isAutoRepeat())
     {
         probeDetailsMode_ = true;
@@ -1864,6 +1950,23 @@ void WaveformWidget::keyPressEvent(QKeyEvent* event)
 
 void WaveformWidget::keyReleaseEvent(QKeyEvent* event)
 {
+    if (event->key() == Qt::Key_V && !event->isAutoRepeat())
+    {
+        probeMeasurementMode_ = false;
+        hoverMeasurementSampleIndex_ = -1;
+        hoverMeasurementValid_ = false;
+
+        if (probePresentationActive_)
+        {
+            probePresentationActive_ = false;
+            emit probePresentationChanged(false, 0.0, 0.0);
+        }
+
+        update();
+        event->accept();
+        return;
+    }
+
     if (event->key() == Qt::Key_D && !event->isAutoRepeat())
     {
         probeDetailsMode_ = false;
@@ -5857,15 +5960,27 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         }
     }
 
-    if (!hoverActive_ || panActive_ || areaMode_ || referenceMode_ || !displayRect.contains(hoverPosition_.toPoint()))
+    const bool hoverProbeVisible =
+        hoverActive_ &&
+        hoverMeasurementValid_ &&
+        !panActive_ &&
+        !areaMode_ &&
+        !referenceMode_ &&
+        hoverPosition_.x() >= geometry.scopeRect.left() &&
+        hoverPosition_.x() <= geometry.scopeRect.right() &&
+        hoverPosition_.y() >= geometry.scopeRect.top() &&
+        hoverPosition_.y() < geometry.zeroVoltY;
+
+    if (!hoverProbeVisible)
     {
         return;
     }
 
-    const double volts = displayYToVolts(hoverPosition_.y());
+    const double volts = hoverMeasuredVolts_;
     const int millivolts =
         static_cast<int>(
             std::lround(volts * 1000.0));
+
     const double percent =
         (volts - kBlackLevelVolts) *
         100.0 /
@@ -5875,6 +5990,72 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
         QStringLiteral("%1 mV   %2")
         .arg(millivolts)
         .arg(formatPercent(percent));
+
+    /*
+     * Measurement marker.
+     *
+     * The full-height 3 px white X guide deliberately stops at the circular
+     * measurement marker. The ring diameter equals 10% of nominal video
+     * amplitude (10% of the vertical distance from 0.3 V black to 1.0 V
+     * white), so the marker itself has a useful calibrated visual scale.
+     */
+    const double probeX =
+        std::clamp(
+            hoverPosition_.x(),
+            geometry.scopeRect.left(),
+            geometry.scopeRect.right());
+
+    const double probeY =
+        std::clamp(
+            voltsToDisplayY(volts),
+            geometry.scopeRect.top(),
+            geometry.scopeRect.bottom());
+
+    const double videoHeight =
+        std::abs(
+            voltsToDisplayY(kWhiteLevelVolts) -
+            voltsToDisplayY(kBlackLevelVolts));
+
+    const double markerDiameter =
+        (std::max)(
+            12.0,
+            videoHeight * 0.10);
+
+    const double markerRadius =
+        markerDiameter * 0.5;
+
+    const double markerTop =
+        probeY - markerRadius;
+
+    const double markerBottom =
+        probeY + markerRadius;
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setPen(QPen(QColor(245, 245, 245, 225), 3.0));
+
+    if (markerTop > geometry.scopeRect.top())
+    {
+        painter.drawLine(
+            QPointF(probeX, geometry.scopeRect.top()),
+            QPointF(probeX, markerTop));
+    }
+
+    if (markerBottom < geometry.scopeRect.bottom())
+    {
+        painter.drawLine(
+            QPointF(probeX, markerBottom),
+            QPointF(probeX, geometry.scopeRect.bottom()));
+    }
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(QColor(255, 125, 125, 235), 3.0));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(
+        QPointF(probeX, probeY),
+        markerRadius,
+        markerRadius);
+    painter.restore();
 
     painter.save();
     painter.setFont(measurementLabelFont);

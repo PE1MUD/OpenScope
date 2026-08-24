@@ -40,6 +40,10 @@ signals:
     void zoomChanged(bool zoomed);
     void zoomFactorChanged(int factor);
     void scrollPositionChanged(double position);
+    void probePresentationChanged(
+        bool active,
+        double normalizedX,
+        double volts);
 
 protected:
     void keyPressEvent(QKeyEvent* event) override;
@@ -170,6 +174,15 @@ private:
 
     bool hoverActive_ = false;
     QPointF hoverPosition_;
+
+    // X-driven waveform probe. The mouse selects X only; the measured Y
+    // comes directly from the actual reconstructed waveform data at that X.
+    int hoverMeasurementSampleIndex_ = -1;
+    double hoverMeasuredVolts_ = 0.0;
+    bool hoverMeasurementValid_ = false;
+    bool probePresentationActive_ = false;
+    bool probeMeasurementMode_ = false;
+
     bool probeDetailsMode_ = false;
 
     bool measureActive_ = false;

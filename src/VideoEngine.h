@@ -115,6 +115,11 @@ public:
     void setWaveformColor(
         bool enabled);
 
+    void setWaveformMeasurementProbePresentation(
+        bool enabled,
+        double normalizedX,
+        double volts);
+
     void setVectorscopeOutputSize(
         int width,
         int height);

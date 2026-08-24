@@ -837,6 +837,21 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(
         waveformWidget_,
+        &WaveformWidget::probePresentationChanged,
+        this,
+        [this](
+            bool active,
+            double normalizedX,
+            double volts)
+        {
+            videoEngine_->setWaveformMeasurementProbePresentation(
+                active,
+                normalizedX,
+                volts);
+        });
+
+    connect(
+        waveformWidget_,
         &WaveformWidget::outputSizeChanged,
         this,
         [this](int width, int height)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "analysis/Analyzer.h"
 #include "video/ReconstructedLumaFrame.h"
 #include "rendering/WaveformGraticule.h"
@@ -90,6 +91,10 @@ public:
         int intensity);
 
     void setColor(bool enabled);
+    void setMeasurementProbePresentation(
+        bool enabled,
+        double normalizedX,
+        double volts);
 
     using TraceJobExecutor = std::function<void(
         std::size_t,
@@ -238,6 +243,9 @@ private:
     bool fitAspectRatio_ = true;
     bool lineInfoOverlayEnabled_ = false;
     bool lineInfoOverlayPalOutput_ = false;
+    std::atomic_bool measurementProbePresentation_{false};
+    std::atomic<double> measurementProbeNormalizedX_{0.0};
+    std::atomic<double> measurementProbeVolts_{0.0};
     int chromaFillIntensity_ = 64;
 
     TraceJobExecutor traceJobExecutor_;

@@ -527,6 +527,24 @@ void WaveformRenderer::setColor(bool enabled)
     settings_.color = enabled;
 }
 
+void WaveformRenderer::setMeasurementProbePresentation(
+    bool enabled,
+    double normalizedX,
+    double volts)
+{
+    measurementProbeNormalizedX_.store(
+        std::clamp(normalizedX, 0.0, 1.0),
+        std::memory_order_relaxed);
+
+    measurementProbeVolts_.store(
+        volts,
+        std::memory_order_relaxed);
+
+    measurementProbePresentation_.store(
+        enabled,
+        std::memory_order_relaxed);
+}
+
 void WaveformRenderer::setTraceJobExecutor(
     TraceJobExecutor executor)
 {
@@ -1565,7 +1583,8 @@ void WaveformRenderer::renderSingleLine(
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
 
-    if (chromaFillIntensity_ > 0)
+    if (chromaFillIntensity_ > 0 &&
+        !measurementProbePresentation_)
     {
         /*
          * Chroma is deliberately NOT part of Scopephor.
@@ -1929,6 +1948,52 @@ void WaveformRenderer::renderSingleLine(
         phosphorMinY = std::clamp(phosphorMinY, 0, phosphorHeight - 1);
         phosphorMaxY = std::clamp(phosphorMaxY, 0, phosphorHeight - 1);
 
+        const bool probePresentation =
+            measurementProbePresentation_.load(
+                std::memory_order_relaxed);
+
+        double probeCenterX = 0.0;
+        double probeCenterY = 0.0;
+        double probeRadiusSquared = 0.0;
+
+        if (probePresentation)
+        {
+            const AnalogVideoLevels probeAnalog =
+                analogLevels(VideoColorStandard::Rec601_625);
+
+            const double probeNormalizedX =
+                measurementProbeNormalizedX_.load(
+                    std::memory_order_relaxed);
+
+            const double probeVolts =
+                measurementProbeVolts_.load(
+                    std::memory_order_relaxed);
+
+            probeCenterX =
+                scope.left() +
+                probeNormalizedX * scope.width();
+
+            probeCenterY =
+                scope.bottom() -
+                probeVolts * scope.height() /
+                    probeAnalog.graticuleMaxVolts;
+
+            const double videoHeight =
+                std::abs(
+                    (probeAnalog.whiteVolts - probeAnalog.blackVolts) *
+                    scope.height() /
+                    probeAnalog.graticuleMaxVolts);
+
+            const double probeDiameter =
+                (std::max)(12.0, videoHeight * 0.10);
+
+            const double probeRadius =
+                probeDiameter * 0.5;
+
+            probeRadiusSquared =
+                probeRadius * probeRadius;
+        }
+
         for (int y = phosphorMinY;
             y <= phosphorMaxY;
             ++y)
@@ -1965,11 +2030,33 @@ void WaveformRenderer::renderSingleLine(
                     ? 191
                     : 255;
 
-                const int value =
+                int value =
                     std::min(
                         tracePeakWhite,
                         static_cast<int>(
                             energy >> 3));
+
+                if (probePresentation)
+                {
+                    const double dx =
+                        (static_cast<double>(x) + 0.5) -
+                        probeCenterX;
+
+                    const double dy =
+                        (static_cast<double>(y) + 0.5) -
+                        probeCenterY;
+
+                    const bool insideProbe =
+                        dx * dx + dy * dy <=
+                        probeRadiusSquared;
+
+                    // Dim the context, but keep the trace inside the
+                    // measurement circle at its normal calibrated strength.
+                    if (!insideProbe)
+                    {
+                        value = (value + 1) / 2;
+                    }
+                }
 
                 const QRgb old =
                     destination[x];
@@ -3795,6 +3882,48 @@ void WaveformRenderer::renderAllLines(
             VideoStandard::pal625());
     }
 
+    const bool probePresentation =
+        measurementProbePresentation_.load(
+            std::memory_order_relaxed);
+
+    double probeCenterX = 0.0;
+    double probeCenterY = 0.0;
+    double probeRadiusSquared = 0.0;
+
+    if (probePresentation)
+    {
+        const AnalogVideoLevels probeAnalog =
+            analogLevels(VideoColorStandard::Rec601_625);
+
+        probeCenterX =
+            scope.left() +
+            measurementProbeNormalizedX_.load(
+                std::memory_order_relaxed) *
+                scope.width();
+
+        probeCenterY =
+            scope.bottom() -
+            measurementProbeVolts_.load(
+                std::memory_order_relaxed) *
+                scope.height() /
+                probeAnalog.graticuleMaxVolts;
+
+        const double videoHeight =
+            std::abs(
+                (probeAnalog.whiteVolts - probeAnalog.blackVolts) *
+                scope.height() /
+                probeAnalog.graticuleMaxVolts);
+
+        const double probeDiameter =
+            (std::max)(12.0, videoHeight * 0.10);
+
+        const double probeRadius =
+            probeDiameter * 0.5;
+
+        probeRadiusSquared =
+            probeRadius * probeRadius;
+    }
+
     for (int y = 0;
         y < displayHeight;
         ++y)
@@ -3841,12 +3970,32 @@ void WaveformRenderer::renderAllLines(
                 ? 191u
                 : 255u;
 
-            const std::uint32_t intensity =
+            std::uint32_t intensity =
                 std::min<std::uint32_t>(
                     tracePeakWhite,
                     static_cast<std::uint32_t>(
                         temporalDensity / 256.0f) *
                     8u);
+
+            if (probePresentation)
+            {
+                const double dx =
+                    (static_cast<double>(x) + 0.5) -
+                    probeCenterX;
+
+                const double dy =
+                    (static_cast<double>(y) + 0.5) -
+                    probeCenterY;
+
+                const bool insideProbe =
+                    dx * dx + dy * dy <=
+                    probeRadiusSquared;
+
+                if (!insideProbe)
+                {
+                    intensity = (intensity + 1u) / 2u;
+                }
+            }
 
             if (intensity == 0)
             {
