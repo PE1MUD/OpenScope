@@ -1,5 +1,4 @@
 #include "rendering/WaveformRenderer.h"
-#include "rendering/CatWuzleChunkDispatcher.h"
 #include "diagnostics/TraceLog.h"
 #include "ui/ViewportOverlay.h"
 #include "processing/SignalReconstructor.h"

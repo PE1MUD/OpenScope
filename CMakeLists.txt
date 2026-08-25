@@ -159,7 +159,6 @@ src/processing/LumaHighFrequencyCompensator.h
 src/processing/LumaHighFrequencyCompensator.cpp
 
 src/rendering/WaveformRenderer.h
-src/rendering/CatWuzleChunkDispatcher.h
 src/rendering/WaveformRenderer.cpp
 src/rendering/WaveformGraticule.h
 src/rendering/WaveformGraticule.cpp
