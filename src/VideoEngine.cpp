@@ -1,6 +1,11 @@
 #include <QMetaObject>
 #include "VideoEngine.h"
+#include "BuildConfig.h"
+
+#include <fstream>
+#include <iomanip>
 #include "standards/VideoStandard.h"
+#include "diagnostics/TraceLog.h"
 #include <QDebug>
 #include <QElapsedTimer>
 #include <algorithm>
@@ -18,6 +23,10 @@
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
 {
+    waveformScreenRenderer_.setTraceRendererId(
+        TraceRendererId::PcWaveform);
+    waveformVideoRenderer_.setTraceRendererId(
+        TraceRendererId::SpoutWaveform);
 
     for (DisplayConverter& converter :
         displayConverters_)
@@ -33,14 +42,40 @@ VideoEngine::VideoEngine(QObject* parent)
             DisplayConversionImplementation::Avx2);
     }
 
+    // Conservative startup estimate.  Once real display frames complete,
+    // this is replaced by a per-worker EMA of measured display work.
+    for (auto& estimateUs :
+        displayAssistWorkEstimateUs_)
+    {
+        estimateUs.store(
+            5000u,
+            std::memory_order_relaxed);
+    }
+
     waveformScreenRenderer_.setTraceJobExecutor(
         [this](
             std::size_t jobCount,
-            const std::function<void(std::size_t)>& job)
+            const WaveformRenderer::TraceJob& job)
         {
             runWaveformTraceJobs(
                 jobCount,
                 job);
+        });
+
+    waveformScreenRenderer_.setTraceHelperAvailability(
+        [this]()
+        {
+            for (std::size_t workerIndex = 0;
+                workerIndex < displayPhaseWorkers_.size();
+                ++workerIndex)
+            {
+                if (canDisplayWorkerAcceptAssist(workerIndex))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         });
 
     for (CapturedFrameSlot& slot : captureSlots_)
@@ -243,6 +278,14 @@ void VideoEngine::submitWriteFrame()
             1,
             std::memory_order_relaxed) + 1;
 
+    traceLog(
+        TraceEventType::Frame,
+        generation,
+        0u,
+        static_cast<std::uint32_t>(slotIndex),
+        slot.frame.inputSignalValid ? 1u : 0u,
+        0u);
+
     slot.generation.store(
         generation,
         std::memory_order_release);
@@ -285,6 +328,14 @@ void VideoEngine::submitWriteFrame()
             captureTickTime;
     }
 
+    latestCaptureTickNs_.store(
+        static_cast<std::int64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    captureTickTime.time_since_epoch())
+                .count()),
+        std::memory_order_release);
+
     displayPresenterCondition_.notify_one();
 
     displayCondition_.notify_one();
@@ -304,6 +355,171 @@ void VideoEngine::cancelWriteFrame()
         std::memory_order_release);
 }
 
+
+bool VideoEngine::startWaveformRawCapture(
+    const std::string& rawFilePath)
+{
+    if constexpr (!OpenScopeBuild::kDebugBuild)
+    {
+        return false;
+    }
+
+    const int line =
+        selectedLine_.load(
+            std::memory_order_acquire);
+
+    if (line < 0 || rawFilePath.empty())
+    {
+        return false;
+    }
+
+    std::scoped_lock lock(
+        waveformRawCaptureMutex_);
+
+    if (waveformRawCaptureActive_)
+    {
+        return false;
+    }
+
+    waveformRawCaptureLine_ = line;
+    waveformRawCaptureFrameCount_ = 0;
+    waveformRawCapturePath_ = rawFilePath;
+    waveformRawCaptureSamples_.assign(
+        kWaveformRawCaptureFrames *
+            kWaveformRawCaptureSamples,
+        0u);
+    waveformRawCaptureGenerations_.assign(
+        kWaveformRawCaptureFrames,
+        0u);
+    waveformRawCaptureActive_ = true;
+
+    return true;
+}
+
+void VideoEngine::captureWaveformRawFrame(
+    const std::vector<float>& reconstructedSamples,
+    std::uint64_t generation,
+    int renderedLine)
+{
+    std::string rawPath;
+    int capturedLine = -1;
+    std::vector<std::uint16_t> samples;
+    std::vector<std::uint64_t> generations;
+
+    {
+        std::scoped_lock lock(
+            waveformRawCaptureMutex_);
+
+        if (!waveformRawCaptureActive_ ||
+            renderedLine != waveformRawCaptureLine_ ||
+            reconstructedSamples.size() !=
+                kWaveformRawCaptureSamples)
+        {
+            return;
+        }
+
+        const std::size_t frameIndex =
+            waveformRawCaptureFrameCount_;
+
+        auto* destination =
+            waveformRawCaptureSamples_.data() +
+            frameIndex * kWaveformRawCaptureSamples;
+
+        for (std::size_t x = 0;
+            x < kWaveformRawCaptureSamples;
+            ++x)
+        {
+            destination[x] =
+                static_cast<std::uint16_t>(
+                    std::lround(
+                        std::clamp(
+                            reconstructedSamples[x],
+                            0.0f,
+                            65535.0f)));
+        }
+
+        waveformRawCaptureGenerations_[frameIndex] =
+            generation;
+
+        ++waveformRawCaptureFrameCount_;
+
+        if (waveformRawCaptureFrameCount_ <
+            kWaveformRawCaptureFrames)
+        {
+            return;
+        }
+
+        waveformRawCaptureActive_ = false;
+        rawPath = waveformRawCapturePath_;
+        capturedLine = waveformRawCaptureLine_;
+        samples = std::move(
+            waveformRawCaptureSamples_);
+        generations = std::move(
+            waveformRawCaptureGenerations_);
+    }
+
+    waveformRawCaptureWriter_ =
+        std::jthread(
+            [rawPath = std::move(rawPath),
+                capturedLine,
+                samples = std::move(samples),
+                generations = std::move(generations)]()
+            {
+                std::ofstream raw(
+                    rawPath,
+                    std::ios::binary |
+                    std::ios::trunc);
+
+                if (raw)
+                {
+                    raw.write(
+                        reinterpret_cast<const char*>(
+                            samples.data()),
+                        static_cast<std::streamsize>(
+                            samples.size() *
+                            sizeof(std::uint16_t)));
+                }
+
+                std::string txtPath = rawPath;
+                const auto dot = txtPath.find_last_of('.');
+                if (dot != std::string::npos)
+                {
+                    txtPath.resize(dot);
+                }
+                txtPath += ".txt";
+
+                std::ofstream meta(
+                    txtPath,
+                    std::ios::trunc);
+
+                if (meta)
+                {
+                    meta
+                        << "OpenScope waveform RAW capture\n"
+                        << "format=u16le_y\n"
+                        << "line=" << capturedLine << "\n"
+                        << "samples_per_frame=2880\n"
+                        << "frames=250\n"
+                        << "sample_rate_hz=54000000\n"
+                        << "bytes_per_frame=5760\n"
+                        << "total_bytes=1440000\n"
+                        << "generation_numbers=";
+
+                    for (std::size_t i = 0;
+                        i < generations.size();
+                        ++i)
+                    {
+                        if (i != 0)
+                        {
+                            meta << ',';
+                        }
+                        meta << generations[i];
+                    }
+
+                    meta << '\\n';
+                }
+            });
+}
 
 void VideoEngine::setSelectedLine(int line)
 {
@@ -443,6 +659,19 @@ void VideoEngine::setWaveformCoreIntensity(
             200),
         std::memory_order_release);
 }
+
+
+void VideoEngine::setWaveformCoreWidth(
+    int widthTenths)
+{
+    waveformCoreWidthTenths_.store(
+        std::clamp(
+            widthTenths,
+            5,
+            30),
+        std::memory_order_release);
+}
+
 
 
 void VideoEngine::setVectorscopeGlow(
@@ -845,6 +1074,11 @@ void VideoEngine::displayPhaseWorkerLoop(
                     displayWorkerPhaseTimer.nsecsElapsed() /
                     1000);
 
+            displayCurrentFrameWorkerUs_[
+                workerIndex].fetch_add(
+                    workerPhaseUs,
+                    std::memory_order_relaxed);
+
             PerformanceMetric* workerMetric = nullptr;
 
             if (workerIndex == 0)
@@ -942,7 +1176,9 @@ void VideoEngine::displayPhaseWorkerLoop(
                 }
             }
 
-            if (!tryRunWaveformAssistJob())
+            if (!tryRunWaveformAssistJob(
+                static_cast<std::uint32_t>(workerIndex + 1u),
+                true))
             {
                 break;
             }
@@ -950,9 +1186,112 @@ void VideoEngine::displayPhaseWorkerLoop(
     }
 }
 
-bool VideoEngine::tryRunWaveformAssistJob()
+bool VideoEngine::canDisplayWorkerAcceptAssist(
+    std::size_t workerIndex) const
 {
-    std::function<void(std::size_t)> job;
+    if (workerIndex >= displayPhaseWorkers_.size())
+    {
+        return false;
+    }
+
+    // Do not gate assistance on the *global* display pipeline state here.
+    // A display worker is allowed to help between its own completed phases.
+    // Higher-priority display work still wins through displayPhaseGeneration_
+    // in displayPhaseWorkerLoop(), while the dynamic deadline holdoff below
+    // prevents claiming a new chunk too close to the next capture tick.
+
+    const bool screenNeeded =
+        videoScreenRenderEnabled_.load(
+            std::memory_order_acquire);
+
+    const bool spoutNeeded =
+        spoutVideoEnabled_.load(
+            std::memory_order_acquire);
+
+    // With no video consumer there is no upcoming display workload to
+    // protect.  The workers may assist continuously.
+    if (!screenNeeded && !spoutNeeded)
+    {
+        return true;
+    }
+
+    const std::int64_t lastCaptureNs =
+        latestCaptureTickNs_.load(
+            std::memory_order_acquire);
+
+    if (lastCaptureNs <= 0)
+    {
+        return false;
+    }
+
+    using Clock = std::chrono::steady_clock;
+
+    const std::int64_t nowNs =
+        static_cast<std::int64_t>(
+            std::chrono::duration_cast<
+                std::chrono::nanoseconds>(
+                    Clock::now().time_since_epoch())
+                .count());
+
+    constexpr std::int64_t kCapturePeriodNs =
+        40'000'000;
+
+    const std::int64_t nextCaptureNs =
+        lastCaptureNs + kCapturePeriodNs;
+
+    // If the expected capture tick is already due, stay free.  This is the
+    // important busy-system behaviour: a late producer makes helpers more
+    // conservative, never more aggressive.
+    if (nowNs >= nextCaptureNs)
+    {
+        return false;
+    }
+
+    const std::uint64_t estimateUs =
+        displayAssistWorkEstimateUs_[
+            workerIndex].load(
+                std::memory_order_relaxed);
+
+    // Measured display work + 50%, bounded only to keep startup noise and a
+    // single pathological sample from making the policy useless.
+    const std::uint64_t holdoffUs =
+        std::clamp<std::uint64_t>(
+            estimateUs + estimateUs / 2u,
+            2000u,
+            15000u);
+
+    const std::int64_t timeToCaptureUs =
+        (nextCaptureNs - nowNs) / 1000;
+
+    return
+        timeToCaptureUs >
+        static_cast<std::int64_t>(holdoffUs);
+}
+
+bool VideoEngine::tryRunWaveformAssistJob(
+    std::uint32_t workerId,
+    bool enforceDisplayHoldoff)
+{
+    if (enforceDisplayHoldoff)
+    {
+        if (workerId == 0u)
+        {
+            return false;
+        }
+
+        const std::size_t displayWorkerIndex =
+            static_cast<std::size_t>(workerId - 1u);
+
+        if (!canDisplayWorkerAcceptAssist(
+            displayWorkerIndex))
+        {
+            return false;
+        }
+    }
+
+    std::function<void(
+        std::size_t,
+        std::uint32_t)> job;
     std::size_t jobIndex = 0;
 
     {
@@ -974,7 +1313,81 @@ bool VideoEngine::tryRunWaveformAssistJob()
         job = waveformAssistJob_;
     }
 
-    job(jobIndex);
+    // Wake the publisher as soon as a helper has actually claimed work.
+    // This gives W1/W2 a deterministic head start instead of letting W0
+    // drain the tiny chunk queue before the display workers leave their wait.
+    waveformAssistDoneCondition_.notify_all();
+
+    // The claimed job is never abandoned.  A display worker only checks its
+    // higher-priority work before claiming the next chunk.  The renderer's
+    // chunk dispatcher receives this one back as Done/Invalid itself.
+    const auto assistStart =
+        std::chrono::steady_clock::now();
+
+    const std::uint64_t activeAssistGeneration =
+        waveformAssistGeneration_.load(std::memory_order_acquire);
+
+    traceLog(
+        TraceEventType::AssistJobStart,
+        activeAssistGeneration,
+        workerId,
+        static_cast<std::uint32_t>(jobIndex),
+        0u,
+        0u,
+        TraceRendererId::PcWaveform);
+
+    job(jobIndex, workerId);
+
+    const auto assistEnd =
+        std::chrono::steady_clock::now();
+
+    const std::uint64_t assistDurationUs =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                assistEnd - assistStart).count());
+
+    traceLog(
+        TraceEventType::AssistJobEnd,
+        activeAssistGeneration,
+        workerId,
+        static_cast<std::uint32_t>(jobIndex),
+        assistDurationUs,
+        0u,
+        TraceRendererId::PcWaveform);
+
+    if (workerId >= 1u && workerId <= 2u)
+    {
+        const std::int64_t captureNs =
+            waveformAssistCaptureTickNs_.load(
+                std::memory_order_acquire);
+
+        const std::int64_t startNs =
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::nanoseconds>(
+                        assistStart.time_since_epoch())
+                    .count());
+
+        const std::uint64_t durationUs64 =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                        assistEnd - assistStart)
+                    .count());
+
+        const std::uint64_t startUs64 =
+            captureNs > 0 && startNs > captureNs
+            ? static_cast<std::uint64_t>(
+                (startNs - captureNs) / 1000)
+            : 0u;
+
+        performanceStats_.displayWorkerAssistTimeline[
+            static_cast<std::size_t>(workerId - 1u)].append(
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(startUs64, 80'000u)),
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(durationUs64, 80'000u)));
+    }
 
     {
         std::lock_guard<std::mutex> lock(
@@ -999,8 +1412,33 @@ bool VideoEngine::tryRunWaveformAssistJob()
 
 void VideoEngine::runWaveformTraceJobs(
     std::size_t jobCount,
-    const std::function<void(std::size_t)>& job)
+    const std::function<void(
+        std::size_t,
+        std::uint32_t)>& job)
 {
+    QElapsedTimer assistTimer;
+    assistTimer.start();
+
+    const auto assistWallStart =
+        std::chrono::steady_clock::now();
+    const std::int64_t assistWallStartNs =
+        static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                assistWallStart.time_since_epoch()).count());
+    const std::int64_t assistCaptureNs =
+        latestCaptureTickNs_.load(std::memory_order_acquire);
+    const std::uint64_t assistStartFromCaptureUs =
+        assistCaptureNs > 0 && assistWallStartNs > assistCaptureNs
+        ? static_cast<std::uint64_t>(
+            (assistWallStartNs - assistCaptureNs) / 1000)
+        : 0u;
+
+    performanceStats_.waveformScreenAssistTotalUs.store(0, std::memory_order_relaxed);
+    performanceStats_.waveformScreenAssistFinalWaitStartUs.store(0, std::memory_order_relaxed);
+    performanceStats_.waveformScreenAssistFinalWaitUs.store(0, std::memory_order_relaxed);
+
+    std::uint64_t assistGeneration = 0;
+
     if (jobCount == 0 || !job)
     {
         return;
@@ -1023,23 +1461,62 @@ void VideoEngine::runWaveformTraceJobs(
         waveformAssistJobsRunning_ = 0;
         waveformAssistActive_ = true;
 
-        waveformAssistGeneration_.fetch_add(
-            1,
+        assistGeneration =
+            waveformAssistGeneration_.fetch_add(
+                1,
+                std::memory_order_acq_rel) + 1u;
+
+        traceLog(
+            TraceEventType::AssistBegin,
+            assistGeneration,
+            0u,
+            0u,
+            static_cast<std::uint64_t>(jobCount),
+            0u,
+            TraceRendererId::PcWaveform);
+
+        waveformAssistCaptureTickNs_.store(
+            assistCaptureNs,
             std::memory_order_release);
+
+        for (auto& timeline :
+            performanceStats_.displayWorkerAssistTimeline)
+        {
+            timeline.reset(assistGeneration);
+        }
     }
 
     displayPhaseCondition_.notify_all();
 
-    // The waveform thread is not a coordinator-only thread: it consumes the
-    // same queue as the idle display worker, so there is no parallelisation
-    // overhead when the display worker is busy with higher-priority video.
-    while (tryRunWaveformAssistJob())
+    // W0 starts immediately.  Helpers join opportunistically when display
+    // work/holdoff allows it; there is no artificial launch delay anymore.
+    // The renderer now uses linear chunks and direct target strips, so early
+    // W0 progress is useful work instead of queue stealing.
+
+    // Worker id 0 is the waveform thread itself.  It consumes exactly the
+    // same queue and is never subject to display holdoff.  Yield between
+    // chunks so a helper that becomes runnable while W0 is rasterising keeps
+    // getting a fair chance to claim the next small chunk.
+    while (tryRunWaveformAssistJob(0u, false))
     {
+        std::this_thread::yield();
     }
 
     {
         std::unique_lock<std::mutex> lock(
             waveformAssistMutex_);
+
+        const std::uint64_t finalWaitStartUs =
+            static_cast<std::uint64_t>(assistTimer.nsecsElapsed() / 1000);
+
+        traceLog(
+            TraceEventType::AssistWaitBegin,
+            assistGeneration,
+            0u,
+            0u,
+            0u,
+            0u,
+            TraceRendererId::PcWaveform);
 
         waveformAssistDoneCondition_.wait(
             lock,
@@ -1051,9 +1528,39 @@ void VideoEngine::runWaveformTraceJobs(
                     waveformAssistJobsRunning_ == 0;
             });
 
+        const std::uint64_t finalWaitEndUs =
+            static_cast<std::uint64_t>(assistTimer.nsecsElapsed() / 1000);
+
+        traceLog(
+            TraceEventType::AssistWaitEnd,
+            assistGeneration,
+            0u,
+            0u,
+            finalWaitEndUs - finalWaitStartUs,
+            0u,
+            TraceRendererId::PcWaveform);
+
+        performanceStats_.waveformScreenAssistFinalWaitStartUs.store(
+            assistStartFromCaptureUs + finalWaitStartUs,
+            std::memory_order_relaxed);
+        performanceStats_.waveformScreenAssistFinalWaitUs.store(
+            finalWaitEndUs - finalWaitStartUs,
+            std::memory_order_relaxed);
+
         waveformAssistActive_ = false;
         waveformAssistJob_ = {};
     }
+
+    performanceStats_.waveformScreenAssistTotalUs.store(
+        static_cast<std::uint64_t>(assistTimer.nsecsElapsed() / 1000),
+        std::memory_order_relaxed);
+
+    waveformAssistCompletedCaptureTickNs_.store(
+        assistCaptureNs,
+        std::memory_order_release);
+    waveformAssistCompletedGeneration_.store(
+        assistGeneration,
+        std::memory_order_release);
 
     waveformAssistDoneCondition_.notify_all();
 }
@@ -1259,6 +1766,18 @@ void VideoEngine::displayWorkerLoop()
             continue;
         }
 
+        displayPipelineActive_.store(
+            true,
+            std::memory_order_release);
+
+        for (auto& workerUs :
+            displayCurrentFrameWorkerUs_)
+        {
+            workerUs.store(
+                0u,
+                std::memory_order_relaxed);
+        }
+
         QElapsedTimer totalDisplayTimer;
         totalDisplayTimer.start();
 
@@ -1397,6 +1916,13 @@ void VideoEngine::displayWorkerLoop()
             displayFrame->height,
             progressiveLuma_))
         {
+            displayPipelineActive_.store(
+                false,
+                std::memory_order_release);
+            waveformAssistGeneration_.fetch_add(
+                1,
+                std::memory_order_release);
+            displayPhaseCondition_.notify_all();
             continue;
         }
 
@@ -1831,6 +2357,48 @@ void VideoEngine::displayWorkerLoop()
                     1u,
                     std::memory_order_relaxed);
         }
+
+        // One full display pipeline has completed.  Fold each worker's
+        // measured N/D/C/S time into a light EMA and derive future holdoff
+        // from that value (+50% in canDisplayWorkerAcceptAssist()).
+        for (std::size_t workerIndex = 0;
+            workerIndex < displayPhaseWorkers_.size();
+            ++workerIndex)
+        {
+            const std::uint64_t measuredUs =
+                displayCurrentFrameWorkerUs_[
+                    workerIndex].load(
+                        std::memory_order_relaxed);
+
+            if (measuredUs > 0u)
+            {
+                const std::uint64_t oldEstimateUs =
+                    displayAssistWorkEstimateUs_[
+                        workerIndex].load(
+                            std::memory_order_relaxed);
+
+                // EMA alpha = 0.20: responsive to sustained load, but not
+                // jerked around by a single scheduler hiccup.
+                const std::uint64_t newEstimateUs =
+                    (oldEstimateUs * 4u + measuredUs) / 5u;
+
+                displayAssistWorkEstimateUs_[
+                    workerIndex].store(
+                        newEstimateUs,
+                        std::memory_order_relaxed);
+            }
+        }
+
+        displayPipelineActive_.store(
+            false,
+            std::memory_order_release);
+
+        // Wake helpers that observed the assist generation while the display
+        // pipeline was active and therefore declined to claim a chunk.
+        waveformAssistGeneration_.fetch_add(
+            1,
+            std::memory_order_release);
+        displayPhaseCondition_.notify_all();
 
         const bool captureValid =
             isCaptureSlotValid(
@@ -2437,6 +3005,10 @@ void VideoEngine::waveformWorkerLoop()
             waveformCoreIntensity_.load(
                 std::memory_order_acquire);
 
+        const int waveformCoreWidthTenths =
+            waveformCoreWidthTenths_.load(
+                std::memory_order_acquire);
+
         const int glow =
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
@@ -2468,14 +3040,32 @@ void VideoEngine::waveformWorkerLoop()
             waveformScreenRenderer_.setCoreIntensity(
                 waveformCoreIntensity);
 
+            waveformScreenRenderer_.setCoreWidth(
+                waveformCoreWidthTenths);
+
+
             waveformScreenRenderer_.setGlow(
                 glow);
 
             QElapsedTimer screenTimer;
             screenTimer.start();
 
+            const auto waveformWallStart =
+                std::chrono::steady_clock::now();
+            const std::int64_t waveformWallStartNs =
+                static_cast<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        waveformWallStart.time_since_epoch()).count());
             waveformScreenRenderer_.analyze(
                 captureSlot.frame);
+
+            if constexpr (OpenScopeBuild::kDebugBuild)
+            {
+                captureWaveformRawFrame(
+                    waveformScreenRenderer_.reconstructedLumaSamples(),
+                    generation,
+                    selectedLine);
+            }
 
             performanceStats_.waveformScreen.update(
                 static_cast<std::uint64_t>(
@@ -2484,6 +3074,45 @@ void VideoEngine::waveformWorkerLoop()
 
             const auto& timings =
                 waveformScreenRenderer_.renderTimings();
+
+            const std::uint64_t waveformTimelineGeneration =
+                waveformAssistCompletedGeneration_.load(
+                    std::memory_order_acquire);
+            const std::int64_t waveformTimelineCaptureNs =
+                waveformAssistCompletedCaptureTickNs_.load(
+                    std::memory_order_acquire);
+            const std::uint64_t waveformStartFromCaptureUs =
+                waveformTimelineCaptureNs > 0 &&
+                waveformWallStartNs > waveformTimelineCaptureNs
+                ? static_cast<std::uint64_t>(
+                    (waveformWallStartNs - waveformTimelineCaptureNs) / 1000)
+                : 0u;
+            performanceStats_.waveformScreenPhaseTimeline.reset(
+                waveformTimelineGeneration);
+            const std::uint64_t waveformWallUs =
+                static_cast<std::uint64_t>(
+                    screenTimer.nsecsElapsed() / 1000);
+            performanceStats_.waveformScreenPhaseTimeline.append(
+                'X',
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(waveformStartFromCaptureUs, 80'000u)),
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(waveformWallUs, 80'000u)));
+            for (std::uint32_t phaseIndex = 0;
+                phaseIndex < timings.phaseCount &&
+                phaseIndex < WaveformRenderTimings::kPhaseCapacity;
+                ++phaseIndex)
+            {
+                const auto& phase = timings.phases[phaseIndex];
+                performanceStats_.waveformScreenPhaseTimeline.append(
+                    phase.label,
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(
+                            waveformStartFromCaptureUs + phase.startUs,
+                            80'000u)),
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(phase.durationUs, 80'000u)));
+            }
 
             performanceStats_.waveformScreenPersistence.update(
                 timings.persistenceUs);
@@ -2514,6 +3143,38 @@ void VideoEngine::waveformWorkerLoop()
             performanceStats_.waveformScreenTraceJobCount.store(
                 timings.traceJobCount,
                 std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleChunkCount.store(
+                timings.catWuzleChunkCount,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleInvalidChunkCount.store(
+                timings.catWuzleInvalidChunkCount,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleZipperUs.store(
+                timings.catWuzleZipperUs,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleChunkRenderMinUs.store(
+                timings.catWuzleChunkRenderMinUs,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleChunkRenderAvgUs.store(
+                timings.catWuzleChunkRenderAvgUs,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleChunkRenderMaxUs.store(
+                timings.catWuzleChunkRenderMaxUs,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenCatWuzleChunkQueueWaitMaxUs.store(
+                timings.catWuzleChunkQueueWaitMaxUs,
+                std::memory_order_relaxed);
+            for (std::size_t workerId = 0;
+                workerId < timings.catWuzleWorkerChunkCount.size();
+                ++workerId)
+            {
+                performanceStats_.waveformScreenCatWuzleWorkerChunkCount[workerId].store(
+                    timings.catWuzleWorkerChunkCount[workerId],
+                    std::memory_order_relaxed);
+                performanceStats_.waveformScreenCatWuzleWorkerRenderUs[workerId].store(
+                    timings.catWuzleWorkerRenderUs[workerId],
+                    std::memory_order_relaxed);
+            }
             performanceStats_.waveformScreenBeamCoreRadiusPx.store(
                 timings.beamCoreRadiusPx,
                 std::memory_order_relaxed);
@@ -2541,6 +3202,7 @@ void VideoEngine::waveformWorkerLoop()
         else
         {
             performanceStats_.waveformScreen.update(0);
+            performanceStats_.waveformScreenPhaseTimeline.reset(0);
             performanceStats_.waveformScreenPersistence.update(0);
             performanceStats_.waveformScreenTrace.update(0);
             performanceStats_.waveformScreenTracePrep.update(0);
@@ -2627,6 +3289,10 @@ void VideoEngine::waveformWorkerLoop()
 
             waveformVideoRenderer_.setCoreIntensity(
                 waveformCoreIntensity);
+
+            waveformVideoRenderer_.setCoreWidth(
+                waveformCoreWidthTenths);
+
 
             // Same renderer, different target: the SD video output needs
             // less halo energy.  UI 50 therefore behaves like UI 30 on the

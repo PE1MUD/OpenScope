@@ -1,5 +1,6 @@
 #include "SettingsStorage.h"
 
+#include <algorithm>
 #include <QCoreApplication>
 #include <QDir>
 #include <QSettings>
@@ -214,6 +215,22 @@ OpenScopeSettings SettingsStorage::load() const
             .waveform
             .coreIntensity)
         .toInt();
+
+    result.control
+        .instrument
+        .waveform
+        .coreWidthTenths =
+        std::clamp(
+            settings.value(
+                "Control/Instrument/Waveform/CoreWidthTenths",
+                result.control
+                .instrument
+                .waveform
+                .coreWidthTenths)
+            .toInt(),
+            5,
+            30);
+
 
     // Migration from the temporary 0..400 tuning scale:
     // old 200% is the new normal 100% beam level.
@@ -577,6 +594,14 @@ void SettingsStorage::save(
         .instrument
         .waveform
         .coreIntensity);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/CoreWidthTenths",
+        settings.control
+        .instrument
+        .waveform
+        .coreWidthTenths);
+
 
     storage.setValue(
         "Control/Instrument/Vectorscope/ShowHundredPercentTargets",

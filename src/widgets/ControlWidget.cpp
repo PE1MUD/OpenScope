@@ -1,8 +1,10 @@
 #include "widgets/ControlWidget.h"
+#include "BuildConfig.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <optional>
 #include <utility>
 #include <QAbstractButton>
 #include <QButtonGroup>
@@ -99,6 +101,13 @@ namespace
         void setDoubleClickResetsToMidpoint(bool enabled)
         {
             doubleClickResetsToMidpoint_ = enabled;
+            doubleClickResetValue_.reset();
+        }
+
+        void setDoubleClickResetValue(int value)
+        {
+            doubleClickResetValue_ = value;
+            doubleClickResetsToMidpoint_ = false;
         }
 
     protected:
@@ -161,14 +170,20 @@ namespace
         void mouseDoubleClickEvent(
             QMouseEvent* event) override
         {
-            if (doubleClickResetsToMidpoint_ &&
+            if ((doubleClickResetsToMidpoint_ ||
+                    doubleClickResetValue_.has_value()) &&
                 event->button() == Qt::LeftButton)
             {
-                const int midpoint =
-                    minimum() +
-                    (maximum() - minimum()) / 2;
+                const int resetValue =
+                    doubleClickResetValue_.value_or(
+                        minimum() +
+                        (maximum() - minimum()) / 2);
 
-                setValue(midpoint);
+                setValue(
+                    std::clamp(
+                        resetValue,
+                        minimum(),
+                        maximum()));
                 emit sliderReleased();
 
                 event->accept();
@@ -292,6 +307,7 @@ namespace
     private:
         std::function<QString(int)> valueFormatter_;
         bool doubleClickResetsToMidpoint_ = false;
+        std::optional<int> doubleClickResetValue_;
 
         void setValueFromMouse(
             const QPointF& position)
@@ -1202,6 +1218,50 @@ ControlWidget::ControlWidget(
     miscLayout->addWidget(
         performanceCheckBox_);
 
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        QSlider* coreWidthSlider = nullptr;
+
+        QWidget* coreWidthRow =
+            createSliderRow(
+                "Core width",
+                coreWidthSlider,
+                5,
+                30,
+                std::clamp(
+                    settings.control
+                        .instrument
+                        .waveform
+                        .coreWidthTenths,
+                    5,
+                    30),
+                miscTab,
+                [](int value)
+                {
+                    return QString::number(
+                        static_cast<double>(value) / 10.0,
+                        'f',
+                        1) +
+                        " px";
+                });
+
+        static_cast<ValueSlider*>(coreWidthSlider)
+            ->setDoubleClickResetValue(10);
+
+        coreWidthSlider->setToolTip(
+            "Waveform core width. Double-click to reset to 1.0 px.");
+
+        miscLayout->addWidget(
+            coreWidthRow);
+
+        connect(
+            coreWidthSlider,
+            &QSlider::valueChanged,
+            this,
+            &ControlWidget::waveformCoreWidthChanged);
+
+    }
+
     auto* floatiesHomeButton =
         new QPushButton(
             "Floaties 2 Home",
@@ -1282,6 +1342,26 @@ ControlWidget::ControlWidget(
 
     miscLayout->addWidget(
         exportHighResolutionPngBamButton);
+
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        auto* waveformRawCaptureButton =
+            new QPushButton(
+                "Capture waveform RAW...",
+                miscTab);
+
+        waveformRawCaptureButton->setToolTip(
+            "Capture 250 frames of the currently selected reconstructed 2880-sample Y line");
+
+        miscLayout->addWidget(
+            waveformRawCaptureButton);
+
+        connect(
+            waveformRawCaptureButton,
+            &QPushButton::clicked,
+            this,
+            &ControlWidget::waveformRawCaptureRequested);
+    }
 
     miscLayout->addStretch();
 

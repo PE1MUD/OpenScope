@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.8.1
+    VERSION 0.8.2
     LANGUAGES C CXX
 )
 
@@ -129,6 +129,9 @@ src/VideoEngine.cpp
 src/VideoSource.h
 src/VideoSource.cpp
 
+src/diagnostics/TraceLogger.h
+src/diagnostics/TraceLogger.cpp
+
     src/sources/philips/PhilipsPatternRomDecoder.h
     src/sources/philips/PhilipsPatternRomDecoder.cpp
     src/sources/philips/PhilipsPatternRomSource.h
@@ -156,6 +159,7 @@ src/processing/LumaHighFrequencyCompensator.h
 src/processing/LumaHighFrequencyCompensator.cpp
 
 src/rendering/WaveformRenderer.h
+src/rendering/CatWuzleChunkDispatcher.h
 src/rendering/WaveformRenderer.cpp
 src/rendering/WaveformGraticule.h
 src/rendering/WaveformGraticule.cpp

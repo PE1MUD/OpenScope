@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "BuildConfig.h"
 #include "Version.h"
 #include "ScopeWorkspace.h"
 #include "VideoEngine.h"
@@ -1264,6 +1265,16 @@ MainWindow::MainWindow(QWidget* parent)
             .waveform
             .coreIntensity);
 
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        videoEngine_->setWaveformCoreWidth(
+            initialSettings.control
+                .instrument
+                .waveform
+                .coreWidthTenths);
+    }
+
+
     videoEngine_->setWaveformVideoContentScale(
         initialSettings.control
             .videoOut
@@ -1425,6 +1436,35 @@ MainWindow::MainWindow(QWidget* parent)
             videoEngine_->setWaveformCoreIntensity(
                 clampedIntensity);
         });
+
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        connect(
+            workspace_,
+            &ScopeWorkspace::waveformCoreWidthChanged,
+            this,
+            [this](int widthTenths)
+            {
+                const int clampedWidthTenths =
+                    std::clamp(
+                        widthTenths,
+                        5,
+                        30);
+
+                settingsService_->update(
+                    [clampedWidthTenths](OpenScopeSettings& settings)
+                    {
+                        settings.control
+                            .instrument
+                            .waveform
+                            .coreWidthTenths =
+                            clampedWidthTenths;
+                    });
+
+                videoEngine_->setWaveformCoreWidth(
+                    clampedWidthTenths);
+            });
+    }
 
     connect(
         workspace_,
@@ -1696,6 +1736,44 @@ MainWindow::MainWindow(QWidget* parent)
         &ScopeWorkspace::floatiesHomeRequested,
         this,
         &MainWindow::homeFloaties);
+
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        connect(
+            workspace_,
+            &ScopeWorkspace::waveformRawCaptureRequested,
+            this,
+            [this]()
+            {
+                const QString fileName =
+                    QFileDialog::getSaveFileName(
+                        this,
+                        QStringLiteral(
+                            "Capture waveform RAW"),
+                        QDir(
+                            QCoreApplication::applicationDirPath())
+                            .filePath(
+                                QStringLiteral(
+                                    "waveform_capture.raw")),
+                        QStringLiteral(
+                            "RAW waveform (*.raw)"));
+
+                if (fileName.isEmpty())
+                {
+                    return;
+                }
+
+                if (!videoEngine_->startWaveformRawCapture(
+                        fileName.toStdString()))
+                {
+                    QMessageBox::warning(
+                        this,
+                        QStringLiteral("Waveform RAW capture"),
+                        QStringLiteral(
+                            "Select one waveform line first (All Lines cannot be captured), and make sure no capture is already running."));
+                }
+            });
+    }
 
     connect(
         workspace_,

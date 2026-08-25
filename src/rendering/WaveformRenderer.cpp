@@ -1,15 +1,24 @@
 #include "rendering/WaveformRenderer.h"
+#include "rendering/CatWuzleChunkDispatcher.h"
+#include "diagnostics/TraceLog.h"
 #include "ui/ViewportOverlay.h"
 #include "processing/SignalReconstructor.h"
 #include "standards/VideoStandard.h"
 
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QColor>
 #include <QPen>
+#include <QPointF>
 #include <QtGlobal>
 #include <QApplication>
 
+// 0.8.2 waveform quality rebase: the single-worker CatWuzle raster core
+// below is intentionally restored from the accepted 0.8.0 visual baseline.
+// Worker/chunk experiments remain outside this raster path.
+
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cmath>
 #include <numbers>
@@ -551,6 +560,12 @@ void WaveformRenderer::setTraceJobExecutor(
     traceJobExecutor_ = std::move(executor);
 }
 
+void WaveformRenderer::setTraceHelperAvailability(
+    TraceHelperAvailability availability)
+{
+    traceHelperAvailability_ = std::move(availability);
+}
+
 void WaveformRenderer::setLineInfoOverlayEnabled(
     bool enabled,
     bool palOutput)
@@ -796,6 +811,12 @@ WaveformRenderer::WaveformRenderer()
     }
 
     image_.fill(Qt::black);
+}
+
+void WaveformRenderer::setTraceRendererId(
+    TraceRendererId rendererId) noexcept
+{
+    traceRendererId_ = rendererId;
 }
 
 void WaveformRenderer::setOutputSize(
@@ -1120,6 +1141,42 @@ void WaveformRenderer::renderSingleLine(
     const Yuv444Frame& frame)
 {
     renderTimings_ = {};
+
+    // Quality-rebase reference path has no adaptive-AA activity overlay.
+
+    QElapsedTimer frameTimer;
+    frameTimer.start();
+
+    const std::uint64_t logGeneration = ++traceLogGeneration_;
+    traceLog(
+        TraceEventType::WaveformBegin,
+        logGeneration,
+        0u,
+        0u,
+        static_cast<std::uint64_t>(image_.width()),
+        static_cast<std::uint64_t>(image_.height()),
+        traceRendererId_);
+
+    const auto recordPhase =
+        [this](char label,
+            std::uint64_t startUs,
+            std::uint64_t durationUs)
+        {
+            if (durationUs == 0u ||
+                renderTimings_.phaseCount >=
+                    WaveformRenderTimings::kPhaseCapacity)
+            {
+                return;
+            }
+
+            auto& event =
+                renderTimings_.phases[
+                    renderTimings_.phaseCount++];
+            event.label = label;
+            event.startUs = startUs;
+            event.durationUs = durationUs;
+        };
+
     renderTimings_.outputSizeChanged =
         outputSizeChangedSinceRender_;
     renderTimings_.outputBufferCapacityGrew =
@@ -1341,6 +1398,9 @@ void WaveformRenderer::renderSingleLine(
     // Display persistence is only a weighted sum of those stored images.
     // -----------------------------------------------------------------
 
+    const std::uint64_t tracePrepStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
     phaseTimer.restart();
 
     const std::vector<BeamPoint> currentLumaPolyline =
@@ -1352,6 +1412,59 @@ void WaveformRenderer::renderSingleLine(
     renderTimings_.tracePrepUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
+    recordPhase(
+        'T',
+        tracePrepStartUs,
+        renderTimings_.tracePrepUs);
+
+    // MUD sieve: classify the already-built target-space Catmull segments
+    // before rasterisation.  TRUE means dense/steep packet: expensive AA may
+    // be bypassed for that segment (except at the stitched packet edges).
+    DenseSteepStats denseSteepStats;
+    QElapsedTimer mudTimer;
+    mudTimer.start();
+
+    const std::vector<bool> denseSteepSegment =
+        buildDenseSteepPacketMask(
+            currentLumaPolyline,
+            &denseSteepStats);
+
+    const std::uint64_t mudDetectUs =
+        static_cast<std::uint64_t>(
+            mudTimer.nsecsElapsed() / 1000);
+
+    traceLog(
+        TraceEventType::MudDetect,
+        logGeneration,
+        0u,
+        0u,
+        mudDetectUs,
+        denseSteepStats.neighbourProbes,
+        traceRendererId_);
+    traceLog(
+        TraceEventType::MudDetect,
+        logGeneration,
+        0u,
+        1u,
+        denseSteepStats.runCount,
+        denseSteepStats.sustainedRunCount,
+        traceRendererId_);
+    traceLog(
+        TraceEventType::MudDetect,
+        logGeneration,
+        0u,
+        2u,
+        denseSteepStats.denseRunCount,
+        denseSteepStats.acceptedPacketCount,
+        traceRendererId_);
+    traceLog(
+        TraceEventType::MudDetect,
+        logGeneration,
+        0u,
+        3u,
+        denseSteepStats.whiteSegmentCount,
+        denseSteepSegment.size(),
+        traceRendererId_);
 
     std::uint64_t currentGlowUs = 0u;
     std::uint64_t currentCoreUs = 0u;
@@ -1361,16 +1474,83 @@ void WaveformRenderer::renderSingleLine(
     int phosphorMaxX = -1;
     int phosphorMaxY = -1;
 
+    CatWuzleFrameStats catWuzleFrameStats;
+
+    const std::uint64_t traceRasterStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
+    phaseTimer.restart();
+
     std::vector<std::uint16_t> currentPhosphorEnergy =
         renderCurrentPhosphorEnergy(
             currentLumaPolyline,
+            denseSteepSegment,
             scope,
             currentGlowUs,
             currentCoreUs,
             phosphorMinX,
             phosphorMinY,
             phosphorMaxX,
-            phosphorMaxY);
+            phosphorMaxY,
+            catWuzleFrameStats);
+
+    renderTimings_.catWuzleChunkCount =
+        catWuzleFrameStats.chunkCount;
+    renderTimings_.catWuzleInvalidChunkCount =
+        catWuzleFrameStats.invalidChunkCount;
+    renderTimings_.catWuzleZipperUs =
+        catWuzleFrameStats.zipperUs;
+    renderTimings_.catWuzleChunkRenderMinUs =
+        catWuzleFrameStats.chunkRenderMinUs;
+    renderTimings_.catWuzleChunkRenderAvgUs =
+        catWuzleFrameStats.chunkRenderAvgUs;
+    renderTimings_.catWuzleChunkRenderMaxUs =
+        catWuzleFrameStats.chunkRenderMaxUs;
+    renderTimings_.catWuzleChunkQueueWaitMaxUs =
+        catWuzleFrameStats.chunkQueueWaitMaxUs;
+    renderTimings_.catWuzleWorkerChunkCount =
+        catWuzleFrameStats.workerChunkCount;
+    renderTimings_.catWuzleWorkerRenderUs =
+        catWuzleFrameStats.workerRenderUs;
+
+    const std::uint64_t traceRasterWallUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+    const std::uint64_t zipperWallUs =
+        std::min(
+            catWuzleFrameStats.zipperUs,
+            traceRasterWallUs);
+    const std::uint64_t rasterBeforeZipperUs =
+        traceRasterWallUs - zipperWallUs;
+
+    recordPhase(
+        'R',
+        traceRasterStartUs,
+        rasterBeforeZipperUs);
+    recordPhase(
+        'Z',
+        traceRasterStartUs + rasterBeforeZipperUs,
+        zipperWallUs);
+
+    traceLog(
+        TraceEventType::WaveformRaster,
+        logGeneration,
+        0u,
+        0u,
+        traceRasterWallUs,
+        currentCoreUs,
+        traceRendererId_);
+    traceLog(
+        TraceEventType::WaveformRaster,
+        logGeneration,
+        0u,
+        1u,
+        currentGlowUs,
+        currentLumaPolyline.size(),
+        traceRendererId_);
+
+    QElapsedTimer resolveTimer;
+    resolveTimer.start();
 
     /*
      * PRE-SCOPEPHOR AA RESOLVE
@@ -1551,12 +1731,28 @@ void WaveformRenderer::renderSingleLine(
         phosphorMaxY = resolveMaxY;
     }
 
+    const std::uint64_t resolveUs =
+        static_cast<std::uint64_t>(
+            resolveTimer.nsecsElapsed() / 1000);
+
+    traceLog(
+        TraceEventType::WaveformResolve,
+        logGeneration,
+        0u,
+        0u,
+        resolveUs,
+        (phosphorMaxX >= phosphorMinX && phosphorMaxY >= phosphorMinY) ? 1u : 0u,
+        traceRendererId_);
+
     renderTimings_.glowUs =
         currentGlowUs;
 
     renderTimings_.traceRasterUs =
         currentCoreUs;
 
+    const std::uint64_t persistenceStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
     phaseTimer.restart();
 
     applyScopephorFeedback(
@@ -1582,6 +1778,19 @@ void WaveformRenderer::renderSingleLine(
     renderTimings_.persistenceUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
+    recordPhase(
+        'P',
+        persistenceStartUs,
+        renderTimings_.persistenceUs);
+
+    traceLog(
+        TraceEventType::WaveformPersistence,
+        logGeneration,
+        0u,
+        0u,
+        renderTimings_.persistenceUs,
+        static_cast<std::uint64_t>(persistence_),
+        traceRendererId_);
 
     if (chromaFillIntensity_ > 0 &&
         !measurementProbePresentation_)
@@ -1599,6 +1808,9 @@ void WaveformRenderer::renderSingleLine(
          * Chroma is written directly into the current target. It therefore
          * has no persistence, no age weighting and no glow.
          */
+        const std::uint64_t composeStartUs =
+            static_cast<std::uint64_t>(
+                frameTimer.nsecsElapsed() / 1000);
         phaseTimer.restart();
 
         const int displayWidth =
@@ -1921,14 +2133,30 @@ void WaveformRenderer::renderSingleLine(
         renderTimings_.composeUs =
             static_cast<std::uint64_t>(
                 phaseTimer.nsecsElapsed() / 1000);
+        recordPhase(
+            'C',
+            composeStartUs,
+            renderTimings_.composeUs);
     }
     else
     {
         renderTimings_.composeUs = 0u;
     }
 
+    traceLog(
+        TraceEventType::WaveformCompose,
+        logGeneration,
+        0u,
+        0u,
+        renderTimings_.composeUs,
+        static_cast<std::uint64_t>(chromaFillIntensity_),
+        traceRendererId_);
+
     // Raw phosphor energy -> QImage transport surface.
     // No QPainter and no Qt image blending.
+    const std::uint64_t phosphorComposeStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
     phaseTimer.restart();
 
     const int phosphorWidth =
@@ -2076,9 +2304,24 @@ void WaveformRenderer::renderSingleLine(
         }
     }
 
-    renderTimings_.persistenceUs +=
+    const std::uint64_t phosphorComposeUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
+    renderTimings_.persistenceUs +=
+        phosphorComposeUs;
+    recordPhase(
+        'P',
+        phosphorComposeStartUs,
+        phosphorComposeUs);
+
+    traceLog(
+        TraceEventType::WaveformPersistence,
+        logGeneration,
+        0u,
+        1u,
+        phosphorComposeUs,
+        renderTimings_.persistenceUs,
+        traceRendererId_);
 
 
     // Luma Scopephor was already composed before the current-frame chroma
@@ -2089,12 +2332,38 @@ void WaveformRenderer::renderSingleLine(
     renderTimings_.traceParallel = false;
     renderTimings_.traceJobCount = 1u;
 
+    const std::uint64_t overlayStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
     phaseTimer.restart();
     QPainter overlayPainter(&image_);
     drawLineInfoOverlay(overlayPainter);
     renderTimings_.overlayUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
+    recordPhase(
+        'O',
+        overlayStartUs,
+        renderTimings_.overlayUs);
+
+    traceLog(
+        TraceEventType::WaveformCompose,
+        logGeneration,
+        0u,
+        1u,
+        renderTimings_.overlayUs,
+        0u,
+        traceRendererId_);
+
+    traceLog(
+        TraceEventType::WaveformEnd,
+        logGeneration,
+        0u,
+        0u,
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000),
+        renderTimings_.traceUs,
+        traceRendererId_);
 }
 
 
@@ -2237,16 +2506,404 @@ std::vector<WaveformRenderer::BeamPoint> WaveformRenderer::buildCurrentLumaPolyl
     return polyline;
 }
 
+std::vector<bool> WaveformRenderer::buildDenseSteepPacketMask(
+    const std::vector<BeamPoint>& polyline,
+    DenseSteepStats* stats) const
+{
+    if (stats != nullptr)
+    {
+        *stats = {};
+    }
+
+    if (polyline.size() < 2u)
+    {
+        return {};
+    }
+
+    /*
+     * MUD latch detector.
+     *
+     * The expensive neighbour proof is done once per monotone flank, not for
+     * every Catmull segment.  RED keeps looking for permission to become
+     * WHITE; once a flank is proven dense, WHITE is latched until the sign of
+     * dY changes at the next top/bottom.  This is the important asymmetry:
+     * after WHITE there is nothing useful left to prove on the same flank.
+     *
+     * Packet acceptance stays conservative: a dense seed still needs nearby
+     * sustained flanks on both sides, and the complete packet must meet the
+     * existing run-count and X-width thresholds.  Accepted packet edge flanks
+     * are included, exactly as in ZEEF2/POLYGRAPH.
+     */
+
+    struct MonotoneRun
+    {
+        std::size_t firstSegment = 0u;
+        std::size_t lastSegment = 0u;
+        double minX = 0.0;
+        double maxX = 0.0;
+        double minY = 0.0;
+        double maxY = 0.0;
+        double totalAbsDx = 0.0;
+        double totalAbsDy = 0.0;
+        int direction = 0;
+        bool hasEntrySegment = false;
+        bool sustained = false;
+        bool dense = false;
+    };
+
+    const std::size_t segmentCount = polyline.size() - 1u;
+
+    constexpr double kDirectionEpsilonPx = 0.05;
+    constexpr double kMinimumSegmentDyPx = 10.0;
+    constexpr double kMinimumSteepSlope = 2.75;
+    constexpr double kMinimumRunVerticalTravelPx = 12.0;
+    constexpr double kMinimumRunVerticalSpanPx = 10.0;
+    constexpr double kMinimumRunSlope = 3.5;
+    constexpr std::size_t kMinimumRunSegments = 3u;
+
+    const auto directionOf =
+        [&](const std::size_t segment) -> int
+        {
+            const double dy =
+                polyline[segment + 1u].y - polyline[segment].y;
+
+            if (dy > kDirectionEpsilonPx)
+            {
+                return 1;
+            }
+            if (dy < -kDirectionEpsilonPx)
+            {
+                return -1;
+            }
+            return 0;
+        };
+
+    std::vector<MonotoneRun> runs;
+    runs.reserve(segmentCount / 2u + 1u);
+
+    std::size_t runStart = 0u;
+    int currentDirection = 0;
+
+    for (std::size_t i = 0u; i < segmentCount; ++i)
+    {
+        const int direction = directionOf(i);
+
+        if (currentDirection == 0 && direction != 0)
+        {
+            currentDirection = direction;
+        }
+
+        const bool flipsDirection =
+            direction != 0 &&
+            currentDirection != 0 &&
+            direction != currentDirection;
+
+        if (!flipsDirection)
+        {
+            continue;
+        }
+
+        MonotoneRun run;
+        run.firstSegment = runStart;
+        run.lastSegment = i - 1u;
+        run.direction = currentDirection;
+        runs.push_back(run);
+
+        runStart = i;
+        currentDirection = direction;
+    }
+
+    MonotoneRun finalRun;
+    finalRun.firstSegment = runStart;
+    finalRun.lastSegment = segmentCount - 1u;
+    finalRun.direction = currentDirection;
+    runs.push_back(finalRun);
+
+    if (stats != nullptr)
+    {
+        stats->runCount = static_cast<std::uint32_t>(runs.size());
+    }
+
+    // Summarise each monotone flank once.  dY >= 10 px is only permission to
+    // enter WHITE; low-dY top/bottom segments remain part of the flank.
+    for (MonotoneRun& run : runs)
+    {
+        const BeamPoint& firstPoint = polyline[run.firstSegment];
+        run.minX = firstPoint.x;
+        run.maxX = firstPoint.x;
+        run.minY = firstPoint.y;
+        run.maxY = firstPoint.y;
+
+        for (std::size_t segment = run.firstSegment;
+             segment <= run.lastSegment;
+             ++segment)
+        {
+            const BeamPoint& a = polyline[segment];
+            const BeamPoint& b = polyline[segment + 1u];
+            const double dx = b.x - a.x;
+            const double dy = b.y - a.y;
+            const double absDx = std::abs(dx);
+            const double absDy = std::abs(dy);
+
+            run.totalAbsDx += absDx;
+            run.totalAbsDy += absDy;
+            run.minX = std::min(run.minX, std::min(a.x, b.x));
+            run.maxX = std::max(run.maxX, std::max(a.x, b.x));
+            run.minY = std::min(run.minY, std::min(a.y, b.y));
+            run.maxY = std::max(run.maxY, std::max(a.y, b.y));
+
+            if (!run.hasEntrySegment)
+            {
+                const double slope = absDy / std::max(0.05, absDx);
+                if (absDy >= kMinimumSegmentDyPx &&
+                    slope >= kMinimumSteepSlope)
+                {
+                    run.hasEntrySegment = true;
+                }
+            }
+        }
+
+        const double verticalSpan = run.maxY - run.minY;
+        const double runSlope =
+            run.totalAbsDy / std::max(0.20, run.totalAbsDx);
+        const std::size_t runSegmentCount =
+            run.lastSegment - run.firstSegment + 1u;
+
+        run.sustained =
+            run.direction != 0 &&
+            run.hasEntrySegment &&
+            runSegmentCount >= kMinimumRunSegments &&
+            run.totalAbsDy >= kMinimumRunVerticalTravelPx &&
+            verticalSpan >= kMinimumRunVerticalSpanPx &&
+            runSlope >= kMinimumRunSlope;
+    }
+
+    if (stats != nullptr)
+    {
+        for (const MonotoneRun& run : runs)
+        {
+            if (run.sustained)
+            {
+                ++stats->sustainedRunCount;
+            }
+        }
+    }
+
+    constexpr double kNeighbourMinDistancePx = 0.75;
+    constexpr double kNeighbourMaxDistancePx = 8.0;
+    constexpr double kMinimumYOverlapRatio = 0.55;
+
+    const auto runCenterX =
+        [](const MonotoneRun& run)
+        {
+            return 0.5 * (run.minX + run.maxX);
+        };
+
+    const auto yOverlapIsEnough =
+        [&](const MonotoneRun& a, const MonotoneRun& b)
+        {
+            const double overlapY = std::max(
+                0.0,
+                std::min(a.maxY, b.maxY) -
+                std::max(a.minY, b.minY));
+            const double aHeight = std::max(1.0, a.maxY - a.minY);
+            const double bHeight = std::max(1.0, b.maxY - b.minY);
+            const double overlapRatio =
+                overlapY / std::min(aHeight, bHeight);
+
+            return overlapRatio >= kMinimumYOverlapRatio;
+        };
+
+    /*
+     * The runs are generated in waveform/X order.  Therefore a neighbour can
+     * only live in the small local X window around the current run.  Walk
+     * outward and STOP as soon as the X distance exceeds 8 px.  This removes
+     * the old all-runs-against-all-runs search.
+     *
+     * Once both sides are proven, the run is WHITE-latched and no more
+     * neighbour work is done for that monotone flank.  The next run exists
+     * only after dY has changed sign, so that is naturally the reset point.
+     */
+    for (std::size_t i = 0u; i < runs.size(); ++i)
+    {
+        MonotoneRun& run = runs[i];
+        if (!run.sustained)
+        {
+            continue;
+        }
+
+        const double centerX = runCenterX(run);
+        bool neighbourLeft = false;
+        bool neighbourRight = false;
+
+        for (std::size_t j = i; j-- > 0u;)
+        {
+            const MonotoneRun& other = runs[j];
+            if (stats != nullptr)
+            {
+                ++stats->neighbourProbes;
+            }
+            const double distanceX = centerX - runCenterX(other);
+
+            if (distanceX > kNeighbourMaxDistancePx)
+            {
+                break;
+            }
+            if (distanceX < kNeighbourMinDistancePx ||
+                !other.sustained ||
+                !yOverlapIsEnough(run, other))
+            {
+                continue;
+            }
+
+            neighbourLeft = true;
+            break;
+        }
+
+        for (std::size_t j = i + 1u; j < runs.size(); ++j)
+        {
+            const MonotoneRun& other = runs[j];
+            if (stats != nullptr)
+            {
+                ++stats->neighbourProbes;
+            }
+            const double distanceX = runCenterX(other) - centerX;
+
+            if (distanceX > kNeighbourMaxDistancePx)
+            {
+                break;
+            }
+            if (distanceX < kNeighbourMinDistancePx ||
+                !other.sustained ||
+                !yOverlapIsEnough(run, other))
+            {
+                continue;
+            }
+
+            neighbourRight = true;
+            break;
+        }
+
+        run.dense = neighbourLeft && neighbourRight;
+        if (run.dense && stats != nullptr)
+        {
+            ++stats->denseRunCount;
+        }
+    }
+
+    constexpr double kMinimumDensePacketWidthPx = 14.0;
+    constexpr std::size_t kMinimumDensePacketRuns = 5u;
+
+    const auto runsArePacketNeighbours =
+        [&](const MonotoneRun& left, const MonotoneRun& right)
+        {
+            if (!left.sustained || !right.sustained)
+            {
+                return false;
+            }
+
+            const double distanceX =
+                std::abs(runCenterX(right) - runCenterX(left));
+
+            return
+                distanceX >= kNeighbourMinDistancePx &&
+                distanceX <= kNeighbourMaxDistancePx &&
+                yOverlapIsEnough(left, right);
+        };
+
+    std::vector<bool> packetRun(runs.size(), false);
+    std::vector<bool> denseSteepSegment(segmentCount, false);
+
+    for (std::size_t seed = 0u; seed < runs.size(); ++seed)
+    {
+        if (!runs[seed].dense || packetRun[seed])
+        {
+            continue;
+        }
+
+        std::size_t firstRun = seed;
+        std::size_t lastRun = seed;
+
+        while (firstRun > 0u &&
+               runsArePacketNeighbours(runs[firstRun - 1u], runs[firstRun]))
+        {
+            --firstRun;
+        }
+
+        while (lastRun + 1u < runs.size() &&
+               runsArePacketNeighbours(runs[lastRun], runs[lastRun + 1u]))
+        {
+            ++lastRun;
+        }
+
+        const std::size_t packetRuns = lastRun - firstRun + 1u;
+        double packetMinX = runs[firstRun].minX;
+        double packetMaxX = runs[firstRun].maxX;
+        bool containsDenseSeed = false;
+
+        for (std::size_t runIndex = firstRun; runIndex <= lastRun; ++runIndex)
+        {
+            packetMinX = std::min(packetMinX, runs[runIndex].minX);
+            packetMaxX = std::max(packetMaxX, runs[runIndex].maxX);
+            containsDenseSeed = containsDenseSeed || runs[runIndex].dense;
+        }
+
+        const bool packetAccepted =
+            containsDenseSeed &&
+            packetRuns >= kMinimumDensePacketRuns &&
+            (packetMaxX - packetMinX) >= kMinimumDensePacketWidthPx;
+
+        if (!packetAccepted)
+        {
+            continue;
+        }
+
+        if (stats != nullptr)
+        {
+            ++stats->acceptedPacketCount;
+        }
+
+        for (std::size_t runIndex = firstRun; runIndex <= lastRun; ++runIndex)
+        {
+            packetRun[runIndex] = true;
+        }
+
+        // Whole monotone flanks are latched WHITE.  Tops/bottoms only reset
+        // the detector because they start the next run; there is no repeated
+        // neighbour test inside an already accepted flank.
+        const std::size_t firstSegment = runs[firstRun].firstSegment;
+        const std::size_t lastSegment = runs[lastRun].lastSegment;
+        for (std::size_t segment = firstSegment;
+             segment <= lastSegment;
+             ++segment)
+        {
+            denseSteepSegment[segment] = true;
+        }
+    }
+
+    if (stats != nullptr)
+    {
+        stats->whiteSegmentCount = static_cast<std::uint32_t>(
+            std::count(denseSteepSegment.begin(), denseSteepSegment.end(), true));
+    }
+
+    return denseSteepSegment;
+}
+
 std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
     const std::vector<BeamPoint>& polyline,
+    const std::vector<bool>& denseSteepSegment,
     const QRectF& plotRect,
     std::uint64_t& glowUs,
     std::uint64_t& coreUs,
     int& activeMinX,
     int& activeMinY,
     int& activeMaxX,
-    int& activeMaxY) const
+    int& activeMaxY,
+    CatWuzleFrameStats& frameStats)
 {
+    (void)plotRect;
+    frameStats = {};
     glowUs = 0u;
     coreUs = 0u;
 
@@ -2273,11 +2930,25 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         0u);
 
     const double renderDimension =
-        std::max(
+        static_cast<double>(
+            std::max(
+                1,
+                std::min(
+                    width,
+                    height)));
+
+    const double beamScale =
+        std::clamp(
+            std::sqrt(
+                renderDimension /
+                576.0),
             1.0,
-            std::min(
-                plotRect.width(),
-                plotRect.height()));
+            1.90);
+
+    const double glowScale =
+        static_cast<double>(
+            std::clamp(glow_, 0, 100)) /
+        100.0;
 
     /*
      * CATWUZLE ANALYTIC CORE + LOCAL GLOW
@@ -2314,7 +2985,7 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
 
     const double linearTargetScale =
         std::clamp(
-            plotRect.height() /
+            static_cast<double>(height) /
             1080.0,
             0.05,
             1.0);
@@ -2619,6 +3290,53 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         coreHalfWidth +
         0.5;
 
+    /*
+     * AA SWITCH + STITCHER
+     * --------------------
+     * denseSteepSegment == true means the MUD sieve approved the segment
+     * for the hard/no-expensive-AA path.  At every RED<->WHITE transition
+     * keep two Catmull segments on both sides on FULL CatWuzle AA.  This
+     * overlap is the stitcher: it prevents a hard cap/brightness discontinuity
+     * from turning the packet boundary into a pair of searchlights.
+     */
+    const std::size_t segmentCount =
+        polyline.size() - 1u;
+    std::vector<bool> segmentUsesFullAa(
+        segmentCount,
+        true);
+
+    if (denseSteepSegment.size() == segmentCount)
+    {
+        for (std::size_t segment = 0u; segment < segmentCount; ++segment)
+        {
+            segmentUsesFullAa[segment] = !denseSteepSegment[segment];
+        }
+
+        constexpr std::size_t kStitchSegments = 2u;
+        for (std::size_t boundary = 1u; boundary < segmentCount; ++boundary)
+        {
+            if (denseSteepSegment[boundary - 1u] ==
+                denseSteepSegment[boundary])
+            {
+                continue;
+            }
+
+            const std::size_t first =
+                boundary > kStitchSegments
+                    ? boundary - kStitchSegments
+                    : 0u;
+            const std::size_t last =
+                std::min(
+                    segmentCount - 1u,
+                    boundary + kStitchSegments - 1u);
+
+            for (std::size_t segment = first; segment <= last; ++segment)
+            {
+                segmentUsesFullAa[segment] = true;
+            }
+        }
+    }
+
     for (std::size_t i = 1u;
         i < polyline.size();
         ++i)
@@ -2643,6 +3361,71 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
 
         if (segmentLengthSquared <= 1.0e-18)
         {
+            continue;
+        }
+
+        const bool useFullAa =
+            segmentUsesFullAa[i - 1u];
+
+        if (!useFullAa)
+        {
+            /*
+             * MUD dense packet: NO AA AT ALL.
+             *
+             * Keep the exact fitted CatWuzle/Catmull polyline geometry, but
+             * rasterise this segment directly as a plain one-pixel DDA trace.
+             * No 2x2 coverage, no crossing guard, no coverage shaping and no
+             * round-join AA.  This is deliberately the same raw-curve idea as
+             * the accepted W0 no-AA reference, only selected by the detector.
+             */
+            const double longestAxis =
+                std::max(std::abs(segmentDx), std::abs(segmentDy));
+
+            if (longestAxis <= 1.0e-12)
+            {
+                continue;
+            }
+
+            const std::uint16_t rawCoreEnergy =
+                static_cast<std::uint16_t>(
+                    std::clamp(
+                        static_cast<int>(
+                            std::lround(
+                                static_cast<double>(kCorePeakEnergy) *
+                                static_cast<double>(coreIntensity_) /
+                                100.0)),
+                        0,
+                        static_cast<int>(kCorePeakEnergy) * 4));
+
+            const int steps =
+                std::max(1, static_cast<int>(std::ceil(longestAxis)));
+
+            for (int step = 0; step <= steps; ++step)
+            {
+                const double t =
+                    static_cast<double>(step) /
+                    static_cast<double>(steps);
+
+                const int x =
+                    static_cast<int>(
+                        std::lround(first.x + segmentDx * t));
+                const int y =
+                    static_cast<int>(
+                        std::lround(first.y + segmentDy * t));
+
+                if (x < 0 || x >= width || y < 0 || y >= height)
+                {
+                    continue;
+                }
+
+                activeMinX = std::min(activeMinX, x);
+                activeMaxX = std::max(activeMaxX, x);
+                activeMinY = std::min(activeMinY, y);
+                activeMaxY = std::max(activeMaxY, y);
+
+                maxCoreEnergy(x, y, rawCoreEnergy);
+            }
+
             continue;
         }
 
@@ -2712,205 +3495,101 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
                 const double px =
                     static_cast<double>(x);
 
-                /*
-                 * Pearl-fix pass:
-                 *
-                 * The first analytic CatWuzle core sampled only the pixel
-                 * centre.  That kept the geometry continuous, but on dim
-                 * traces it still left a subtle beaded / pearly modulation
-                 * because neighbouring x-columns could land on slightly
-                 * different centre distances.
-                 *
-                 * Sample a tiny 2x2 subpixel grid inside each target pixel
-                 * and average the local analytic coverage.  This keeps the
-                 * same thin beam geometry, but turns the centre-sample result
-                 * into a small area estimate so adjacent columns vary much
-                 * less in intensity.
-                 */
-                const double maximumCoverage =
-                    coreHalfWidth +
-                    0.5;
-
                 double coverage = 0.0;
 
-                for (int sampleY = 0;
-                    sampleY < kCoreCoverageSamples;
-                    ++sampleY)
                 {
-                    const double subpixelY =
-                        py - 0.5 +
-                        (static_cast<double>(sampleY) + 0.5) /
-                            static_cast<double>(kCoreCoverageSamples);
+                    /*
+                     * Accepted CatWuzle 2x2 analytic area coverage.
+                     */
+                    const double maximumCoverage =
+                        coreHalfWidth + 0.5;
 
-                    for (int sampleX = 0;
-                        sampleX < kCoreCoverageSamples;
-                        ++sampleX)
+                    for (int sampleY = 0;
+                        sampleY < kCoreCoverageSamples;
+                        ++sampleY)
                     {
-                        const double subpixelX =
-                            px - 0.5 +
-                            (static_cast<double>(sampleX) + 0.5) /
+                        const double subpixelY =
+                            py - 0.5 +
+                            (static_cast<double>(sampleY) + 0.5) /
                                 static_cast<double>(kCoreCoverageSamples);
 
-                        const double pointDx =
-                            subpixelX -
-                            first.x;
+                        for (int sampleX = 0;
+                            sampleX < kCoreCoverageSamples;
+                            ++sampleX)
+                        {
+                            const double subpixelX =
+                                px - 0.5 +
+                                (static_cast<double>(sampleX) + 0.5) /
+                                    static_cast<double>(kCoreCoverageSamples);
 
-                        const double pointDy =
-                            subpixelY -
-                            first.y;
-
-                        const double projection =
-                            std::clamp(
-                                (pointDx * segmentDx +
-                                 pointDy * segmentDy) /
+                            const double pointDx = subpixelX - first.x;
+                            const double pointDy = subpixelY - first.y;
+                            const double projection = std::clamp(
+                                (pointDx * segmentDx + pointDy * segmentDy) /
                                     segmentLengthSquared,
                                 0.0,
                                 1.0);
+                            const double closestX = first.x + projection * segmentDx;
+                            const double closestY = first.y + projection * segmentDy;
+                            const double dx = subpixelX - closestX;
+                            const double dy = subpixelY - closestY;
+                            const double distance = std::hypot(dx, dy);
 
-                        const double closestX =
-                            first.x +
-                            projection *
-                                segmentDx;
-
-                        const double closestY =
-                            first.y +
-                            projection *
-                                segmentDy;
-
-                        const double dx =
-                            subpixelX -
-                            closestX;
-
-                        const double dy =
-                            subpixelY -
-                            closestY;
-
-                        const double distance =
-                            std::hypot(
-                                dx,
-                                dy);
-
-                        coverage +=
-                            std::clamp(
-                                (maximumCoverage -
-                                    distance) /
-                                    maximumCoverage,
+                            coverage += std::clamp(
+                                (maximumCoverage - distance) / maximumCoverage,
                                 0.0,
                                 1.0);
+                        }
                     }
-                }
 
-                coverage *= kCoreCoverageInv;
+                    coverage *= kCoreCoverageInv;
 
-                /*
-                 * Conservative pixel-square guard.
-                 *
-                 * The 2x2 subpixel estimator remains the primary AA result.
-                 * However, at an unlucky target phase a very thin segment can
-                 * pass through a pixel square while missing all four 2x2
-                 * sample locations.  That produces the stationary black
-                 * "hole" seen at one X position.
-                 *
-                 * Use a cheap slab intersection against the actual target
-                 * pixel square.  If the CatWuzle centreline geometrically
-                 * crosses that square, enforce only a small minimum coverage.
-                 * Normal pixels whose 2x2 coverage is already higher remain
-                 * completely unchanged.
-                 */
-                {
-                    const double pixelMinX = px - 0.5;
-                    const double pixelMaxX = px + 0.5;
-                    const double pixelMinY = py - 0.5;
-                    const double pixelMaxY = py + 0.5;
-
-                    double enterT = 0.0;
-                    double exitT = 1.0;
-
-                    const auto clipAxis =
-                        [&enterT,
-                         &exitT](
-                            double origin,
-                            double delta,
-                            double minimum,
-                            double maximum) -> bool
-                        {
-                            constexpr double kTiny = 1.0e-12;
-
-                            if (std::abs(delta) <= kTiny)
-                            {
-                                return
-                                    origin >= minimum &&
-                                    origin <= maximum;
-                            }
-
-                            double firstT =
-                                (minimum - origin) /
-                                delta;
-
-                            double secondT =
-                                (maximum - origin) /
-                                delta;
-
-                            if (firstT > secondT)
-                            {
-                                std::swap(
-                                    firstT,
-                                    secondT);
-                            }
-
-                            enterT =
-                                std::max(
-                                    enterT,
-                                    firstT);
-
-                            exitT =
-                                std::min(
-                                    exitT,
-                                    secondT);
-
-                            return enterT <= exitT;
-                        };
-
-                    const bool crossesPixel =
-                        clipAxis(
-                            first.x,
-                            segmentDx,
-                            pixelMinX,
-                            pixelMaxX) &&
-                        clipAxis(
-                            first.y,
-                            segmentDy,
-                            pixelMinY,
-                            pixelMaxY) &&
-                        exitT >= 0.0 &&
-                        enterT <= 1.0;
-
-                    if (crossesPixel)
+                    /* Pixel-square crossing guard: unchanged on FULL AA. */
                     {
-                        constexpr double kMinimumCrossingCoverage =
-                            0.20;
+                        const double pixelMinX = px - 0.5;
+                        const double pixelMaxX = px + 0.5;
+                        const double pixelMinY = py - 0.5;
+                        const double pixelMaxY = py + 0.5;
+                        double enterT = 0.0;
+                        double exitT = 1.0;
 
-                        coverage =
-                            std::max(
-                                coverage,
-                                kMinimumCrossingCoverage);
+                        const auto clipAxis =
+                            [&enterT, &exitT](double origin,
+                                             double delta,
+                                             double minimum,
+                                             double maximum) -> bool
+                            {
+                                constexpr double kTiny = 1.0e-12;
+                                if (std::abs(delta) <= kTiny)
+                                {
+                                    return origin >= minimum && origin <= maximum;
+                                }
+                                double firstT = (minimum - origin) / delta;
+                                double secondT = (maximum - origin) / delta;
+                                if (firstT > secondT)
+                                {
+                                    std::swap(firstT, secondT);
+                                }
+                                enterT = std::max(enterT, firstT);
+                                exitT = std::min(exitT, secondT);
+                                return enterT <= exitT;
+                            };
+
+                        const bool crossesPixel =
+                            clipAxis(first.x, segmentDx, pixelMinX, pixelMaxX) &&
+                            clipAxis(first.y, segmentDy, pixelMinY, pixelMaxY) &&
+                            exitT >= 0.0 && enterT <= 1.0;
+
+                        if (crossesPixel)
+                        {
+                            constexpr double kMinimumCrossingCoverage = 0.20;
+                            coverage = std::max(coverage, kMinimumCrossingCoverage);
+                        }
                     }
+
+                    const double coverageLift = 1.16 + 0.12 * miniViewBlend;
+                    coverage = 1.0 - std::pow(1.0 - coverage, coverageLift);
                 }
-
-                /*
-                 * A gentle curve lifts the mid-coverage part of the AA ramp
-                 * so the thin beam keeps a continuous luminous filament in
-                 * dim regions, without materially widening the trace.
-                 */
-                const double coverageLift =
-                    1.16 +
-                    0.12 * miniViewBlend;
-
-                coverage =
-                    1.0 -
-                    std::pow(
-                        1.0 - coverage,
-                        coverageLift);
 
                 if (coverage <= 0.0)
                 {
@@ -2962,6 +3641,17 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         i + 1u < polyline.size();
         ++i)
     {
+        // No round-join AA inside a dense hard-core packet.  The stitcher
+        // makes at least one side FULL at packet boundaries, so transitions
+        // still receive the accepted join treatment.
+        if (i - 1u < segmentUsesFullAa.size() &&
+            i < segmentUsesFullAa.size() &&
+            !segmentUsesFullAa[i - 1u] &&
+            !segmentUsesFullAa[i])
+        {
+            continue;
+        }
+
         const BeamPoint& vertex =
             polyline[i];
 
@@ -4483,6 +5173,18 @@ void WaveformRenderer::setCoreIntensity(
         normalizedIntensity * 2;
 }
 
+void WaveformRenderer::setCoreWidth(
+    int widthTenths)
+{
+    coreWidthTenths_ =
+        std::clamp(
+            widthTenths,
+            5,
+            30);
+}
+
+
+
 void WaveformRenderer::setGlow(
     int glow)
 {
@@ -4513,6 +5215,11 @@ const std::vector<float>& WaveformRenderer::visibleLumaVolts() const noexcept
 const std::vector<float>& WaveformRenderer::fullLumaVolts() const noexcept
 {
     return fullLumaVolts_;
+}
+
+const std::vector<float>& WaveformRenderer::reconstructedLumaSamples() const noexcept
+{
+    return singleLineReconstructed_;
 }
 
 const WaveformRenderTimings& WaveformRenderer::renderTimings() const noexcept

@@ -95,19 +95,37 @@ namespace
         return maximumMagnitude * codeUnitsPerCbCrUnit;
     }
 
-    bool hasPalCompositeGamutError(
+    struct GamutOffender
+    {
+        std::uint16_t u = 32768u;
+        std::uint16_t v = 32768u;
+    };
+
+    struct GamutAnalysis
+    {
+        QVector<GamutOffender> offenders;
+
+        [[nodiscard]] bool hasError() const noexcept
+        {
+            return !offenders.isEmpty();
+        }
+    };
+
+    GamutAnalysis analyzePalCompositeGamut(
         const Yuv444Frame& frame,
         int selectedLine,
         int horizontalZoomFactor,
         double horizontalScrollPosition)
     {
+        GamutAnalysis result;
+
         if (frame.width <= 0 ||
             frame.height <= 0 ||
             frame.y.empty() ||
             frame.u.empty() ||
             frame.v.empty())
         {
-            return false;
+            return result;
         }
 
         const std::size_t sampleCount =
@@ -183,31 +201,20 @@ namespace
         constexpr double kPalVFromCr = 0.877 * 1.402;
 
         // 100% PAL colour bars nominally reach about -33.4% / +133.4%.
-        // Do not flag a legal calibrated 100% bar because of a handful of
-        // noisy / quantised samples at the boundary.  A gamut alarm should
-        // represent a real excursion, not a single outlier.
         constexpr double kCompositeMinimum = -0.34;
         constexpr double kCompositeMaximum = 1.34;
-
-        // Additional decision margin beyond the nominal PAL boundary.
-        // 0.02 == two percentage points of normalized luminance.
         constexpr double kDecisionMargin = 0.02;
 
-        // A PAL decoder can ring around colour transitions.  Those transient
-        // samples are not representative of the settled colour level and
-        // must not trip the gamut alarm.  First require a stable run, then
-        // require a sustained excursion outside the PAL composite envelope.
+        // Reject transition ringing exactly as the existing alarm did.
         constexpr std::size_t kRequiredStableSamples = 24u;
         constexpr std::size_t kRequiredConsecutiveOutside = 8u;
-
-        // Normalized per-sample change allowed while considering the signal
-        // settled.  These are deliberately much larger than normal ADC noise
-        // but far smaller than a colour-bar transition.
         constexpr double kStableYDelta = 0.025;
         constexpr double kStableChromaDelta = 0.025;
 
         std::size_t stableSamples = 0u;
         std::size_t consecutiveOutside = 0u;
+        std::size_t outsideRunStart = 0u;
+        bool outsideRunConfirmed = false;
 
         double previousY = 0.0;
         double previousCb = 0.0;
@@ -217,6 +224,15 @@ namespace
         const std::size_t lineWidth =
             static_cast<std::size_t>(
                 std::max(frame.width, 1));
+
+        auto appendOffender =
+            [&](std::size_t index)
+            {
+                result.offenders.push_back(
+                    GamutOffender{
+                        frame.u[index],
+                        frame.v[index]});
+            };
 
         for (std::size_t i = firstSample;
             i < lastSample;
@@ -234,8 +250,6 @@ namespace
                 (static_cast<double>(frame.v[i]) - kChromaCenter) /
                 kChromaRange;
 
-            // Never let stability or an outside run continue over a raster
-            // line boundary when All Lines is selected.
             const bool lineStart =
                 (i % lineWidth) == 0u;
 
@@ -259,6 +273,7 @@ namespace
             {
                 stableSamples = 0u;
                 consecutiveOutside = 0u;
+                outsideRunConfirmed = false;
                 continue;
             }
 
@@ -267,6 +282,7 @@ namespace
             if (stableSamples < kRequiredStableSamples)
             {
                 consecutiveOutside = 0u;
+                outsideRunConfirmed = false;
                 continue;
             }
 
@@ -293,23 +309,124 @@ namespace
                 compositeMaximum >
                     (kCompositeMaximum + kDecisionMargin);
 
-            if (outside)
-            {
-                ++consecutiveOutside;
-
-                if (consecutiveOutside >=
-                    kRequiredConsecutiveOutside)
-                {
-                    return true;
-                }
-            }
-            else
+            if (!outside)
             {
                 consecutiveOutside = 0u;
+                outsideRunConfirmed = false;
+                continue;
+            }
+
+            if (consecutiveOutside == 0u)
+            {
+                outsideRunStart = i;
+            }
+
+            ++consecutiveOutside;
+
+            if (!outsideRunConfirmed &&
+                consecutiveOutside >=
+                    kRequiredConsecutiveOutside)
+            {
+                // The exact same sustained-run condition that used to make
+                // GAMUT ERROR true now promotes the complete run to offender
+                // status, including the seven preceding outside samples.
+                for (std::size_t offenderIndex = outsideRunStart;
+                    offenderIndex <= i;
+                    ++offenderIndex)
+                {
+                    appendOffender(offenderIndex);
+                }
+
+                outsideRunConfirmed = true;
+            }
+            else if (outsideRunConfirmed)
+            {
+                appendOffender(i);
             }
         }
 
-        return false;
+        return result;
+    }
+
+    void drawGamutOffenders(
+        QPainter& painter,
+        const QRectF& scopeRect,
+        const GamutAnalysis& gamutAnalysis,
+        bool videoProfile)
+    {
+        if (gamutAnalysis.offenders.isEmpty())
+        {
+            return;
+        }
+
+        const int scopeWidth =
+            std::max(
+                1,
+                static_cast<int>(scopeRect.width()));
+
+        const int scopeHeight =
+            std::max(
+                1,
+                static_cast<int>(scopeRect.height()));
+
+        const double centerX =
+            scopeRect.left() +
+            static_cast<double>(scopeWidth - 1) * 0.5;
+
+        const double centerY =
+            scopeRect.top() +
+            static_cast<double>(scopeHeight - 1) * 0.5;
+
+        const double scale =
+            static_cast<double>(
+                std::min(scopeWidth, scopeHeight)) *
+            0.5 *
+            VectorscopeSettings::scale *
+            (36.0 / 35.0) /
+            32768.0;
+
+        const double scaleX =
+            scale *
+            (videoProfile
+                ? 1.0 / VideoStandard::pal625().pixelAspectRatio
+                : 1.0);
+
+        const double scaleY = scale;
+
+        QVector<QPointF> points;
+        points.reserve(gamutAnalysis.offenders.size());
+
+        constexpr double kChromaCenter = 32768.0;
+
+        for (const GamutOffender& offender :
+            gamutAnalysis.offenders)
+        {
+            const double u =
+                static_cast<double>(offender.u) -
+                kChromaCenter;
+
+            const double v =
+                static_cast<double>(offender.v) -
+                kChromaCenter;
+
+            points.push_back(
+                QPointF(
+                    centerX + u * scaleX,
+                    centerY - v * scaleY));
+        }
+
+        painter.save();
+        painter.setCompositionMode(
+            QPainter::CompositionMode_SourceOver);
+
+        QPen pen(QColor(255, 48, 48));
+        pen.setWidthF(2.0);
+        pen.setCapStyle(Qt::RoundCap);
+        painter.setPen(pen);
+        painter.drawPoints(
+            points.constData(),
+            static_cast<int>(points.size()));
+        painter.restore();
     }
 
     void drawGamutStatus(
@@ -797,12 +914,15 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
         scopeWidth,
         scopeHeight);
 
-    const bool gamutError =
-        hasPalCompositeGamutError(
+    const GamutAnalysis gamutAnalysis =
+        analyzePalCompositeGamut(
             frame,
             selectedLine_,
             horizontalZoomFactor_,
             horizontalScrollPosition_);
+
+    const bool gamutError =
+        gamutAnalysis.hasError();
 
     // Maximum chroma magnitude on the selected line. Normalize against
     // the largest 100% BT.601 colour-bar vector computed from the exact same
@@ -925,6 +1045,12 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
             analyzer_.image());
         painter.restore();
     }
+
+    drawGamutOffenders(
+        painter,
+        scopeRect,
+        gamutAnalysis,
+        profile_ == Profile::Video);
 
     drawGamutStatus(
         painter,

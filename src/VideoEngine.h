@@ -15,6 +15,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <string>
 
 #include "rendering/VectorscopeRenderer.h"
 #include "processing/SignalReconstructor.h"
@@ -44,6 +45,8 @@ public:
     void setSelectedLine(int line);
 
     void requestWaveformFlatFieldSpectrum();
+
+    bool startWaveformRawCapture(const std::string& rawFilePath);
 
     void setVideoOutputSize(
         int width,
@@ -105,6 +108,10 @@ public:
 
     void setWaveformCoreIntensity(
         int intensity);
+
+    void setWaveformCoreWidth(
+        int widthTenths);
+
 
     void setVectorscopeGlow(
         int glow);
@@ -482,6 +489,23 @@ private:
     kLumaReconstructionCutoff
     };
 
+
+    static constexpr std::size_t kWaveformRawCaptureFrames = 250;
+    static constexpr std::size_t kWaveformRawCaptureSamples = 2880;
+    std::mutex waveformRawCaptureMutex_;
+    bool waveformRawCaptureActive_ = false;
+    int waveformRawCaptureLine_ = -1;
+    std::size_t waveformRawCaptureFrameCount_ = 0;
+    std::string waveformRawCapturePath_;
+    std::vector<std::uint16_t> waveformRawCaptureSamples_;
+    std::vector<std::uint64_t> waveformRawCaptureGenerations_;
+    std::jthread waveformRawCaptureWriter_;
+
+    void captureWaveformRawFrame(
+        const std::vector<float>& reconstructedSamples,
+        std::uint64_t generation,
+        int renderedLine);
+
     // Worker loops
 
     void displayWorkerLoop();
@@ -491,8 +515,14 @@ private:
         DisplayPhase phase);
     void runWaveformTraceJobs(
         std::size_t jobCount,
-        const std::function<void(std::size_t)>& job);
-    bool tryRunWaveformAssistJob();
+        const std::function<void(
+            std::size_t,
+            std::uint32_t)>& job);
+    bool tryRunWaveformAssistJob(
+        std::uint32_t workerId,
+        bool enforceDisplayHoldoff);
+    [[nodiscard]] bool canDisplayWorkerAcceptAssist(
+        std::size_t workerIndex) const;
     void displayPresenterLoop();
     void waveformWorkerLoop();
     void vectorscopeWorkerLoop();
@@ -568,12 +598,29 @@ private:
     // always take priority; helper work is checked only between small stripes.
     std::mutex waveformAssistMutex_;
     std::condition_variable waveformAssistDoneCondition_;
-    std::function<void(std::size_t)> waveformAssistJob_;
+    std::function<void(
+        std::size_t,
+        std::uint32_t)> waveformAssistJob_;
     std::size_t waveformAssistJobCount_ = 0;
     std::size_t waveformAssistNextJob_ = 0;
     std::size_t waveformAssistJobsRunning_ = 0;
     bool waveformAssistActive_ = false;
     std::atomic<std::uint64_t> waveformAssistGeneration_{ 0 };
+    std::atomic<std::uint64_t> waveformAssistCompletedGeneration_{ 0 };
+    std::atomic<std::int64_t> waveformAssistCaptureTickNs_{ 0 };
+    std::atomic<std::int64_t> waveformAssistCompletedCaptureTickNs_{ 0 };
+
+    // Display workers may consume low-priority renderer chunks only while
+    // there is enough measured slack before the next 40 ms capture tick.
+    // The holdoff is an EMA of the worker's actual display load + 50%.
+    std::atomic<bool> displayPipelineActive_{ false };
+    std::array<
+        std::atomic<std::uint64_t>,
+        2> displayCurrentFrameWorkerUs_{};
+    std::array<
+        std::atomic<std::uint64_t>,
+        2> displayAssistWorkEstimateUs_{};
+    std::atomic<std::int64_t> latestCaptureTickNs_{ 0 };
 
     std::thread displayPresenterThread_;
     std::mutex displayPresenterMutex_;
@@ -601,6 +648,7 @@ private:
 
     std::atomic<int> waveformPersistence_{ 0 };
     std::atomic<int> waveformCoreIntensity_{ 100 };
+    std::atomic<int> waveformCoreWidthTenths_{ 10 };
     std::atomic<int> vectorscopePersistence_{ 0 };
     std::atomic<int> vectorscopeGlow_{ 50 };
 };

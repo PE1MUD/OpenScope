@@ -49,6 +49,7 @@ signals:
     void waveformZoomChanged(int zoomFactor);
     void waveformPersistenceChanged(int persistence);
     void waveformCoreIntensityChanged(int intensity);
+    void waveformCoreWidthChanged(int widthTenths);
     void vectorscopeGlowChanged(int glow);
 
     void vintageLookChanged(bool enabled);
@@ -71,6 +72,7 @@ signals:
     void legacyAspectRatioChanged(bool legacyEnabled);
     void exportHighResolutionPngRequested();
     void exportHighResolutionPngQuickRequested();
+    void waveformRawCaptureRequested();
 
 private:
     QCheckBox* performanceCheckBox_ = nullptr;

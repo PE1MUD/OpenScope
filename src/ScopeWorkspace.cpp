@@ -1,4 +1,5 @@
 #include "ScopeWorkspace.h"
+#include "BuildConfig.h"
 #include "widgets/WaveformWidget.h"
 #include "ScopeViewport.h"
 #include "widgets/ControlWidget.h"
@@ -159,6 +160,15 @@ ScopeWorkspace::ScopeWorkspace(
         this,
         &ScopeWorkspace::waveformCoreIntensityChanged);
 
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        connect(
+            controlWidget_,
+            &ControlWidget::waveformCoreWidthChanged,
+            this,
+            &ScopeWorkspace::waveformCoreWidthChanged);
+    }
+
     connect(
         controlWidget_,
         &ControlWidget::vectorscopeGlowChanged,
@@ -270,6 +280,15 @@ ScopeWorkspace::ScopeWorkspace(
         &ControlWidget::exportHighResolutionPngQuickRequested,
         this,
         &ScopeWorkspace::exportHighResolutionPngQuickRequested);
+
+    if constexpr (OpenScopeBuild::kDebugBuild)
+    {
+        connect(
+            controlWidget_,
+            &ControlWidget::waveformRawCaptureRequested,
+            this,
+            &ScopeWorkspace::waveformRawCaptureRequested);
+    }
 }
 
 void ScopeWorkspace::setCompositeInputGainState(

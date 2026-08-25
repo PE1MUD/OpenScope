@@ -6,6 +6,7 @@
 #include "rendering/WaveformGraticule.h"
 #include "processing/SignalReconstructor.h"
 #include "settings/OpenScopeSettings.h"
+#include "diagnostics/TraceLogger.h"
 
 #include <QImage>
 #include <QRectF>
@@ -27,8 +28,17 @@ struct WaveformSettings
     bool color = false;
 };
 
+struct WaveformRenderPhaseEvent
+{
+    char label = 'X';
+    std::uint64_t startUs = 0;
+    std::uint64_t durationUs = 0;
+};
+
 struct WaveformRenderTimings
 {
+    static constexpr std::size_t kPhaseCapacity = 12;
+
     std::uint64_t persistenceUs = 0;
     std::uint64_t traceUs = 0;
     std::uint64_t tracePrepUs = 0;
@@ -41,6 +51,17 @@ struct WaveformRenderTimings
     bool outputBufferCapacityGrew = false;
     bool resamplerCacheRebuilt = false;
     std::uint32_t traceJobCount = 0;
+    std::uint32_t catWuzleChunkCount = 0;
+    std::uint32_t catWuzleInvalidChunkCount = 0;
+    std::uint64_t catWuzleZipperUs = 0;
+    std::uint64_t catWuzleChunkRenderMinUs = 0;
+    std::uint64_t catWuzleChunkRenderAvgUs = 0;
+    std::uint64_t catWuzleChunkRenderMaxUs = 0;
+    std::uint64_t catWuzleChunkQueueWaitMaxUs = 0;
+    std::array<std::uint32_t, 3> catWuzleWorkerChunkCount{};
+    std::array<std::uint64_t, 3> catWuzleWorkerRenderUs{};
+    std::uint32_t phaseCount = 0;
+    std::array<WaveformRenderPhaseEvent, kPhaseCapacity> phases{};
     double beamCoreRadiusPx = 0.0;
     std::int32_t beamCoreMarginPx = 0;
     std::uint32_t glowDirtyTiles = 0;
@@ -66,10 +87,12 @@ public:
     void setSelectedLine(int line);
     void setPersistence(int persistence);
     void setCoreIntensity(int intensity);
+    void setCoreWidth(int widthTenths);
     void setGlow(int glow);
     void setOutputSize(
         int width,
         int height);
+    void setTraceRendererId(TraceRendererId rendererId) noexcept;
 
     void setZoomed(bool zoomed);
     void setZoomFactor(int factor);
@@ -85,6 +108,7 @@ public:
     [[nodiscard]] const QImage& image() const;
     [[nodiscard]] const std::vector<float>& visibleLumaVolts() const noexcept;
     [[nodiscard]] const std::vector<float>& fullLumaVolts() const noexcept;
+    [[nodiscard]] const std::vector<float>& reconstructedLumaSamples() const noexcept;
     [[nodiscard]] const WaveformRenderTimings& renderTimings() const noexcept;
 
     void setChromaFillIntensity(
@@ -96,11 +120,18 @@ public:
         double normalizedX,
         double volts);
 
+    using TraceJob = std::function<void(
+        std::size_t,
+        std::uint32_t)>;
+
     using TraceJobExecutor = std::function<void(
         std::size_t,
-        const std::function<void(std::size_t)>&)>;
+        const TraceJob&)>;
+
+    using TraceHelperAvailability = std::function<bool()>;
 
     void setTraceJobExecutor(TraceJobExecutor executor);
+    void setTraceHelperAvailability(TraceHelperAvailability availability);
     void setLineInfoOverlayEnabled(bool enabled, bool palOutput = false);
 
     void setAspectRatio(
@@ -120,20 +151,49 @@ private:
         std::uint16_t blue = 0;
     };
 
+    struct DenseSteepStats
+    {
+        std::uint64_t neighbourProbes = 0;
+        std::uint32_t runCount = 0;
+        std::uint32_t sustainedRunCount = 0;
+        std::uint32_t denseRunCount = 0;
+        std::uint32_t acceptedPacketCount = 0;
+        std::uint32_t whiteSegmentCount = 0;
+    };
+
+    struct CatWuzleFrameStats
+    {
+        std::uint32_t chunkCount = 0;
+        std::uint32_t invalidChunkCount = 0;
+        std::uint64_t zipperUs = 0;
+        std::uint64_t chunkRenderMinUs = 0;
+        std::uint64_t chunkRenderAvgUs = 0;
+        std::uint64_t chunkRenderMaxUs = 0;
+        std::uint64_t chunkQueueWaitMaxUs = 0;
+        std::array<std::uint32_t, 3> workerChunkCount{};
+        std::array<std::uint64_t, 3> workerRenderUs{};
+    };
+
     [[nodiscard]] std::vector<BeamPoint> buildCurrentLumaPolyline(
         const QRectF& scope,
         std::size_t viewOffset,
         std::size_t viewWidth) const;
 
+    [[nodiscard]] std::vector<bool> buildDenseSteepPacketMask(
+        const std::vector<BeamPoint>& polyline,
+        DenseSteepStats* stats = nullptr) const;
+
     [[nodiscard]] std::vector<std::uint16_t> renderCurrentPhosphorEnergy(
         const std::vector<BeamPoint>& polyline,
+        const std::vector<bool>& denseSteepSegment,
         const QRectF& plotRect,
         std::uint64_t& glowUs,
         std::uint64_t& coreUs,
         int& activeMinX,
         int& activeMinY,
         int& activeMaxX,
-        int& activeMaxY) const;
+        int& activeMaxY,
+        CatWuzleFrameStats& frameStats);
 
     void clearScopephorFrames();
     void applyScopephorFeedback(
@@ -233,8 +293,12 @@ private:
     int selectedLine_ = -1;
     int persistence_ = 0;
     int coreIntensity_ = 200;
+    int coreWidthTenths_ = 10;
     int glow_ = 10;
     double beamCoreRadiusPx_ = 0.82;
+    std::uint64_t catWuzleGeneration_ = 0;
+    TraceRendererId traceRendererId_ = TraceRendererId::None;
+    std::uint64_t traceLogGeneration_ = 0;
 
     int zoomFactor_ = 1;
     double scrollPosition_ = 0.0;
@@ -249,6 +313,7 @@ private:
     int chromaFillIntensity_ = 64;
 
     TraceJobExecutor traceJobExecutor_;
+    TraceHelperAvailability traceHelperAvailability_;
 
     double inputSampleClockHz_ = 13'500'000.0;
     int inputSampleWidth_ = 720;

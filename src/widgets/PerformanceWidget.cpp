@@ -71,6 +71,65 @@ namespace
                         barRect.width())));
     }
 
+    void drawAssistChunkMarkers(
+        QPainter& painter,
+        const QRect& barRect,
+        const WaveformAssistTimelineSnapshot& timeline,
+        std::uint64_t expectedGeneration)
+    {
+        if (expectedGeneration == 0 ||
+            timeline.generation != expectedGeneration)
+        {
+            return;
+        }
+
+        painter.save();
+        painter.setPen(QColor(235, 235, 235));
+
+        const int centerY =
+            barRect.center().y();
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const int x0 = xForUs(
+                barRect,
+                static_cast<double>(event.startUs));
+            const int x1 = xForUs(
+                barRect,
+                static_cast<double>(event.startUs) +
+                    static_cast<double>(event.durationUs));
+
+            const int left =
+                std::clamp(x0, barRect.left(), barRect.right());
+            const int right =
+                std::clamp(std::max(x1, x0 + 1),
+                    barRect.left(),
+                    barRect.right());
+
+            painter.drawLine(
+                left,
+                barRect.top() + 2,
+                left,
+                barRect.bottom() - 2);
+            painter.drawLine(
+                right,
+                barRect.top() + 2,
+                right,
+                barRect.bottom() - 2);
+
+            const int midX =
+                left + (right - left) / 2;
+            painter.drawPoint(midX, centerY);
+            painter.drawPoint(midX + 1, centerY);
+        }
+
+        painter.restore();
+    }
+
     void fillTimingBackground(
         QPainter& painter,
         const QRect& barRect,
@@ -563,10 +622,12 @@ QString makePinnedDetailText(
             snapshot.waveformScreenGlowWorkload,
             snapshot.waveformScreenTraceParallel) +
             QString(
-                "\nTrace prep / raster: %1 / %2 ms"
-                "\nOutput resize: %3   buffer capacity grow: %4"
-                "\nResampler cache: %5   trace jobs: %6"
-                "\nBeam core: %7 px   raster margin: %8 px")
+                "\nTrace prep/raster: %1 / %2 ms"
+                "\nOutput resize %3   buf grow %4   cache %5   jobs %6"
+                "\nBeam %7 px   margin %8 px"
+                "\nCatWuzle %9  inv %10  zip %11 ms  W0/W1/W2 %16/%17/%18"
+                "\nW ms %19/%20/%21   chunk %12/%13/%14 ms   qwait %15 ms"
+                "\nassist %22 ms   final W %23 ms")
                 .arg(snapshot.waveformScreenTracePrep.latestMs(), 0, 'f', 2)
                 .arg(snapshot.waveformScreenTraceRaster.latestMs(), 0, 'f', 2)
                 .arg(snapshot.waveformScreenOutputSizeChanged
@@ -580,7 +641,52 @@ QString makePinnedDetailText(
                     : QStringLiteral("HIT"))
                 .arg(snapshot.waveformScreenTraceJobCount)
                 .arg(snapshot.waveformScreenBeamCoreRadiusPx, 0, 'f', 2)
-                .arg(snapshot.waveformScreenBeamCoreMarginPx);
+                .arg(snapshot.waveformScreenBeamCoreMarginPx)
+                .arg(snapshot.waveformScreenCatWuzleChunkCount)
+                .arg(snapshot.waveformScreenCatWuzleInvalidChunkCount)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleZipperUs) / 1000.0,
+                    0,
+                    'f',
+                    2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkRenderMinUs) / 1000.0,
+                    0,
+                    'f',
+                    2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkRenderAvgUs) / 1000.0,
+                    0,
+                    'f',
+                    2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkRenderMaxUs) / 1000.0,
+                    0,
+                    'f',
+                    2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkQueueWaitMaxUs) / 1000.0,
+                    0,
+                    'f',
+                    2)
+                .arg(snapshot.waveformScreenCatWuzleWorkerChunkCount[0])
+                .arg(snapshot.waveformScreenCatWuzleWorkerChunkCount[1])
+                .arg(snapshot.waveformScreenCatWuzleWorkerChunkCount[2])
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleWorkerRenderUs[0]) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleWorkerRenderUs[1]) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenCatWuzleWorkerRenderUs[2]) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenAssistTotalUs) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(snapshot.waveformScreenAssistFinalWaitUs) / 1000.0,
+                    0, 'f', 2);
 
     case DetailKind::WaveformVideo:
         return makeWaveformDetails(
@@ -1021,6 +1127,83 @@ void PerformanceWidget::paintEvent(
             startUs += convert2Us;
             drawSegment(painter, barRect, startUs, spout2Us,
                 QColor(190, 215, 170), "S2");
+
+            drawAssistChunkMarkers(
+                painter,
+                barRect,
+                firstWorker
+                    ? snapshot_.displayWorker0Assist
+                    : snapshot_.displayWorker1Assist,
+                snapshot_.waveformScreenPhases.generation);
+        }
+        else if (bar.detail == DetailKind::WaveformScreen)
+        {
+            // Real chronology on the same capture-relative 0..80 ms axis as
+            // the display-worker chunk markers.  X is laid down first as the
+            // full waveform wall-time envelope; measured phases then replace
+            // it at their actual start/end timestamps.
+            const auto phaseColor =
+                [](char label) -> QColor
+                {
+                    switch (label)
+                    {
+                    case 'T': return QColor(205, 215, 235);
+                    case 'R': return QColor(220, 220, 220);
+                    case 'Z': return QColor(205, 190, 230);
+                    case 'P': return QColor(185, 225, 205);
+                    case 'C': return QColor(205, 225, 185);
+                    case 'O': return QColor(225, 205, 205);
+                    default:  return QColor(195, 195, 195);
+                    }
+                };
+
+            for (std::uint32_t i = 0;
+                i < snapshot_.waveformScreenPhases.count &&
+                i < WaveformPhaseTimelineSnapshot::kCapacity;
+                ++i)
+            {
+                const auto& event =
+                    snapshot_.waveformScreenPhases.events[i];
+                const char label =
+                    static_cast<char>(event.label);
+                const char labelText[2] = { label, '\0' };
+
+                drawSegment(
+                    painter,
+                    barRect,
+                    static_cast<double>(event.startUs),
+                    static_cast<double>(event.durationUs),
+                    phaseColor(label),
+                    labelText);
+            }
+
+            // W is the actual final wait after W0 has no local chunk left and
+            // outstanding helper chunks still have to return.  Its timestamp
+            // is capture-relative too, so it can be compared vertically with
+            // W1/W2 without any synthetic stacking.
+            const double finalWaitStartUs =
+                static_cast<double>(
+                    snapshot_.waveformScreenAssistFinalWaitStartUs);
+            const double finalWaitUs =
+                static_cast<double>(
+                    snapshot_.waveformScreenAssistFinalWaitUs);
+            const bool assistGenerationMatches =
+                snapshot_.waveformScreenPhases.generation != 0 &&
+                snapshot_.displayWorker0Assist.generation ==
+                    snapshot_.waveformScreenPhases.generation &&
+                snapshot_.displayWorker1Assist.generation ==
+                    snapshot_.waveformScreenPhases.generation;
+
+            if (finalWaitUs > 0.0 && assistGenerationMatches)
+            {
+                drawSegment(
+                    painter,
+                    barRect,
+                    finalWaitStartUs,
+                    finalWaitUs,
+                    QColor(235, 205, 150),
+                    "W");
+            }
         }
         else
         {
@@ -1122,8 +1305,7 @@ void PerformanceWidget::paintEvent(
         constexpr int detailTextHeight = 285;
         constexpr int detailGap = 8;
 
-        const bool showTraceGraph =
-            waveformScreenPinned && !traceHistory_.empty();
+        const bool showTraceGraph = false;
 
         const int availableWidth =
             width() - margin * 2;
@@ -1691,6 +1873,11 @@ void PerformanceWidget::mouseMoveEvent(
             n.latestMs() + d.latestMs() + c1.latestMs() +
             s1.latestMs() + c2.latestMs() + s2.latestMs();
 
+        const auto& assistTimeline =
+            firstWorker
+                ? snapshot_.displayWorker0Assist
+                : snapshot_.displayWorker1Assist;
+
         valueText =
             QString(
                 "Display worker %1: %2ms\n"
@@ -1699,7 +1886,8 @@ void PerformanceWidget::mouseMoveEvent(
                 "C1  Field 1 RGB: %5ms\n"
                 "S1  Field 1 Spout RGB: %6ms\n"
                 "C2  Field 2 RGB: %7ms\n"
-                "S2  Field 2 Spout RGB: %8ms")
+                "S2  Field 2 Spout RGB: %8ms\n"
+                "Chunks: %9")
             .arg(firstWorker ? 1 : 2)
             .arg(totalMs, 0, 'f', 2)
             .arg(n.latestMs(), 0, 'f', 2)
@@ -1707,7 +1895,8 @@ void PerformanceWidget::mouseMoveEvent(
             .arg(c1.latestMs(), 0, 'f', 2)
             .arg(s1.latestMs(), 0, 'f', 2)
             .arg(c2.latestMs(), 0, 'f', 2)
-            .arg(s2.latestMs(), 0, 'f', 2);
+            .arg(s2.latestMs(), 0, 'f', 2)
+            .arg(assistTimeline.count);
     }
     else
     {

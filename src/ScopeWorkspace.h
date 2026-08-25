@@ -55,6 +55,7 @@ signals:
     void waveformZoomChanged(int zoomFactor);
     void waveformPersistenceChanged(int persistence);
     void waveformCoreIntensityChanged(int intensity);
+    void waveformCoreWidthChanged(int widthTenths);
     void vectorscopeGlowChanged(int glow);
 
     void waveformChromaFillIntensityChanged(int intensity);
@@ -83,6 +84,7 @@ signals:
     void videoMaximizedChanged(bool maximized);
     void exportHighResolutionPngRequested();
     void exportHighResolutionPngQuickRequested();
+    void waveformRawCaptureRequested();
 
 private:
     void showGrid();

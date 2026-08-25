@@ -1,6 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 struct PerformanceMetricSnapshot
@@ -167,6 +170,163 @@ struct GlowWorkloadStats
     }
 };
 
+
+struct WaveformAssistChunkEventSnapshot
+{
+    std::uint32_t startUs = 0;
+    std::uint32_t durationUs = 0;
+};
+
+struct WaveformAssistTimelineSnapshot
+{
+    static constexpr std::size_t kCapacity = 64;
+    std::uint64_t generation = 0;
+    std::uint32_t count = 0;
+    std::array<WaveformAssistChunkEventSnapshot, kCapacity> events{};
+};
+
+struct WaveformAssistTimelineStats
+{
+    static constexpr std::size_t kCapacity =
+        WaveformAssistTimelineSnapshot::kCapacity;
+
+    std::atomic<std::uint64_t> generation{ 0 };
+    std::atomic<std::uint32_t> count{ 0 };
+    std::array<std::atomic<std::uint32_t>, kCapacity> startUs{};
+    std::array<std::atomic<std::uint32_t>, kCapacity> durationUs{};
+
+    void reset(std::uint64_t newGeneration = 0) noexcept
+    {
+        count.store(0, std::memory_order_release);
+        generation.store(newGeneration, std::memory_order_release);
+    }
+
+    void append(
+        std::uint32_t start,
+        std::uint32_t duration) noexcept
+    {
+        const std::uint32_t index =
+            count.load(std::memory_order_relaxed);
+
+        if (index >= kCapacity)
+        {
+            return;
+        }
+
+        startUs[index].store(start, std::memory_order_relaxed);
+        durationUs[index].store(duration, std::memory_order_relaxed);
+        count.store(index + 1u, std::memory_order_release);
+    }
+
+    [[nodiscard]] WaveformAssistTimelineSnapshot snapshot() const noexcept
+    {
+        WaveformAssistTimelineSnapshot result;
+        const std::uint64_t beforeGeneration =
+            generation.load(std::memory_order_acquire);
+        result.generation = beforeGeneration;
+        result.count = std::min<std::uint32_t>(
+            count.load(std::memory_order_acquire),
+            static_cast<std::uint32_t>(kCapacity));
+
+        for (std::uint32_t i = 0; i < result.count; ++i)
+        {
+            result.events[i].startUs =
+                startUs[i].load(std::memory_order_relaxed);
+            result.events[i].durationUs =
+                durationUs[i].load(std::memory_order_relaxed);
+        }
+
+        const std::uint64_t afterGeneration =
+            generation.load(std::memory_order_acquire);
+        if (afterGeneration != beforeGeneration)
+        {
+            result.generation = afterGeneration;
+            result.count = 0;
+        }
+
+        return result;
+    }
+};
+
+
+struct WaveformPhaseEventSnapshot
+{
+    std::uint8_t label = static_cast<std::uint8_t>('X');
+    std::uint32_t startUs = 0;
+    std::uint32_t durationUs = 0;
+};
+
+struct WaveformPhaseTimelineSnapshot
+{
+    static constexpr std::size_t kCapacity = 16;
+    std::uint64_t generation = 0;
+    std::uint32_t count = 0;
+    std::array<WaveformPhaseEventSnapshot, kCapacity> events{};
+};
+
+struct WaveformPhaseTimelineStats
+{
+    static constexpr std::size_t kCapacity =
+        WaveformPhaseTimelineSnapshot::kCapacity;
+
+    std::atomic<std::uint64_t> generation{ 0 };
+    std::atomic<std::uint32_t> count{ 0 };
+    std::array<std::atomic<std::uint8_t>, kCapacity> label{};
+    std::array<std::atomic<std::uint32_t>, kCapacity> startUs{};
+    std::array<std::atomic<std::uint32_t>, kCapacity> durationUs{};
+
+    void reset(std::uint64_t newGeneration = 0) noexcept
+    {
+        count.store(0, std::memory_order_release);
+        generation.store(newGeneration, std::memory_order_release);
+    }
+
+    void append(
+        char phaseLabel,
+        std::uint32_t start,
+        std::uint32_t duration) noexcept
+    {
+        const std::uint32_t index =
+            count.load(std::memory_order_relaxed);
+        if (index >= kCapacity || duration == 0u)
+        {
+            return;
+        }
+
+        label[index].store(
+            static_cast<std::uint8_t>(phaseLabel),
+            std::memory_order_relaxed);
+        startUs[index].store(start, std::memory_order_relaxed);
+        durationUs[index].store(duration, std::memory_order_relaxed);
+        count.store(index + 1u, std::memory_order_release);
+    }
+
+    [[nodiscard]] WaveformPhaseTimelineSnapshot snapshot() const noexcept
+    {
+        WaveformPhaseTimelineSnapshot result;
+        const std::uint64_t beforeGeneration =
+            generation.load(std::memory_order_acquire);
+        result.generation = beforeGeneration;
+        result.count = std::min<std::uint32_t>(
+            count.load(std::memory_order_acquire),
+            static_cast<std::uint32_t>(kCapacity));
+        for (std::uint32_t i = 0; i < result.count; ++i)
+        {
+            result.events[i].label = label[i].load(std::memory_order_relaxed);
+            result.events[i].startUs = startUs[i].load(std::memory_order_relaxed);
+            result.events[i].durationUs = durationUs[i].load(std::memory_order_relaxed);
+        }
+        const std::uint64_t afterGeneration =
+            generation.load(std::memory_order_acquire);
+        if (afterGeneration != beforeGeneration)
+        {
+            result.generation = afterGeneration;
+            result.count = 0;
+        }
+        return result;
+    }
+};
+
 struct PerformanceSnapshot
 {
     PerformanceMetricSnapshot reconstruct;
@@ -210,6 +370,18 @@ struct PerformanceSnapshot
     bool waveformScreenOutputBufferCapacityGrew = false;
     bool waveformScreenResamplerCacheRebuilt = false;
     std::uint32_t waveformScreenTraceJobCount = 0;
+    std::uint32_t waveformScreenCatWuzleChunkCount = 0;
+    std::uint32_t waveformScreenCatWuzleInvalidChunkCount = 0;
+    std::uint64_t waveformScreenCatWuzleZipperUs = 0;
+    std::uint64_t waveformScreenCatWuzleChunkRenderMinUs = 0;
+    std::uint64_t waveformScreenCatWuzleChunkRenderAvgUs = 0;
+    std::uint64_t waveformScreenCatWuzleChunkRenderMaxUs = 0;
+    std::uint64_t waveformScreenCatWuzleChunkQueueWaitMaxUs = 0;
+    std::array<std::uint32_t, 3> waveformScreenCatWuzleWorkerChunkCount{};
+    std::array<std::uint64_t, 3> waveformScreenCatWuzleWorkerRenderUs{};
+    std::uint64_t waveformScreenAssistTotalUs = 0;
+    std::uint64_t waveformScreenAssistFinalWaitStartUs = 0;
+    std::uint64_t waveformScreenAssistFinalWaitUs = 0;
     double waveformScreenBeamCoreRadiusPx = 0.0;
     std::int32_t waveformScreenBeamCoreMarginPx = 0;
     std::uint32_t waveformScreenWidth = 0;
@@ -263,6 +435,10 @@ struct PerformanceSnapshot
     PerformanceMetricSnapshot displayInterpolation;
     PerformanceMetricSnapshot displayColorConversion;
     PerformanceMetricSnapshot displayOutput;
+
+    WaveformAssistTimelineSnapshot displayWorker0Assist;
+    WaveformAssistTimelineSnapshot displayWorker1Assist;
+    WaveformPhaseTimelineSnapshot waveformScreenPhases;
 };
 
 struct PerformanceStats
@@ -288,6 +464,9 @@ struct PerformanceStats
     PerformanceMetric displayWorker1Convert2;
     PerformanceMetric displayWorker1Spout2;
 
+    std::array<WaveformAssistTimelineStats, 2> displayWorkerAssistTimeline;
+    WaveformPhaseTimelineStats waveformScreenPhaseTimeline;
+
     PerformanceMetric videoScreen;
     PerformanceMetric waveformScreen;
     PerformanceMetric waveformVideo;
@@ -306,6 +485,18 @@ struct PerformanceStats
     std::atomic<bool> waveformScreenOutputBufferCapacityGrew{ false };
     std::atomic<bool> waveformScreenResamplerCacheRebuilt{ false };
     std::atomic<std::uint32_t> waveformScreenTraceJobCount{ 0 };
+    std::atomic<std::uint32_t> waveformScreenCatWuzleChunkCount{ 0 };
+    std::atomic<std::uint32_t> waveformScreenCatWuzleInvalidChunkCount{ 0 };
+    std::atomic<std::uint64_t> waveformScreenCatWuzleZipperUs{ 0 };
+    std::atomic<std::uint64_t> waveformScreenCatWuzleChunkRenderMinUs{ 0 };
+    std::atomic<std::uint64_t> waveformScreenCatWuzleChunkRenderAvgUs{ 0 };
+    std::atomic<std::uint64_t> waveformScreenCatWuzleChunkRenderMaxUs{ 0 };
+    std::atomic<std::uint64_t> waveformScreenCatWuzleChunkQueueWaitMaxUs{ 0 };
+    std::array<std::atomic<std::uint32_t>, 3> waveformScreenCatWuzleWorkerChunkCount{};
+    std::array<std::atomic<std::uint64_t>, 3> waveformScreenCatWuzleWorkerRenderUs{};
+    std::atomic<std::uint64_t> waveformScreenAssistTotalUs{ 0 };
+    std::atomic<std::uint64_t> waveformScreenAssistFinalWaitStartUs{ 0 };
+    std::atomic<std::uint64_t> waveformScreenAssistFinalWaitUs{ 0 };
     std::atomic<double> waveformScreenBeamCoreRadiusPx{ 0.0 };
     std::atomic<std::int32_t> waveformScreenBeamCoreMarginPx{ 0 };
     std::atomic<std::uint32_t> waveformScreenWidth{ 0 };
@@ -408,6 +599,33 @@ struct PerformanceStats
                 std::memory_order_relaxed),
             waveformScreenTraceJobCount.load(
                 std::memory_order_relaxed),
+            waveformScreenCatWuzleChunkCount.load(
+                std::memory_order_relaxed),
+            waveformScreenCatWuzleInvalidChunkCount.load(
+                std::memory_order_relaxed),
+            waveformScreenCatWuzleZipperUs.load(
+                std::memory_order_relaxed),
+            waveformScreenCatWuzleChunkRenderMinUs.load(
+                std::memory_order_relaxed),
+            waveformScreenCatWuzleChunkRenderAvgUs.load(
+                std::memory_order_relaxed),
+            waveformScreenCatWuzleChunkRenderMaxUs.load(
+                std::memory_order_relaxed),
+            waveformScreenCatWuzleChunkQueueWaitMaxUs.load(
+                std::memory_order_relaxed),
+            {
+                waveformScreenCatWuzleWorkerChunkCount[0].load(std::memory_order_relaxed),
+                waveformScreenCatWuzleWorkerChunkCount[1].load(std::memory_order_relaxed),
+                waveformScreenCatWuzleWorkerChunkCount[2].load(std::memory_order_relaxed)
+            },
+            {
+                waveformScreenCatWuzleWorkerRenderUs[0].load(std::memory_order_relaxed),
+                waveformScreenCatWuzleWorkerRenderUs[1].load(std::memory_order_relaxed),
+                waveformScreenCatWuzleWorkerRenderUs[2].load(std::memory_order_relaxed)
+            },
+            waveformScreenAssistTotalUs.load(std::memory_order_relaxed),
+            waveformScreenAssistFinalWaitStartUs.load(std::memory_order_relaxed),
+            waveformScreenAssistFinalWaitUs.load(std::memory_order_relaxed),
             waveformScreenBeamCoreRadiusPx.load(
                 std::memory_order_relaxed),
             waveformScreenBeamCoreMarginPx.load(
@@ -466,7 +684,11 @@ struct PerformanceStats
             displayCompose.snapshot(),
             displayInterpolation.snapshot(),
             displayColorConversion.snapshot(),
-            displayOutput.snapshot()
+            displayOutput.snapshot(),
+
+            displayWorkerAssistTimeline[0].snapshot(),
+            displayWorkerAssistTimeline[1].snapshot(),
+            waveformScreenPhaseTimeline.snapshot()
         };
     }
 };

@@ -42,6 +42,7 @@ struct OpenScopeSettings
 
                 int persistenceFrames = 5;
                 int coreIntensity = 100;
+                int coreWidthTenths = 10;
             };
 
             struct Vectorscope
