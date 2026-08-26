@@ -30,6 +30,13 @@ ScopeWorkspace::ScopeWorkspace(
         settings.local.floaties.settings.y)
     , settingsFloatingPositionValid_(
         settings.local.floaties.settings.positionValid)
+    , settingsFloatingSize_(
+        settings.local.floaties.settings.width,
+        settings.local.floaties.settings.height)
+    , settingsFloatingSizeValid_(
+        settings.local.floaties.settings.sizeValid &&
+        settings.local.floaties.settings.width > 0 &&
+        settings.local.floaties.settings.height > 0)
 {
     layout_ =
         new QGridLayout(this);
@@ -45,6 +52,13 @@ ScopeWorkspace::ScopeWorkspace(
         0);
 
     layout_->setSpacing(4);
+
+    // Matrix view is a strict 2x2. Content size hints must never distort
+    // row/column allocation.
+    layout_->setRowMinimumHeight(0, 0);
+    layout_->setRowMinimumHeight(1, 0);
+    layout_->setColumnMinimumWidth(0, 0);
+    layout_->setColumnMinimumWidth(1, 0);
 
     videoViewport_ =
         new ScopeViewport(
@@ -226,6 +240,42 @@ ScopeWorkspace::ScopeWorkspace(
         &ControlWidget::noiseReductionChanged,
         this,
         &ScopeWorkspace::noiseReductionChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::antiAliasingChanged,
+        this,
+        &ScopeWorkspace::antiAliasingChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::colorizeIllegalLuminanceChanged,
+        this,
+        &ScopeWorkspace::colorizeIllegalLuminanceChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::colorizeGamutErrorsChanged,
+        this,
+        &ScopeWorkspace::colorizeGamutErrorsChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::lineSelectorVisibleChanged,
+        this,
+        &ScopeWorkspace::lineSelectorVisibleChanged);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::safetyArea90Changed,
+        this,
+        &ScopeWorkspace::safetyArea90Changed);
+
+    connect(
+        controlWidget_,
+        &ControlWidget::textSafetyArea80Changed,
+        this,
+        &ScopeWorkspace::textSafetyArea80Changed);
 
     connect(
         controlWidget_,
@@ -444,8 +494,8 @@ void ScopeWorkspace::floatSettings()
 {
     if (settingsFloating_)
     {
-        resizeFloatingSettings();
         settingsViewport_->show();
+        settingsViewport_->raise();
         return;
     }
 
@@ -526,6 +576,12 @@ void ScopeWorkspace::dockSettings()
     settingsFloatingPositionValid_ =
         true;
 
+    settingsFloatingSize_ =
+        settingsViewport_->size();
+    settingsFloatingSizeValid_ =
+        settingsFloatingSize_.width() > 0 &&
+        settingsFloatingSize_.height() > 0;
+
     settingsViewport_->hide();
     settingsViewport_->setParent(this);
     settingsViewport_->setWindowFlags(
@@ -536,6 +592,13 @@ void ScopeWorkspace::dockSettings()
 
 void ScopeWorkspace::resizeFloatingSettings()
 {
+    if (settingsFloatingSizeValid_)
+    {
+        settingsViewport_->resize(
+            settingsFloatingSize_);
+        return;
+    }
+
     const double aspectRatio =
         OpenScopeSettings::aspectRatioValue(
             aspectRatio_);
@@ -550,6 +613,22 @@ void ScopeWorkspace::resizeFloatingSettings()
     settingsViewport_->resize(
         kFloatingSettingsWidth,
         height);
+}
+
+QSize ScopeWorkspace::floatingSettingsSize() const
+{
+    if (settingsFloating_ && settingsViewport_ != nullptr)
+    {
+        return settingsViewport_->size();
+    }
+
+    return settingsFloatingSize_;
+}
+
+bool ScopeWorkspace::hasFloatingSettingsSize() const
+{
+    return settingsFloatingSizeValid_ ||
+        (settingsFloating_ && settingsViewport_ != nullptr);
 }
 
 QPoint ScopeWorkspace::floatingSettingsPosition() const
@@ -656,10 +735,8 @@ void ScopeWorkspace::setAspectRatio(
     controlWidget_->setAspectRatio(
         aspectRatio);
 
-    if (settingsFloating_)
-    {
-        resizeFloatingSettings();
-    }
+    // A floating Settings window is user-resizable.  Do not overwrite its
+    // remembered/manual size when the display aspect ratio changes.
 }
 
 bool ScopeWorkspace::isVideoMaximized() const

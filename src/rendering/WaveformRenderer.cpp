@@ -12,11 +12,12 @@
 #include <QtGlobal>
 #include <QApplication>
 
-// 0.8.2 waveform quality rebase: the single-worker CatWuzle raster core
-// below is intentionally restored from the accepted 0.8.0 visual baseline.
-// Worker/chunk experiments remain outside this raster path.
+// CatWuzle keeps the accepted 0.8.0 visual baseline. The core raster may
+// be split into deterministic, disjoint target-X chunks; geometry and pixel
+// coverage remain identical to the scalar path.
 
 #include <algorithm>
+#include <numeric>
 #include <bit>
 #include <array>
 #include <cmath>
@@ -1221,9 +1222,23 @@ void WaveformRenderer::renderSingleLine(
     const std::uint64_t resamplerGenerationBefore =
         singleLineReconstructor_.cacheGeneration();
 
+    const std::uint64_t upsampleStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
+    QElapsedTimer upsampleTimer;
+    upsampleTimer.start();
+
     singleLineReconstructor_.resample(
         singleLineSource_,
         singleLineReconstructed_);
+
+    const std::uint64_t upsampleUs =
+        static_cast<std::uint64_t>(
+            upsampleTimer.nsecsElapsed() / 1000);
+    recordPhase(
+        'U',
+        upsampleStartUs,
+        upsampleUs);
 
     renderTimings_.resamplerCacheRebuilt =
         singleLineReconstructor_.cacheGeneration() !=
@@ -1602,127 +1617,205 @@ void WaveformRenderer::renderSingleLine(
             resolveMaxX -
             resolveMinX + 1;
 
+        const int resolveRows =
+            resolveMaxY -
+            resolveMinY + 1;
+
         std::vector<std::uint16_t> resolveHorizontal(
             static_cast<std::size_t>(resolveSpan) *
-                static_cast<std::size_t>(
-                    resolveMaxY - resolveMinY + 1),
+                static_cast<std::size_t>(resolveRows),
             0u);
 
         constexpr std::uint32_t kSideQ8 = 38u;   // 0.1484375
         constexpr std::uint32_t kCenterQ8 = 180u; // 0.703125
 
-        for (int y = resolveMinY;
-            y <= resolveMaxY;
-            ++y)
-        {
-            const std::size_t sourceRow =
-                static_cast<std::size_t>(y) *
-                static_cast<std::size_t>(resolveWidth);
-
-            const std::size_t targetRow =
-                static_cast<std::size_t>(y - resolveMinY) *
-                static_cast<std::size_t>(resolveSpan);
-
-            for (int x = resolveMinX;
-                x <= resolveMaxX;
-                ++x)
+        const auto resolveJobCountForRows =
+            [&](int rows)
             {
-                const int leftX =
-                    std::max(
-                        resolveMinX,
-                        x - 1);
+                if (rows <= 0)
+                {
+                    return std::size_t{0u};
+                }
 
-                const int rightX =
-                    std::min(
-                        resolveMaxX,
-                        x + 1);
+                constexpr int kTargetRowsPerJob = 24;
+                constexpr std::size_t kMaxResolveJobs = 8u;
 
-                const std::uint32_t left =
-                    currentPhosphorEnergy[
-                        sourceRow +
-                        static_cast<std::size_t>(leftX)];
-
-                const std::uint32_t center =
-                    currentPhosphorEnergy[
-                        sourceRow +
-                        static_cast<std::size_t>(x)];
-
-                const std::uint32_t right =
-                    currentPhosphorEnergy[
-                        sourceRow +
-                        static_cast<std::size_t>(rightX)];
-
-                resolveHorizontal[
-                    targetRow +
-                    static_cast<std::size_t>(x - resolveMinX)] =
-                    static_cast<std::uint16_t>(
-                        (left * kSideQ8 +
-                         center * kCenterQ8 +
-                         right * kSideQ8 +
-                         128u) >> 8);
-            }
-        }
-
-        for (int y = resolveMinY;
-            y <= resolveMaxY;
-            ++y)
-        {
-            const int topY =
-                std::max(
-                    resolveMinY,
-                    y - 1);
-
-            const int bottomY =
-                std::min(
-                    resolveMaxY,
-                    y + 1);
-
-            const std::size_t topRow =
-                static_cast<std::size_t>(topY - resolveMinY) *
-                static_cast<std::size_t>(resolveSpan);
-
-            const std::size_t centerRow =
-                static_cast<std::size_t>(y - resolveMinY) *
-                static_cast<std::size_t>(resolveSpan);
-
-            const std::size_t bottomRow =
-                static_cast<std::size_t>(bottomY - resolveMinY) *
-                static_cast<std::size_t>(resolveSpan);
-
-            const std::size_t destinationRow =
-                static_cast<std::size_t>(y) *
-                static_cast<std::size_t>(resolveWidth);
-
-            for (int x = resolveMinX;
-                x <= resolveMaxX;
-                ++x)
-            {
-                const std::size_t localX =
+                const std::size_t desiredJobs =
                     static_cast<std::size_t>(
-                        x - resolveMinX);
+                        std::max(
+                            1,
+                            (rows + kTargetRowsPerJob - 1) /
+                                kTargetRowsPerJob));
 
-                const std::uint32_t top =
-                    resolveHorizontal[
-                        topRow + localX];
+                return std::min(
+                    kMaxResolveJobs,
+                    desiredJobs);
+            };
 
-                const std::uint32_t center =
-                    resolveHorizontal[
-                        centerRow + localX];
+        const auto runResolveRows =
+            [&](std::size_t jobCount,
+                const std::function<void(int, int)>& rowJob)
+            {
+                if (jobCount <= 1u ||
+                    !traceJobExecutor_)
+                {
+                    rowJob(resolveMinY, resolveMaxY);
+                    return;
+                }
 
-                const std::uint32_t bottom =
-                    resolveHorizontal[
-                        bottomRow + localX];
+                traceJobExecutor_(
+                    'X',
+                    jobCount,
+                    [&](std::size_t jobIndex, std::uint32_t /* workerId */)
+                    {
+                        const int firstRow =
+                            resolveMinY +
+                            static_cast<int>(
+                                (static_cast<std::int64_t>(jobIndex) *
+                                    static_cast<std::int64_t>(resolveRows)) /
+                                static_cast<std::int64_t>(jobCount));
 
-                currentPhosphorEnergy[
-                    destinationRow +
-                    static_cast<std::size_t>(x)] =
-                    static_cast<std::uint16_t>(
-                        (top * kSideQ8 +
-                         center * kCenterQ8 +
-                         bottom * kSideQ8 +
-                         128u) >> 8);
-            }
-        }
+                        const int onePastLastRow =
+                            resolveMinY +
+                            static_cast<int>(
+                                (static_cast<std::int64_t>(jobIndex + 1u) *
+                                    static_cast<std::int64_t>(resolveRows)) /
+                                static_cast<std::int64_t>(jobCount));
+
+                        if (onePastLastRow <= firstRow)
+                        {
+                            return;
+                        }
+
+                        rowJob(firstRow, onePastLastRow - 1);
+                    });
+            };
+
+        const std::size_t resolveJobCount =
+            resolveJobCountForRows(resolveRows);
+
+        runResolveRows(
+            resolveJobCount,
+            [&](int firstRow, int lastRow)
+            {
+                for (int y = firstRow;
+                    y <= lastRow;
+                    ++y)
+                {
+                    const std::size_t sourceRow =
+                        static_cast<std::size_t>(y) *
+                        static_cast<std::size_t>(resolveWidth);
+
+                    const std::size_t targetRow =
+                        static_cast<std::size_t>(y - resolveMinY) *
+                        static_cast<std::size_t>(resolveSpan);
+
+                    for (int x = resolveMinX;
+                        x <= resolveMaxX;
+                        ++x)
+                    {
+                        const int leftX =
+                            std::max(
+                                resolveMinX,
+                                x - 1);
+
+                        const int rightX =
+                            std::min(
+                                resolveMaxX,
+                                x + 1);
+
+                        const std::uint32_t left =
+                            currentPhosphorEnergy[
+                                sourceRow +
+                                static_cast<std::size_t>(leftX)];
+
+                        const std::uint32_t center =
+                            currentPhosphorEnergy[
+                                sourceRow +
+                                static_cast<std::size_t>(x)];
+
+                        const std::uint32_t right =
+                            currentPhosphorEnergy[
+                                sourceRow +
+                                static_cast<std::size_t>(rightX)];
+
+                        resolveHorizontal[
+                            targetRow +
+                            static_cast<std::size_t>(x - resolveMinX)] =
+                            static_cast<std::uint16_t>(
+                                (left * kSideQ8 +
+                                 center * kCenterQ8 +
+                                 right * kSideQ8 +
+                                 128u) >> 8);
+                    }
+                }
+            });
+
+        runResolveRows(
+            resolveJobCount,
+            [&](int firstRow, int lastRow)
+            {
+                for (int y = firstRow;
+                    y <= lastRow;
+                    ++y)
+                {
+                    const int topY =
+                        std::max(
+                            resolveMinY,
+                            y - 1);
+
+                    const int bottomY =
+                        std::min(
+                            resolveMaxY,
+                            y + 1);
+
+                    const std::size_t topRow =
+                        static_cast<std::size_t>(topY - resolveMinY) *
+                        static_cast<std::size_t>(resolveSpan);
+
+                    const std::size_t centerRow =
+                        static_cast<std::size_t>(y - resolveMinY) *
+                        static_cast<std::size_t>(resolveSpan);
+
+                    const std::size_t bottomRow =
+                        static_cast<std::size_t>(bottomY - resolveMinY) *
+                        static_cast<std::size_t>(resolveSpan);
+
+                    const std::size_t destinationRow =
+                        static_cast<std::size_t>(y) *
+                        static_cast<std::size_t>(resolveWidth);
+
+                    for (int x = resolveMinX;
+                        x <= resolveMaxX;
+                        ++x)
+                    {
+                        const std::size_t localX =
+                            static_cast<std::size_t>(
+                                x - resolveMinX);
+
+                        const std::uint32_t top =
+                            resolveHorizontal[
+                                topRow + localX];
+
+                        const std::uint32_t center =
+                            resolveHorizontal[
+                                centerRow + localX];
+
+                        const std::uint32_t bottom =
+                            resolveHorizontal[
+                                bottomRow + localX];
+
+                        currentPhosphorEnergy[
+                            destinationRow +
+                            static_cast<std::size_t>(x)] =
+                            static_cast<std::uint16_t>(
+                                (top * kSideQ8 +
+                                 center * kCenterQ8 +
+                                 bottom * kSideQ8 +
+                                 128u) >> 8);
+                    }
+                }
+            });
 
         phosphorMinX = resolveMinX;
         phosphorMaxX = resolveMaxX;
@@ -2221,6 +2314,13 @@ void WaveformRenderer::renderSingleLine(
                 probeRadius * probeRadius;
         }
 
+        const bool colorizeIllegalLuminance =
+            colorizeIllegalLuminance_.load(std::memory_order_acquire);
+        constexpr double kIllegalLowVolts = 0.298;
+        constexpr double kIllegalHighVolts = 1.020;
+        const AnalogVideoLevels legalAnalog =
+            analogLevels(VideoColorStandard::Rec601_625);
+
         for (int y = phosphorMinY;
             y <= phosphorMaxY;
             ++y)
@@ -2233,6 +2333,16 @@ void WaveformRenderer::renderSingleLine(
                 static_cast<std::size_t>(y) *
                 static_cast<std::size_t>(
                     phosphorWidth);
+
+            const double rowVolts =
+                (scope.bottom() - (static_cast<double>(y) + 0.5)) *
+                legalAnalog.graticuleMaxVolts /
+                (std::max)(scope.height(), 1.0);
+
+            const bool illegalLuminanceRow =
+                colorizeIllegalLuminance &&
+                (rowVolts < kIllegalLowVolts ||
+                 rowVolts > kIllegalHighVolts);
 
             for (int x = phosphorMinX;
                 x <= phosphorMaxX;
@@ -2288,17 +2398,33 @@ void WaveformRenderer::renderSingleLine(
                 const QRgb old =
                     destination[x];
 
-                destination[x] =
-                    qRgb(
-                        std::min(
-                            255,
-                            qRed(old) + value),
-                        std::min(
-                            255,
-                            qGreen(old) + value),
-                        std::min(
-                            255,
-                            qBlue(old) + value));
+                if (illegalLuminanceRow)
+                {
+                    // Legality colour is applied while resolving ScopePhor
+                    // energy to RGB, so both the current beam and retained
+                    // phosphor history stay red outside the legal Y range.
+                    destination[x] =
+                        qRgb(
+                            std::min(
+                                255,
+                                qRed(old) + value),
+                            0,
+                            0);
+                }
+                else
+                {
+                    destination[x] =
+                        qRgb(
+                            std::min(
+                                255,
+                                qRed(old) + value),
+                            std::min(
+                                255,
+                                qGreen(old) + value),
+                            std::min(
+                                255,
+                                qBlue(old) + value));
+                }
             }
         }
     }
@@ -2308,6 +2434,11 @@ void WaveformRenderer::renderSingleLine(
             phaseTimer.nsecsElapsed() / 1000);
     renderTimings_.persistenceUs +=
         phosphorComposeUs;
+
+    // Illegal luminance is colourized during ScopePhor RGB composition
+    // above.  Doing it there (rather than as a post-overlay) keeps retained
+    // phosphor history the same red as the live beam.
+
     recordPhase(
         'P',
         phosphorComposeStartUs,
@@ -2328,8 +2459,10 @@ void WaveformRenderer::renderSingleLine(
     renderTimings_.traceUs =
         renderTimings_.tracePrepUs +
         renderTimings_.traceRasterUs;
-    renderTimings_.traceParallel = false;
-    renderTimings_.traceJobCount = 1u;
+    renderTimings_.traceParallel =
+        catWuzleFrameStats.chunkCount > 1u;
+    renderTimings_.traceJobCount =
+        std::max<std::uint32_t>(1u, catWuzleFrameStats.chunkCount);
 
     const std::uint64_t overlayStartUs =
         static_cast<std::uint64_t>(
@@ -3300,11 +3433,15 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
      */
     const std::size_t segmentCount =
         polyline.size() - 1u;
+    const bool antiAliasingEnabled =
+        antiAliasing_.load(std::memory_order_acquire);
+
     std::vector<bool> segmentUsesFullAa(
         segmentCount,
-        true);
+        antiAliasingEnabled);
 
-    if (denseSteepSegment.size() == segmentCount)
+    if (antiAliasingEnabled &&
+        denseSteepSegment.size() == segmentCount)
     {
         for (std::size_t segment = 0u; segment < segmentCount; ++segment)
         {
@@ -3336,172 +3473,536 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         }
     }
 
-    for (std::size_t i = 1u;
-        i < polyline.size();
-        ++i)
+    /*
+     * COST-BALANCED CATWUZLE X-STRIPS
+     * --------------------------------
+     * Every chunk owns a disjoint target-X range. All Catmull segments that
+     * can affect that strip are evaluated there, so workers never write the
+     * same pixel. This keeps the accepted max/add semantics deterministic
+     * without private full-frame buffers or a zipper merge.
+     */
+    constexpr std::size_t kPreferredChunkCount = 8u;
+
+    std::vector<std::uint64_t> columnCost(
+        static_cast<std::size_t>(width),
+        1u);
+
+    activeMinX = width;
+    activeMinY = height;
+    activeMaxX = -1;
+    activeMaxY = -1;
+
+    for (std::size_t segment = 0u; segment < segmentCount; ++segment)
     {
-        const BeamPoint& first =
-            polyline[i - 1u];
+        const BeamPoint& first = polyline[segment];
+        const BeamPoint& second = polyline[segment + 1u];
+        const double dx = second.x - first.x;
+        const double dy = second.y - first.y;
 
-        const BeamPoint& second =
-            polyline[i];
-
-        const double segmentDx =
-            second.x -
-            first.x;
-
-        const double segmentDy =
-            second.y -
-            first.y;
-
-        const double segmentLengthSquared =
-            segmentDx * segmentDx +
-            segmentDy * segmentDy;
-
-        if (segmentLengthSquared <= 1.0e-18)
+        if (dx * dx + dy * dy <= 1.0e-18)
         {
             continue;
         }
 
-        const bool useFullAa =
-            segmentUsesFullAa[i - 1u];
+        int firstX = 0;
+        int lastX = -1;
+        int firstY = 0;
+        int lastY = -1;
+        std::uint64_t perColumnCost = 1u;
 
-        if (!useFullAa)
+        if (segmentUsesFullAa[segment])
         {
-            /*
-             * MUD dense packet: NO AA AT ALL.
-             *
-             * Keep the exact fitted CatWuzle/Catmull polyline geometry, but
-             * rasterise this segment directly as a plain one-pixel DDA trace.
-             * No 2x2 coverage, no crossing guard, no coverage shaping and no
-             * round-join AA.  This is deliberately the same raw-curve idea as
-             * the accepted W0 no-AA reference, only selected by the detector.
-             */
-            const double longestAxis =
-                std::max(std::abs(segmentDx), std::abs(segmentDy));
+            firstX = std::max(0, static_cast<int>(
+                std::floor(std::min(first.x, second.x) - aaRadius)));
+            lastX = std::min(width - 1, static_cast<int>(
+                std::ceil(std::max(first.x, second.x) + aaRadius)));
+            firstY = std::max(0, static_cast<int>(
+                std::floor(std::min(first.y, second.y) - aaRadius)));
+            lastY = std::min(height - 1, static_cast<int>(
+                std::ceil(std::max(first.y, second.y) + aaRadius)));
 
-            if (longestAxis <= 1.0e-12)
+            const std::uint64_t rows =
+                lastY >= firstY
+                    ? static_cast<std::uint64_t>(lastY - firstY + 1)
+                    : 1u;
+            perColumnCost = 4u * rows + 4u;
+        }
+        else
+        {
+            const double longestAxis = std::max(std::abs(dx), std::abs(dy));
+            const int steps = std::max(1, static_cast<int>(std::ceil(longestAxis)));
+            firstX = std::max(0, static_cast<int>(
+                std::floor(std::min(first.x, second.x))));
+            lastX = std::min(width - 1, static_cast<int>(
+                std::ceil(std::max(first.x, second.x))));
+            firstY = std::max(0, static_cast<int>(
+                std::floor(std::min(first.y, second.y))));
+            lastY = std::min(height - 1, static_cast<int>(
+                std::ceil(std::max(first.y, second.y))));
+
+            const int span = std::max(1, lastX - firstX + 1);
+            perColumnCost = std::max<std::uint64_t>(
+                1u,
+                (static_cast<std::uint64_t>(steps) + 1u) /
+                    static_cast<std::uint64_t>(span));
+        }
+
+        if (lastX < firstX || lastY < firstY)
+        {
+            continue;
+        }
+
+        activeMinX = std::min(activeMinX, firstX);
+        activeMaxX = std::max(activeMaxX, lastX);
+        activeMinY = std::min(activeMinY, firstY);
+        activeMaxY = std::max(activeMaxY, lastY);
+
+        for (int x = firstX; x <= lastX; ++x)
+        {
+            columnCost[static_cast<std::size_t>(x)] += perColumnCost;
+        }
+    }
+
+    std::size_t chunkCount = 1u;
+    if (traceJobExecutor_ &&
+        width >= 320)
+    {
+        /*
+         * Always create the R work queue when the executor exists.
+         *
+         * Helper availability is intentionally NOT sampled here.  W1/W2 may
+         * still be busy with N/D/C/S when raster starts, but they can become
+         * available while W0 is processing the same R generation.  If we
+         * collapse to one strip at raster start, there is no remaining queue
+         * for them to join later.
+         */
+        chunkCount = std::min<std::size_t>(
+            kPreferredChunkCount,
+            static_cast<std::size_t>(width));
+    }
+
+    struct CoreStrip
+    {
+        int firstX = 0;
+        int lastX = -1;
+    };
+
+    std::vector<CoreStrip> strips;
+    strips.reserve(chunkCount);
+
+    if (chunkCount == 1u)
+    {
+        strips.push_back({0, width - 1});
+    }
+    else
+    {
+        const std::uint64_t totalCost =
+            std::accumulate(columnCost.begin(), columnCost.end(), std::uint64_t{0});
+        std::uint64_t accumulated = 0u;
+        int stripFirstX = 0;
+
+        for (std::size_t strip = 0u; strip + 1u < chunkCount; ++strip)
+        {
+            const std::uint64_t target =
+                (totalCost * static_cast<std::uint64_t>(strip + 1u)) /
+                static_cast<std::uint64_t>(chunkCount);
+
+            int boundary = stripFirstX;
+            while (boundary < width - 1 && accumulated < target)
+            {
+                accumulated += columnCost[static_cast<std::size_t>(boundary)];
+                ++boundary;
+            }
+
+            const int remainingStrips =
+                static_cast<int>(chunkCount - strip - 1u);
+            boundary = std::clamp(
+                boundary,
+                stripFirstX + 1,
+                width - remainingStrips);
+
+            strips.push_back({stripFirstX, boundary - 1});
+            stripFirstX = boundary;
+        }
+
+        strips.push_back({stripFirstX, width - 1});
+    }
+
+    frameStats.chunkCount = static_cast<std::uint32_t>(strips.size());
+    renderTimings_.traceParallel = strips.size() > 1u;
+
+    const auto renderCoreStrip =
+        [&](int clipFirstX, int clipLastX)
+        {
+        for (std::size_t i = 1u;
+            i < polyline.size();
+            ++i)
+        {
+            const BeamPoint& first =
+                polyline[i - 1u];
+
+            const BeamPoint& second =
+                polyline[i];
+
+            const double segmentDx =
+                second.x -
+                first.x;
+
+            const double segmentDy =
+                second.y -
+                first.y;
+
+            const double segmentLengthSquared =
+                segmentDx * segmentDx +
+                segmentDy * segmentDy;
+
+            if (segmentLengthSquared <= 1.0e-18)
             {
                 continue;
             }
 
-            const std::uint16_t rawCoreEnergy =
-                static_cast<std::uint16_t>(
-                    std::clamp(
-                        static_cast<int>(
-                            std::lround(
-                                static_cast<double>(kCorePeakEnergy) *
-                                static_cast<double>(coreIntensity_) /
-                                100.0)),
-                        0,
-                        static_cast<int>(kCorePeakEnergy) * 4));
+            const bool useFullAa =
+                segmentUsesFullAa[i - 1u];
 
-            const int steps =
-                std::max(1, static_cast<int>(std::ceil(longestAxis)));
-
-            for (int step = 0; step <= steps; ++step)
+            if (!useFullAa)
             {
-                const double t =
-                    static_cast<double>(step) /
-                    static_cast<double>(steps);
+                /*
+                 * MUD dense packet: NO AA AT ALL.
+                 *
+                 * Keep the exact fitted CatWuzle/Catmull polyline geometry, but
+                 * rasterise this segment directly as a plain one-pixel DDA trace.
+                 * No 2x2 coverage, no crossing guard, no coverage shaping and no
+                 * round-join AA.  This is deliberately the same raw-curve idea as
+                 * the accepted W0 no-AA reference, only selected by the detector.
+                 */
+                const double longestAxis =
+                    std::max(std::abs(segmentDx), std::abs(segmentDy));
 
-                const int x =
-                    static_cast<int>(
-                        std::lround(first.x + segmentDx * t));
-                const int y =
-                    static_cast<int>(
-                        std::lround(first.y + segmentDy * t));
-
-                if (x < 0 || x >= width || y < 0 || y >= height)
+                if (longestAxis <= 1.0e-12)
                 {
                     continue;
                 }
 
-                activeMinX = std::min(activeMinX, x);
-                activeMaxX = std::max(activeMaxX, x);
-                activeMinY = std::min(activeMinY, y);
-                activeMaxY = std::max(activeMaxY, y);
+                const std::uint16_t rawCoreEnergy =
+                    static_cast<std::uint16_t>(
+                        std::clamp(
+                            static_cast<int>(
+                                std::lround(
+                                    static_cast<double>(kCorePeakEnergy) *
+                                    static_cast<double>(coreIntensity_) /
+                                    100.0)),
+                            0,
+                            static_cast<int>(kCorePeakEnergy) * 4));
 
-                maxCoreEnergy(x, y, rawCoreEnergy);
+                const int steps =
+                    std::max(1, static_cast<int>(std::ceil(longestAxis)));
+
+                for (int step = 0; step <= steps; ++step)
+                {
+                    const double t =
+                        static_cast<double>(step) /
+                        static_cast<double>(steps);
+
+                    const int x =
+                        static_cast<int>(
+                            std::lround(first.x + segmentDx * t));
+                    const int y =
+                        static_cast<int>(
+                            std::lround(first.y + segmentDy * t));
+
+                    if (x < 0 || x >= width || y < 0 || y >= height)
+                    {
+                        continue;
+                    }
+
+                    if (x < clipFirstX || x > clipLastX)
+                    {
+                        continue;
+                    }
+
+                    maxCoreEnergy(x, y, rawCoreEnergy);
+                }
+
+                continue;
             }
 
-            continue;
+            const int minX =
+                std::max(
+                    0,
+                    static_cast<int>(
+                        std::floor(
+                            std::min(first.x, second.x) -
+                            aaRadius)));
+
+            const int maxX =
+                std::min(
+                    width - 1,
+                    static_cast<int>(
+                        std::ceil(
+                            std::max(first.x, second.x) +
+                            aaRadius)));
+
+            const int minY =
+                std::max(
+                    0,
+                    static_cast<int>(
+                        std::floor(
+                            std::min(first.y, second.y) -
+                            aaRadius)));
+
+            const int maxY =
+                std::min(
+                    height - 1,
+                    static_cast<int>(
+                        std::ceil(
+                            std::max(first.y, second.y) +
+                            aaRadius)));
+
+            const int clippedMinX =
+                std::max(minX, clipFirstX);
+            const int clippedMaxX =
+                std::min(maxX, clipLastX);
+
+            if (clippedMaxX < clippedMinX)
+            {
+                continue;
+            }
+
+            for (int y = minY;
+                y <= maxY;
+                ++y)
+            {
+                const double py =
+                    static_cast<double>(y);
+
+                for (int x = clippedMinX;
+                    x <= clippedMaxX;
+                    ++x)
+                {
+                    const double px =
+                        static_cast<double>(x);
+
+                    double coverage = 0.0;
+
+                    {
+                        /*
+                         * Accepted CatWuzle 2x2 analytic area coverage.
+                         */
+                        const double maximumCoverage =
+                            coreHalfWidth + 0.5;
+
+                        for (int sampleY = 0;
+                            sampleY < kCoreCoverageSamples;
+                            ++sampleY)
+                        {
+                            const double subpixelY =
+                                py - 0.5 +
+                                (static_cast<double>(sampleY) + 0.5) /
+                                    static_cast<double>(kCoreCoverageSamples);
+
+                            for (int sampleX = 0;
+                                sampleX < kCoreCoverageSamples;
+                                ++sampleX)
+                            {
+                                const double subpixelX =
+                                    px - 0.5 +
+                                    (static_cast<double>(sampleX) + 0.5) /
+                                        static_cast<double>(kCoreCoverageSamples);
+
+                                const double pointDx = subpixelX - first.x;
+                                const double pointDy = subpixelY - first.y;
+                                const double projection = std::clamp(
+                                    (pointDx * segmentDx + pointDy * segmentDy) /
+                                        segmentLengthSquared,
+                                    0.0,
+                                    1.0);
+                                const double closestX = first.x + projection * segmentDx;
+                                const double closestY = first.y + projection * segmentDy;
+                                const double dx = subpixelX - closestX;
+                                const double dy = subpixelY - closestY;
+                                const double distance = std::hypot(dx, dy);
+
+                                coverage += std::clamp(
+                                    (maximumCoverage - distance) / maximumCoverage,
+                                    0.0,
+                                    1.0);
+                            }
+                        }
+
+                        coverage *= kCoreCoverageInv;
+
+                        /* Pixel-square crossing guard: unchanged on FULL AA. */
+                        {
+                            const double pixelMinX = px - 0.5;
+                            const double pixelMaxX = px + 0.5;
+                            const double pixelMinY = py - 0.5;
+                            const double pixelMaxY = py + 0.5;
+                            double enterT = 0.0;
+                            double exitT = 1.0;
+
+                            const auto clipAxis =
+                                [&enterT, &exitT](double origin,
+                                                 double delta,
+                                                 double minimum,
+                                                 double maximum) -> bool
+                                {
+                                    constexpr double kTiny = 1.0e-12;
+                                    if (std::abs(delta) <= kTiny)
+                                    {
+                                        return origin >= minimum && origin <= maximum;
+                                    }
+                                    double firstT = (minimum - origin) / delta;
+                                    double secondT = (maximum - origin) / delta;
+                                    if (firstT > secondT)
+                                    {
+                                        std::swap(firstT, secondT);
+                                    }
+                                    enterT = std::max(enterT, firstT);
+                                    exitT = std::min(exitT, secondT);
+                                    return enterT <= exitT;
+                                };
+
+                            const bool crossesPixel =
+                                clipAxis(first.x, segmentDx, pixelMinX, pixelMaxX) &&
+                                clipAxis(first.y, segmentDy, pixelMinY, pixelMaxY) &&
+                                exitT >= 0.0 && enterT <= 1.0;
+
+                            if (crossesPixel)
+                            {
+                                constexpr double kMinimumCrossingCoverage = 0.20;
+                                coverage = std::max(coverage, kMinimumCrossingCoverage);
+                            }
+                        }
+
+                        const double coverageLift = 1.16 + 0.12 * miniViewBlend;
+                        coverage = 1.0 - std::pow(1.0 - coverage, coverageLift);
+                    }
+
+                    if (coverage <= 0.0)
+                    {
+                        continue;
+                    }
+
+                    const std::uint16_t energy =
+                        static_cast<std::uint16_t>(
+                            std::clamp(
+                                static_cast<int>(
+                                    std::lround(
+                                        coverage *
+                                        static_cast<double>(
+                                            kCorePeakEnergy) *
+                                        static_cast<double>(
+                                            coreIntensity_) /
+                                        100.0)),
+                                0,
+                                static_cast<int>(
+                                    kCorePeakEnergy) * 4));
+
+                    maxCoreEnergy(
+                        x,
+                        y,
+                        energy);
+                }
+            }
         }
 
-        const int minX =
-            std::max(
-                0,
-                static_cast<int>(
-                    std::floor(
-                        std::min(first.x, second.x) -
-                        aaRadius)));
 
-        const int maxX =
-            std::min(
-                width - 1,
-                static_cast<int>(
-                    std::ceil(
-                        std::max(first.x, second.x) +
-                        aaRadius)));
-
-        const int minY =
-            std::max(
-                0,
-                static_cast<int>(
-                    std::floor(
-                        std::min(first.y, second.y) -
-                        aaRadius)));
-
-        const int maxY =
-            std::min(
-                height - 1,
-                static_cast<int>(
-                    std::ceil(
-                        std::max(first.y, second.y) +
-                        aaRadius)));
-
-        activeMinX =
-            std::min(
-                activeMinX,
-                minX);
-
-        activeMaxX =
-            std::max(
-                activeMaxX,
-                maxX);
-
-        activeMinY =
-            std::min(
-                activeMinY,
-                minY);
-
-        activeMaxY =
-            std::max(
-                activeMaxY,
-                maxY);
-
-        for (int y = minY;
-            y <= maxY;
-            ++y)
+        /*
+         * CATWUZLE ROUND-JOIN COVERAGE
+         * ----------------------------
+         *
+         * The 2x2 area coverage above is evaluated per segment and the final
+         * pixel energy is combined with max().  At an interior polyline vertex,
+         * subpixel samples can be split across the two neighbouring segments:
+         * neither segment alone sees the complete covered area, even though the
+         * union of both segments does.  That produces a stationary local notch
+         * (the visible "bite") at some joins.
+         *
+         * Rasterise the mathematically correct round join at every interior
+         * Catweazle vertex.  It uses exactly the same core radius, 2x2 area
+         * coverage, shaping and intensity as the segment core, and combines via
+         * max(), so it fills only missing join coverage without widening the
+         * normal stroke.
+         */
+        for (std::size_t i = 1u;
+            i + 1u < polyline.size();
+            ++i)
         {
-            const double py =
-                static_cast<double>(y);
-
-            for (int x = minX;
-                x <= maxX;
-                ++x)
+            // No round-join AA inside a dense hard-core packet.  The stitcher
+            // makes at least one side FULL at packet boundaries, so transitions
+            // still receive the accepted join treatment.
+            if (i - 1u < segmentUsesFullAa.size() &&
+                i < segmentUsesFullAa.size() &&
+                !segmentUsesFullAa[i - 1u] &&
+                !segmentUsesFullAa[i])
             {
-                const double px =
-                    static_cast<double>(x);
+                continue;
+            }
 
-                double coverage = 0.0;
+            const BeamPoint& vertex =
+                polyline[i];
 
+            const int minX =
+                std::max(
+                    0,
+                    static_cast<int>(
+                        std::floor(
+                            vertex.x -
+                            aaRadius)));
+
+            const int maxX =
+                std::min(
+                    width - 1,
+                    static_cast<int>(
+                        std::ceil(
+                            vertex.x +
+                            aaRadius)));
+
+            const int minY =
+                std::max(
+                    0,
+                    static_cast<int>(
+                        std::floor(
+                            vertex.y -
+                            aaRadius)));
+
+            const int maxY =
+                std::min(
+                    height - 1,
+                    static_cast<int>(
+                        std::ceil(
+                            vertex.y +
+                            aaRadius)));
+
+            const int clippedMinX =
+                std::max(minX, clipFirstX);
+            const int clippedMaxX =
+                std::min(maxX, clipLastX);
+
+            if (clippedMaxX < clippedMinX)
+            {
+                continue;
+            }
+
+            for (int y = minY;
+                y <= maxY;
+                ++y)
+            {
+                const double py =
+                    static_cast<double>(y);
+
+                for (int x = clippedMinX;
+                    x <= clippedMaxX;
+                    ++x)
                 {
-                    /*
-                     * Accepted CatWuzle 2x2 analytic area coverage.
-                     */
+                    const double px =
+                        static_cast<double>(x);
+
                     const double maximumCoverage =
-                        coreHalfWidth + 0.5;
+                        coreHalfWidth +
+                        0.5;
+
+                    double coverage = 0.0;
 
                     for (int sampleY = 0;
                         sampleY < kCoreCoverageSamples;
@@ -3521,270 +4022,123 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
                                 (static_cast<double>(sampleX) + 0.5) /
                                     static_cast<double>(kCoreCoverageSamples);
 
-                            const double pointDx = subpixelX - first.x;
-                            const double pointDy = subpixelY - first.y;
-                            const double projection = std::clamp(
-                                (pointDx * segmentDx + pointDy * segmentDy) /
-                                    segmentLengthSquared,
-                                0.0,
-                                1.0);
-                            const double closestX = first.x + projection * segmentDx;
-                            const double closestY = first.y + projection * segmentDy;
-                            const double dx = subpixelX - closestX;
-                            const double dy = subpixelY - closestY;
-                            const double distance = std::hypot(dx, dy);
+                            const double dx =
+                                subpixelX -
+                                vertex.x;
 
-                            coverage += std::clamp(
-                                (maximumCoverage - distance) / maximumCoverage,
-                                0.0,
-                                1.0);
+                            const double dy =
+                                subpixelY -
+                                vertex.y;
+
+                            const double distance =
+                                std::hypot(
+                                    dx,
+                                    dy);
+
+                            coverage +=
+                                std::clamp(
+                                    (maximumCoverage -
+                                        distance) /
+                                        maximumCoverage,
+                                    0.0,
+                                    1.0);
                         }
                     }
 
-                    coverage *= kCoreCoverageInv;
+                    coverage *=
+                        kCoreCoverageInv;
 
-                    /* Pixel-square crossing guard: unchanged on FULL AA. */
+                    const double coverageLift =
+                        1.16 +
+                        0.12 * miniViewBlend;
+
+                    coverage =
+                        1.0 -
+                        std::pow(
+                            1.0 - coverage,
+                            coverageLift);
+
+                    if (coverage <= 0.0)
                     {
-                        const double pixelMinX = px - 0.5;
-                        const double pixelMaxX = px + 0.5;
-                        const double pixelMinY = py - 0.5;
-                        const double pixelMaxY = py + 0.5;
-                        double enterT = 0.0;
-                        double exitT = 1.0;
-
-                        const auto clipAxis =
-                            [&enterT, &exitT](double origin,
-                                             double delta,
-                                             double minimum,
-                                             double maximum) -> bool
-                            {
-                                constexpr double kTiny = 1.0e-12;
-                                if (std::abs(delta) <= kTiny)
-                                {
-                                    return origin >= minimum && origin <= maximum;
-                                }
-                                double firstT = (minimum - origin) / delta;
-                                double secondT = (maximum - origin) / delta;
-                                if (firstT > secondT)
-                                {
-                                    std::swap(firstT, secondT);
-                                }
-                                enterT = std::max(enterT, firstT);
-                                exitT = std::min(exitT, secondT);
-                                return enterT <= exitT;
-                            };
-
-                        const bool crossesPixel =
-                            clipAxis(first.x, segmentDx, pixelMinX, pixelMaxX) &&
-                            clipAxis(first.y, segmentDy, pixelMinY, pixelMaxY) &&
-                            exitT >= 0.0 && enterT <= 1.0;
-
-                        if (crossesPixel)
-                        {
-                            constexpr double kMinimumCrossingCoverage = 0.20;
-                            coverage = std::max(coverage, kMinimumCrossingCoverage);
-                        }
+                        continue;
                     }
 
-                    const double coverageLift = 1.16 + 0.12 * miniViewBlend;
-                    coverage = 1.0 - std::pow(1.0 - coverage, coverageLift);
+                    const std::uint16_t energy =
+                        static_cast<std::uint16_t>(
+                            std::clamp(
+                                static_cast<int>(
+                                    std::lround(
+                                        coverage *
+                                        static_cast<double>(
+                                            kCorePeakEnergy) *
+                                        static_cast<double>(
+                                            coreIntensity_) /
+                                        100.0)),
+                                0,
+                                static_cast<int>(
+                                    kCorePeakEnergy) * 4));
+
+                    maxCoreEnergy(
+                        x,
+                        y,
+                        energy);
                 }
-
-                if (coverage <= 0.0)
-                {
-                    continue;
-                }
-
-                const std::uint16_t energy =
-                    static_cast<std::uint16_t>(
-                        std::clamp(
-                            static_cast<int>(
-                                std::lround(
-                                    coverage *
-                                    static_cast<double>(
-                                        kCorePeakEnergy) *
-                                    static_cast<double>(
-                                        coreIntensity_) /
-                                    100.0)),
-                            0,
-                            static_cast<int>(
-                                kCorePeakEnergy) * 4));
-
-                maxCoreEnergy(
-                    x,
-                    y,
-                    energy);
             }
         }
+
+        };
+
+    std::vector<std::uint64_t> chunkRenderUs(strips.size(), 0u);
+    std::vector<std::uint32_t> chunkWorker(strips.size(), 0u);
+
+    const auto renderChunk =
+        [&](std::size_t chunkIndex, std::uint32_t workerId)
+        {
+            if (chunkIndex >= strips.size())
+            {
+                return;
+            }
+
+            QElapsedTimer chunkTimer;
+            chunkTimer.start();
+
+            const CoreStrip& strip = strips[chunkIndex];
+            renderCoreStrip(strip.firstX, strip.lastX);
+
+            chunkRenderUs[chunkIndex] =
+                static_cast<std::uint64_t>(chunkTimer.nsecsElapsed() / 1000);
+            chunkWorker[chunkIndex] = workerId;
+        };
+
+    if (strips.size() > 1u && traceJobExecutor_)
+    {
+        traceJobExecutor_('R', strips.size(), renderChunk);
+    }
+    else
+    {
+        renderChunk(0u, 0u);
     }
 
-
-    /*
-     * CATWUZLE ROUND-JOIN COVERAGE
-     * ----------------------------
-     *
-     * The 2x2 area coverage above is evaluated per segment and the final
-     * pixel energy is combined with max().  At an interior polyline vertex,
-     * subpixel samples can be split across the two neighbouring segments:
-     * neither segment alone sees the complete covered area, even though the
-     * union of both segments does.  That produces a stationary local notch
-     * (the visible "bite") at some joins.
-     *
-     * Rasterise the mathematically correct round join at every interior
-     * Catweazle vertex.  It uses exactly the same core radius, 2x2 area
-     * coverage, shaping and intensity as the segment core, and combines via
-     * max(), so it fills only missing join coverage without widening the
-     * normal stroke.
-     */
-    for (std::size_t i = 1u;
-        i + 1u < polyline.size();
-        ++i)
+    if (!chunkRenderUs.empty())
     {
-        // No round-join AA inside a dense hard-core packet.  The stitcher
-        // makes at least one side FULL at packet boundaries, so transitions
-        // still receive the accepted join treatment.
-        if (i - 1u < segmentUsesFullAa.size() &&
-            i < segmentUsesFullAa.size() &&
-            !segmentUsesFullAa[i - 1u] &&
-            !segmentUsesFullAa[i])
+        const auto [minimumIt, maximumIt] =
+            std::minmax_element(chunkRenderUs.begin(), chunkRenderUs.end());
+        const std::uint64_t totalChunkUs =
+            std::accumulate(chunkRenderUs.begin(), chunkRenderUs.end(), std::uint64_t{0});
+
+        frameStats.chunkRenderMinUs = *minimumIt;
+        frameStats.chunkRenderMaxUs = *maximumIt;
+        frameStats.chunkRenderAvgUs =
+            totalChunkUs / static_cast<std::uint64_t>(chunkRenderUs.size());
+
+        for (std::size_t chunkIndex = 0u; chunkIndex < chunkRenderUs.size(); ++chunkIndex)
         {
-            continue;
-        }
-
-        const BeamPoint& vertex =
-            polyline[i];
-
-        const int minX =
-            std::max(
-                0,
-                static_cast<int>(
-                    std::floor(
-                        vertex.x -
-                        aaRadius)));
-
-        const int maxX =
-            std::min(
-                width - 1,
-                static_cast<int>(
-                    std::ceil(
-                        vertex.x +
-                        aaRadius)));
-
-        const int minY =
-            std::max(
-                0,
-                static_cast<int>(
-                    std::floor(
-                        vertex.y -
-                        aaRadius)));
-
-        const int maxY =
-            std::min(
-                height - 1,
-                static_cast<int>(
-                    std::ceil(
-                        vertex.y +
-                        aaRadius)));
-
-        for (int y = minY;
-            y <= maxY;
-            ++y)
-        {
-            const double py =
-                static_cast<double>(y);
-
-            for (int x = minX;
-                x <= maxX;
-                ++x)
-            {
-                const double px =
-                    static_cast<double>(x);
-
-                const double maximumCoverage =
-                    coreHalfWidth +
-                    0.5;
-
-                double coverage = 0.0;
-
-                for (int sampleY = 0;
-                    sampleY < kCoreCoverageSamples;
-                    ++sampleY)
-                {
-                    const double subpixelY =
-                        py - 0.5 +
-                        (static_cast<double>(sampleY) + 0.5) /
-                            static_cast<double>(kCoreCoverageSamples);
-
-                    for (int sampleX = 0;
-                        sampleX < kCoreCoverageSamples;
-                        ++sampleX)
-                    {
-                        const double subpixelX =
-                            px - 0.5 +
-                            (static_cast<double>(sampleX) + 0.5) /
-                                static_cast<double>(kCoreCoverageSamples);
-
-                        const double dx =
-                            subpixelX -
-                            vertex.x;
-
-                        const double dy =
-                            subpixelY -
-                            vertex.y;
-
-                        const double distance =
-                            std::hypot(
-                                dx,
-                                dy);
-
-                        coverage +=
-                            std::clamp(
-                                (maximumCoverage -
-                                    distance) /
-                                    maximumCoverage,
-                                0.0,
-                                1.0);
-                    }
-                }
-
-                coverage *=
-                    kCoreCoverageInv;
-
-                const double coverageLift =
-                    1.16 +
-                    0.12 * miniViewBlend;
-
-                coverage =
-                    1.0 -
-                    std::pow(
-                        1.0 - coverage,
-                        coverageLift);
-
-                if (coverage <= 0.0)
-                {
-                    continue;
-                }
-
-                const std::uint16_t energy =
-                    static_cast<std::uint16_t>(
-                        std::clamp(
-                            static_cast<int>(
-                                std::lround(
-                                    coverage *
-                                    static_cast<double>(
-                                        kCorePeakEnergy) *
-                                    static_cast<double>(
-                                        coreIntensity_) /
-                                    100.0)),
-                            0,
-                            static_cast<int>(
-                                kCorePeakEnergy) * 4));
-
-                maxCoreEnergy(
-                    x,
-                    y,
-                    energy);
-            }
+            const std::size_t workerIndex =
+                std::min<std::size_t>(
+                    static_cast<std::size_t>(chunkWorker[chunkIndex]),
+                    frameStats.workerChunkCount.size() - 1u);
+            ++frameStats.workerChunkCount[workerIndex];
+            frameStats.workerRenderUs[workerIndex] += chunkRenderUs[chunkIndex];
         }
     }
 
@@ -5182,6 +5536,23 @@ void WaveformRenderer::setCoreWidth(
             30);
 }
 
+
+
+void WaveformRenderer::setAntiAliasing(
+    bool enabled) noexcept
+{
+    antiAliasing_.store(
+        enabled,
+        std::memory_order_release);
+}
+
+void WaveformRenderer::setColorizeIllegalLuminance(
+    bool enabled) noexcept
+{
+    colorizeIllegalLuminance_.store(
+        enabled,
+        std::memory_order_release);
+}
 
 
 void WaveformRenderer::setGlow(

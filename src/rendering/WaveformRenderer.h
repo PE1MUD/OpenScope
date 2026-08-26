@@ -88,6 +88,8 @@ public:
     void setPersistence(int persistence);
     void setCoreIntensity(int intensity);
     void setCoreWidth(int widthTenths);
+    void setAntiAliasing(bool enabled) noexcept;
+    void setColorizeIllegalLuminance(bool enabled) noexcept;
     void setGlow(int glow);
     void setOutputSize(
         int width,
@@ -125,6 +127,7 @@ public:
         std::uint32_t)>;
 
     using TraceJobExecutor = std::function<void(
+        char,
         std::size_t,
         const TraceJob&)>;
 
@@ -295,6 +298,8 @@ private:
     int coreIntensity_ = 200;
     int coreWidthTenths_ = 10;
     int glow_ = 10;
+    std::atomic_bool antiAliasing_{true};
+    std::atomic_bool colorizeIllegalLuminance_{true};
     double beamCoreRadiusPx_ = 0.82;
     std::uint64_t catWuzleGeneration_ = 0;
     TraceRendererId traceRendererId_ = TraceRendererId::None;

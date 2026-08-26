@@ -47,6 +47,8 @@ public:
     bool isVideoMaximized() const;
 
     QPoint floatingSettingsPosition() const;
+    QSize floatingSettingsSize() const;
+    bool hasFloatingSettingsSize() const;
     bool hasFloatingSettingsPosition() const;
     void homeFloatingSettings(const QPoint& position);
 
@@ -72,6 +74,12 @@ signals:
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);
+    void antiAliasingChanged(bool enabled);
+    void colorizeIllegalLuminanceChanged(bool enabled);
+    void colorizeGamutErrorsChanged(bool enabled);
+    void lineSelectorVisibleChanged(bool enabled);
+    void safetyArea90Changed(bool enabled);
+    void textSafetyArea80Changed(bool enabled);
     void lumaCompensationChanged(bool enabled);
     void lumaCompensationGainChanged(int gainHundredthsDb);
 
@@ -111,6 +119,8 @@ private:
 
     QPoint settingsFloatingPosition_;
     bool settingsFloatingPositionValid_ = false;
+    QSize settingsFloatingSize_;
+    bool settingsFloatingSizeValid_ = false;
 
 private slots:
     void toggleMaximized(ScopeViewport* viewport);

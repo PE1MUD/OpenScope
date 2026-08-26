@@ -557,9 +557,9 @@ QRectF WaveformWidget::zoomNavigatorTrackRect(const QRectF& scope) const
      */
     return QRectF(
         scope.left(),
-        y - 12.0,
+        y - 22.0,
         (std::max)(1.0, scope.width()),
-        24.0);
+        44.0);
 }
 
 QRectF WaveformWidget::zoomNavigatorHandleRect(const QRectF& scope) const
@@ -588,9 +588,9 @@ QRectF WaveformWidget::zoomNavigatorHandleRect(const QRectF& scope) const
 
     return QRectF(
         handleLeft,
-        track.center().y() - 10.0,
+        track.center().y() - 20.0,
         handleWidth,
-        20.0);
+        40.0);
 }
 
 void WaveformWidget::updateScrollFromNavigator(double mouseX)

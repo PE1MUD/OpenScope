@@ -68,6 +68,32 @@ void VideoWidget::setAspectRatio(
     update();
 }
 
+void VideoWidget::setAntiAliasing(bool enabled)
+{
+    if (antiAliasing_ == enabled)
+    {
+        return;
+    }
+
+    antiAliasing_ = enabled;
+    update();
+}
+
+void VideoWidget::setSafetyAreas(
+    bool safetyArea90,
+    bool textSafetyArea80)
+{
+    if (safetyArea90_ == safetyArea90 &&
+        textSafetyArea80_ == textSafetyArea80)
+    {
+        return;
+    }
+
+    safetyArea90_ = safetyArea90;
+    textSafetyArea80_ = textSafetyArea80;
+    update();
+}
+
 const QImage& VideoWidget::image() const
 {
     return image_;
@@ -492,13 +518,57 @@ void VideoWidget::paintEvent(QPaintEvent* event)
     const int y =
         (height() - outputSize.height()) / 2;
 
+    painter.setRenderHint(
+        QPainter::SmoothPixmapTransform,
+        antiAliasing_);
+
+    const QRect imageRect(
+        x,
+        y,
+        outputSize.width(),
+        outputSize.height());
+
     painter.drawImage(
-        QRect(
-            x,
-            y,
-            outputSize.width(),
-            outputSize.height()),
+        imageRect,
         image_);
+
+    const auto drawSafetyFrame =
+        [&painter, &imageRect](double fraction)
+        {
+            const double w = imageRect.width() * fraction;
+            const double h = imageRect.height() * fraction;
+            const QRectF frame(
+                imageRect.center().x() - w * 0.5,
+                imageRect.center().y() - h * 0.5,
+                w,
+                h);
+
+            // Match the selected-line highlight: invert the displayed
+            // video under the 2 px guide instead of drawing a fixed
+            // white/grey overlay. With an opaque white source,
+            // Difference gives 255 - destination for every channel.
+            painter.save();
+            painter.setCompositionMode(
+                QPainter::CompositionMode_Difference);
+
+            QPen pen(Qt::white);
+            pen.setWidth(2);
+            pen.setCosmetic(true);
+            painter.setPen(pen);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(frame);
+            painter.restore();
+        };
+
+    if (safetyArea90_)
+    {
+        drawSafetyFrame(0.90);
+    }
+
+    if (textSafetyArea80_)
+    {
+        drawSafetyFrame(0.80);
+    }
 }
 
 

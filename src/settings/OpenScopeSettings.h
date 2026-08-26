@@ -38,6 +38,8 @@ struct OpenScopeSettings
                 double scrollPosition = 0.0;
 
                 bool vintageLook = false;
+                bool antiAliasing = true;
+                bool colorizeIllegalLuminance = true;
                 int chromaRenderIntensity = 150;
 
                 int persistenceFrames = 5;
@@ -48,6 +50,7 @@ struct OpenScopeSettings
             struct Vectorscope
             {
                 bool showHundredPercentTargets = true;
+                bool colorizeGamutErrors = true;
 
                 int persistenceFrames = 5;
                 int glow = 50;
@@ -109,6 +112,9 @@ struct OpenScopeSettings
                 AspectRatio::Ratio16x9;
 
             bool deinterlace = false;
+            bool lineSelectorVisible = true;
+            bool safetyArea90 = false;
+            bool textSafetyArea80 = false;
         };
 
         struct Window
@@ -133,7 +139,11 @@ struct OpenScopeSettings
             int x = 0;
             int y = 0;
 
+            int width = 0;
+            int height = 0;
+
             bool positionValid = false;
+            bool sizeValid = false;
         };
 
         struct Floaties

@@ -1,18 +1,16 @@
 #include "processing/LumaHighFrequencyCompensator.h"
+#include "util/CpuFeatures.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <vector>
 
 namespace
 {
     constexpr int kRadius = 8;
-    constexpr double kReferenceFrequencyHz = 5'800'000.0;
 
-    // 17-tap symmetric, unity-DC FIR.  The response is a gentle HF lift that
-    // approximates a linear-in-dB ramp from 0 dB at DC to +1 dB at 5.8 MHz
-    // at a 13.5 MHz luma sample rate.  Runtime scaling preserves unity DC.
     constexpr std::array<double, 17> kUnitCorrectionKernel =
     {
         -0.00043087478646947205,
@@ -34,7 +32,6 @@ namespace
         -0.00043087478646947205
     };
 
-    // Zero-phase amplitude of kUnitCorrectionKernel at 5.8 MHz.
     constexpr double kUnitEndpointAmplitude =
         1.1170782872165974;
 
@@ -53,12 +50,32 @@ void LumaHighFrequencyCompensator::process(
     Yuv444Frame& frame,
     int gainHundredthsDb)
 {
+    processRange(
+        frame,
+        gainHundredthsDb,
+        0,
+        frame.height);
+}
+
+void LumaHighFrequencyCompensator::processRange(
+    Yuv444Frame& frame,
+    int gainHundredthsDb,
+    int firstLine,
+    int lastLine)
+{
     if (gainHundredthsDb <= 0 ||
         frame.width <= 2 * kRadius ||
         frame.height <= 0 ||
         frame.y.size() <
             static_cast<std::size_t>(frame.width) *
             static_cast<std::size_t>(frame.height))
+    {
+        return;
+    }
+
+    firstLine = std::clamp(firstLine, 0, frame.height);
+    lastLine = std::clamp(lastLine, firstLine, frame.height);
+    if (firstLine >= lastLine)
     {
         return;
     }
@@ -71,10 +88,22 @@ void LumaHighFrequencyCompensator::process(
     const double scale =
         correctionScaleForDb(gainDb);
 
-    lineBuffer_.resize(
+    if (CpuFeatures::supportsAvx2Fma())
+    {
+        processAvx2Range(
+            frame,
+            scale,
+            firstLine,
+            lastLine);
+        return;
+    }
+
+    // Local row copy makes independent line ranges safe to execute in
+    // parallel on W0/W1/W2.  Every worker writes disjoint output rows.
+    std::vector<std::uint16_t> lineBuffer(
         static_cast<std::size_t>(frame.width));
 
-    for (int y = 0; y < frame.height; ++y)
+    for (int y = firstLine; y < lastLine; ++y)
     {
         const std::size_t lineOffset =
             static_cast<std::size_t>(y) *
@@ -83,37 +112,33 @@ void LumaHighFrequencyCompensator::process(
         std::copy_n(
             frame.y.data() + lineOffset,
             frame.width,
-            lineBuffer_.data());
+            lineBuffer.data());
 
-        // Deliberately leave the first/last kRadius samples untouched.
-        // The FIR is centred on x, so there is no added luma group delay and
-        // therefore no artificial chroma/luma delay to compensate in U/V.
         for (int x = kRadius;
              x < frame.width - kRadius;
              ++x)
         {
             double value =
                 static_cast<double>(
-                    lineBuffer_[static_cast<std::size_t>(x)]);
+                    lineBuffer[static_cast<std::size_t>(x)]);
 
             double correction =
                 (kUnitCorrectionKernel[kRadius] - 1.0) *
                 static_cast<double>(
-                    lineBuffer_[static_cast<std::size_t>(x)]);
+                    lineBuffer[static_cast<std::size_t>(x)]);
 
             for (int tap = 1; tap <= kRadius; ++tap)
             {
                 const double coefficient =
                     kUnitCorrectionKernel[
-                        static_cast<std::size_t>(
-                            kRadius - tap)];
+                        static_cast<std::size_t>(kRadius - tap)];
 
                 correction +=
                     coefficient *
                     (static_cast<double>(
-                        lineBuffer_[static_cast<std::size_t>(x - tap)]) +
+                        lineBuffer[static_cast<std::size_t>(x - tap)]) +
                      static_cast<double>(
-                        lineBuffer_[static_cast<std::size_t>(x + tap)]));
+                        lineBuffer[static_cast<std::size_t>(x + tap)]));
             }
 
             value += scale * correction;

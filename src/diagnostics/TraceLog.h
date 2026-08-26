@@ -12,7 +12,7 @@ inline void traceLog(
     std::uint64_t value1 = 0,
     TraceRendererId rendererId = TraceRendererId::None) noexcept
 {
-    if constexpr (OpenScopeBuild::kDebugBuild)
+    if constexpr (OpenScopeBuild::kTraceLoggingEnabled)
     {
         TraceLogger::instance().log(
             type,

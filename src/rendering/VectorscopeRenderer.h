@@ -9,6 +9,7 @@
 #include <QString>
 #include <cstdint>
 #include <QThread>
+#include <atomic>
 
 class QPainter;
 
@@ -61,6 +62,7 @@ public:
     void setSelectedLine(int line);
     void setPersistence(int persistence);
     void setGlow(int glow);
+    void setColorizeGamutErrors(bool enabled) noexcept;
     void setHorizontalWindow(int zoomFactor, double scrollPosition);
     void setPresentationInfo(const VectorscopePresentationInfo& info);
 
@@ -106,5 +108,6 @@ private:
     int selectedLine_ = -1;
     int horizontalZoomFactor_ = 1;
     double horizontalScrollPosition_ = 0.0;
+    std::atomic_bool colorizeGamutErrors_{true};
     VectorscopeRenderTimings renderTimings_;
 };

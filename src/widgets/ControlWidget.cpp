@@ -14,9 +14,12 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
+#include <QPolygonF>
 #include <QPaintEvent>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QStyle>
 #include <QStyleOptionSlider>
@@ -482,6 +485,30 @@ ControlWidget::ControlWidget(
     displayLayout->addWidget(
         noiseReductionRow);
 
+    auto* lineSelectorVisibleCheckBox =
+        new QCheckBox(
+            "Line Selector Visible",
+            displayTab);
+    lineSelectorVisibleCheckBox->setChecked(
+        settings.local.display.lineSelectorVisible);
+    displayLayout->addWidget(lineSelectorVisibleCheckBox);
+
+    auto* safetyArea90CheckBox =
+        new QCheckBox(
+            "Safety area 90%",
+            displayTab);
+    safetyArea90CheckBox->setChecked(
+        settings.local.display.safetyArea90);
+    displayLayout->addWidget(safetyArea90CheckBox);
+
+    auto* textSafetyArea80CheckBox =
+        new QCheckBox(
+            "Text safety area 80%",
+            displayTab);
+    textSafetyArea80CheckBox->setChecked(
+        settings.local.display.textSafetyArea80);
+    displayLayout->addWidget(textSafetyArea80CheckBox);
+
     displayLayout->addStretch();
 
     connect(
@@ -501,6 +528,13 @@ ControlWidget::ControlWidget(
         &QSlider::valueChanged,
         this,
         &ControlWidget::noiseReductionIntensityChanged);
+
+    connect(lineSelectorVisibleCheckBox, &QCheckBox::toggled,
+        this, &ControlWidget::lineSelectorVisibleChanged);
+    connect(safetyArea90CheckBox, &QCheckBox::toggled,
+        this, &ControlWidget::safetyArea90Changed);
+    connect(textSafetyArea80CheckBox, &QCheckBox::toggled,
+        this, &ControlWidget::textSafetyArea80Changed);
 
     tabs->addTab(
         displayTab,
@@ -525,7 +559,7 @@ ControlWidget::ControlWidget(
 
     auto* deckLinkHeading =
         new QLabel(
-            "Blackmagic composite input gain",
+            "Blackmagic Level Controls",
             calibrationTab);
 
     QFont headingFont =
@@ -546,7 +580,7 @@ ControlWidget::ControlWidget(
 
     QWidget* compositeLumaGainRow =
         createSliderRow(
-            "Composite luma gain",
+            "Luma gain",
             compositeLumaGainSlider_,
             0,
             0,
@@ -588,7 +622,7 @@ ControlWidget::ControlWidget(
 
     QWidget* compositeChromaGainRow =
         createSliderRow(
-            "Composite chroma gain",
+            "Chroma gain",
             compositeChromaGainSlider_,
             0,
             0,
@@ -733,10 +767,7 @@ ControlWidget::ControlWidget(
         this,
         &ControlWidget::lumaCompensationGainChanged);
 
-    tabs->addTab(
-        calibrationTab,
-        "Calibration");
-
+    // Calibration is inserted immediately before Help below.
 
     // ------------------------------------------------------------
     // Instrument
@@ -799,6 +830,86 @@ ControlWidget::ControlWidget(
 
     instrumentLayout->addWidget(
         lineRow);
+
+    auto* antiAliasingCheckBox =
+        new QCheckBox(
+            "Anti Aliasing",
+            instrumentTab);
+
+    antiAliasingCheckBox->setChecked(
+        settings.control
+            .instrument
+            .waveform
+            .antiAliasing);
+
+    instrumentLayout->addSpacing(
+        8);
+
+    instrumentLayout->addWidget(
+        antiAliasingCheckBox);
+
+    auto* vintageCheckBox =
+        new QCheckBox(
+            "Vintage Look",
+            instrumentTab);
+
+    vintageCheckBox->setChecked(
+        settings.control
+            .instrument
+            .waveform
+            .vintageLook);
+
+    instrumentLayout->addWidget(
+        vintageCheckBox);
+
+    auto* colorizeIllegalLuminanceCheckBox =
+        new QCheckBox(
+            "Colorize Illegal Luminance",
+            instrumentTab);
+
+    colorizeIllegalLuminanceCheckBox->setChecked(
+        settings.control
+            .instrument
+            .waveform
+            .colorizeIllegalLuminance);
+
+    instrumentLayout->addWidget(
+        colorizeIllegalLuminanceCheckBox);
+
+    auto* colorizeGamutErrorsCheckBox =
+        new QCheckBox(
+            "Colorize Gamut Errors",
+            instrumentTab);
+
+    colorizeGamutErrorsCheckBox->setChecked(
+        settings.control
+            .instrument
+            .vectorscope
+            .colorizeGamutErrors);
+
+    instrumentLayout->addWidget(
+        colorizeGamutErrorsCheckBox);
+
+    instrumentLayout->addSpacing(
+        8);
+
+    connect(
+        antiAliasingCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::antiAliasingChanged);
+
+    connect(
+        colorizeIllegalLuminanceCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::colorizeIllegalLuminanceChanged);
+
+    connect(
+        colorizeGamutErrorsCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::colorizeGamutErrorsChanged);
 
     auto* zoomRow =
         new QWidget(instrumentTab);
@@ -913,23 +1024,6 @@ ControlWidget::ControlWidget(
 
     zoomLayout->addWidget(
         waveformZoom10Button_);
-
-    zoomLayout->addSpacing(
-        32);
-
-    auto* vintageCheckBox =
-        new QCheckBox(
-            "Vintage look",
-            zoomRow);
-
-    vintageCheckBox->setChecked(
-        settings.control
-            .instrument
-            .waveform
-            .vintageLook);
-
-    zoomLayout->addWidget(
-        vintageCheckBox);
 
     zoomLayout->addStretch(
         1);
@@ -1150,7 +1244,10 @@ ControlWidget::ControlWidget(
          persistenceSlider,
          coreIntensitySlider,
          vectorscopeGlowSlider,
-         vintageCheckBox]()
+         vintageCheckBox,
+         antiAliasingCheckBox,
+         colorizeIllegalLuminanceCheckBox,
+         colorizeGamutErrorsCheckBox]()
         {
             constexpr int defaultValue = 50;
 
@@ -1168,6 +1265,15 @@ ControlWidget::ControlWidget(
 
             vintageCheckBox->setChecked(
                 false);
+
+            antiAliasingCheckBox->setChecked(
+                true);
+
+            colorizeIllegalLuminanceCheckBox->setChecked(
+                true);
+
+            colorizeGamutErrorsCheckBox->setChecked(
+                true);
         });
 
     tabs->addTab(
@@ -1417,6 +1523,10 @@ ControlWidget::ControlWidget(
         miscTab,
         "Misc");
 
+    tabs->addTab(
+        calibrationTab,
+        "Calibration");
+
     // ------------------------------------------------------------
     // Help - only shown while the workspace is in quad view.
     // ------------------------------------------------------------
@@ -1492,6 +1602,226 @@ Clears measurements and toggles the waveform viewport between quad and maximized
         tabs->addTab(
             helpTab,
             "Help");
+
+    // ------------------------------------------------------------
+    // About
+    // ------------------------------------------------------------
+    auto* aboutTab = new QWidget(tabs);
+    auto* aboutLayout = new QVBoxLayout(aboutTab);
+    aboutLayout->setContentsMargins(16, 16, 16, 16);
+    aboutLayout->setSpacing(12);
+
+    aboutLogoLabel_ = new QLabel(aboutTab);
+    QPixmap initialAboutLogo(
+        QStringLiteral(":/branding/OpenScopeAboutLogo.png"));
+    if (!initialAboutLogo.isNull())
+    {
+        aboutLogoLabel_->setPixmap(
+            initialAboutLogo.scaled(
+                128,
+                128,
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation));
+        aboutLogoLabel_->setFixedSize(128, 128);
+    }
+    aboutLogoLabel_->setAlignment(Qt::AlignTop | Qt::AlignRight);
+    aboutLogoLabel_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    aboutLayout->addWidget(
+        aboutLogoLabel_,
+        0,
+        Qt::AlignTop | Qt::AlignRight);
+
+    auto* aboutText = new QLabel(
+        QStringLiteral(
+            "OpenScope is a software waveform monitor, vectorscope and video toolbox. "
+            "It was created because nothing is available for free that provides proper "
+            "video monitoring and vectorscope functionality. Since it works on a BT.656 "
+            "digital representation of analog video, some restrictions apply. "
+            "There is no burst phase check, no 8fs indicator and no VITS line viewing."),
+        aboutTab);
+    aboutText->setWordWrap(true);
+    aboutText->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    aboutLayout->addWidget(aboutText);
+    aboutLayout->addStretch();
+
+    aboutTabIndex_ =
+        tabs->addTab(
+            aboutTab,
+            "About");
+
+    cornerLogoLabel_ = new QLabel(this);
+    cornerLogoLabel_->setAlignment(Qt::AlignCenter);
+    cornerLogoLabel_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    cornerLogoLabel_->hide();
+
+    connect(
+        tabs_,
+        &QTabWidget::currentChanged,
+        this,
+        [this](int)
+        {
+            updateBrandingLayout();
+        });
+
+    updateBrandingLayout();
+}
+
+void ControlWidget::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    updateBrandingLayout();
+}
+
+void ControlWidget::updateBrandingLayout()
+{
+    if (aboutLogoLabel_ != nullptr)
+    {
+        const int availableWidth = std::max(width() - 32, 0);
+        const int availableHeight = std::max(height() - 72, 0);
+
+        if (availableWidth < 360 || availableHeight < 180)
+        {
+            aboutLogoLabel_->hide();
+        }
+        else
+        {
+            const int target =
+                std::clamp(
+                    std::min(
+                        availableWidth / 4,
+                        availableHeight / 3),
+                    80,
+                    192);
+
+            QPixmap logoPixmap(
+                QStringLiteral(":/branding/OpenScopeAboutLogo.png"));
+
+            if (logoPixmap.isNull())
+            {
+                aboutLogoLabel_->hide();
+            }
+            else
+            {
+                aboutLogoLabel_->setFixedSize(target, target);
+                aboutLogoLabel_->setPixmap(
+                    logoPixmap.scaled(
+                        target,
+                        target,
+                        Qt::KeepAspectRatio,
+                        Qt::SmoothTransformation));
+                aboutLogoLabel_->show();
+            }
+        }
+    }
+
+    if (cornerLogoLabel_ == nullptr ||
+        tabs_ == nullptr)
+    {
+        return;
+    }
+
+    const int availableWidth = width();
+    const int availableHeight = height();
+    const bool enoughRoom =
+        availableWidth >= 620 &&
+        availableHeight >= 300;
+
+    // Reserve a real right-hand strip in every normal settings page.
+    // The logo therefore never floats on top of sliders, labels or buttons.
+    for (int index = 0;
+         index < tabs_->count();
+         ++index)
+    {
+        if (index == aboutTabIndex_)
+        {
+            continue;
+        }
+
+        QWidget* page =
+            tabs_->widget(index);
+
+        if (page == nullptr ||
+            page->layout() == nullptr)
+        {
+            continue;
+        }
+
+        QLayout* pageLayout =
+            page->layout();
+
+        if (!pageLayout->property(
+                "OpenScopeOriginalRightMargin").isValid())
+        {
+            pageLayout->setProperty(
+                "OpenScopeOriginalRightMargin",
+                pageLayout->contentsMargins().right());
+        }
+
+        const int originalRightMargin =
+            pageLayout->property(
+                "OpenScopeOriginalRightMargin").toInt();
+
+        const int reserveWidth =
+            enoughRoom
+                ? std::clamp(
+                      std::min(
+                          availableWidth / 7,
+                          availableHeight / 4),
+                      72,
+                      128) + 34
+                : originalRightMargin;
+
+        QMargins margins =
+            pageLayout->contentsMargins();
+
+        margins.setRight(
+            reserveWidth);
+
+        pageLayout->setContentsMargins(
+            margins);
+    }
+
+    if (tabs_->currentIndex() == aboutTabIndex_ ||
+        !enoughRoom)
+    {
+        cornerLogoLabel_->hide();
+        return;
+    }
+
+    const int target =
+        std::clamp(
+            std::min(
+                availableWidth / 7,
+                availableHeight / 4),
+            72,
+            128);
+
+    QPixmap logoPixmap(
+        QStringLiteral(":/branding/OpenScopeAboutLogo.png"));
+
+    if (logoPixmap.isNull())
+    {
+        cornerLogoLabel_->hide();
+        return;
+    }
+
+    cornerLogoLabel_->setFixedSize(
+        target,
+        target);
+
+    cornerLogoLabel_->setPixmap(
+        logoPixmap.scaled(
+            target,
+            target,
+            Qt::KeepAspectRatio,
+            Qt::SmoothTransformation));
+
+    cornerLogoLabel_->move(
+        availableWidth - target - 18,
+        48);
+
+    cornerLogoLabel_->show();
+    cornerLogoLabel_->raise();
 }
 
 void ControlWidget::setHelpTabVisible(

@@ -28,7 +28,7 @@ namespace
         { kBlackLevelVolts + 0.50 * kActiveRangeVolts, false, false },
         { kBlackLevelVolts + 0.80 * kActiveRangeVolts, false, false },
         { 1.0, true,  true  },
-        { 1.2, true,  false }
+        { 1.3, true,  false }
     }};
 }
 
@@ -170,7 +170,7 @@ void WaveformGraticule::draw(
         metrics.height();
 
     const double labelWidth =
-        metrics.horizontalAdvance("1.2");
+        metrics.horizontalAdvance("1.3");
 
     const double labelGap =
         metrics.horizontalAdvance(".");
@@ -289,6 +289,6 @@ double WaveformGraticule::leftInset(
         device);
 
     return
-        metrics.horizontalAdvance("1.2") +
+        metrics.horizontalAdvance("1.3") +
         metrics.horizontalAdvance(".");
 }

@@ -27,6 +27,9 @@ public:
     void setAspectRatio(
         OpenScopeSettings::AspectRatio aspectRatio);
 
+    void setAntiAliasing(bool enabled);
+    void setSafetyAreas(bool safetyArea90, bool textSafetyArea80);
+
 signals:
     void outputSizeChanged(
         int width,
@@ -108,4 +111,8 @@ private:
 
     OpenScopeSettings::AspectRatio aspectRatio_ =
         OpenScopeSettings::AspectRatio::Ratio16x9;
+
+    bool antiAliasing_ = true;
+    bool safetyArea90_ = false;
+    bool textSafetyArea80_ = false;
 };

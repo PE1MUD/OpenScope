@@ -11,6 +11,7 @@ class QSpinBox;
 class QTabWidget;
 class QSlider;
 class QLabel;
+class QResizeEvent;
 
 class ControlWidget : public QWidget
 {
@@ -44,6 +45,9 @@ public:
         int lumaHundredthsDb,
         int chromaHundredthsDb);
 
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+
 signals:
     void lineNumberChanged(int lineNumber);
     void waveformZoomChanged(int zoomFactor);
@@ -57,6 +61,12 @@ signals:
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);
+    void antiAliasingChanged(bool enabled);
+    void colorizeIllegalLuminanceChanged(bool enabled);
+    void colorizeGamutErrorsChanged(bool enabled);
+    void lineSelectorVisibleChanged(bool enabled);
+    void safetyArea90Changed(bool enabled);
+    void textSafetyArea80Changed(bool enabled);
     void lumaCompensationChanged(bool enabled);
     void lumaCompensationGainChanged(int gainHundredthsDb);
 
@@ -75,6 +85,8 @@ signals:
     void waveformRawCaptureRequested();
 
 private:
+    void updateBrandingLayout();
+
     QCheckBox* performanceCheckBox_ = nullptr;
     QCheckBox* legacyAspectRatioCheckBox_ = nullptr;
     QButtonGroup* waveformZoomButtonGroup_ = nullptr;
@@ -86,5 +98,8 @@ private:
     QSlider* compositeLumaGainSlider_ = nullptr;
     QSlider* compositeChromaGainSlider_ = nullptr;
     QLabel* compositeGainStatusLabel_ = nullptr;
+    QLabel* aboutLogoLabel_ = nullptr;
+    QLabel* cornerLogoLabel_ = nullptr;
     int helpTabIndex_ = -1;
+    int aboutTabIndex_ = -1;
 };

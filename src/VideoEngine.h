@@ -70,6 +70,9 @@ public:
     void setVideoHighlightEnabled(
         bool enabled);
 
+    void setVideoLineHighlightEnabled(
+        bool enabled);
+
     void resetDisplayPresentation();
 
     void setNoiseReductionEnabled(
@@ -111,6 +114,15 @@ public:
 
     void setWaveformCoreWidth(
         int widthTenths);
+
+    void setWaveformAntiAliasing(
+        bool enabled);
+
+    void setWaveformColorizeIllegalLuminance(
+        bool enabled);
+
+    void setVectorscopeColorizeGamutErrors(
+        bool enabled);
 
 
     void setVectorscopeGlow(
@@ -220,6 +232,21 @@ private:
     {
         std::atomic<std::uint64_t> generation{ 0 };
         std::atomic_bool writing{ false };
+        std::atomic<std::int64_t> captureTickNs{ 0 };
+        // Diagnostic time origin for this exact captured frame.  Capture
+        // identity and timeline zero are deliberately separate: the
+        // Performance floaty is a processing timeline, so 0 ms is when the
+        // display pipeline starts, not when the DeckLink callback arrived.
+        std::atomic<std::int64_t> diagnosticOriginNs{ 0 };
+        // Capture-side Y frequency-compensation (F) duration for the
+        // Performance wallclock.  Start is the frame diagnostic origin.
+        std::atomic<std::uint32_t> frequencyCompensationUs{ 0 };
+
+        // Per-worker F chunks for this exact captured frame.  These are
+        // seeded into the published waveform-assist timeline later so the
+        // Performance floaty can show F -> R -> X on W0/W1/W2 without a
+        // global-timeline race against the previous waveform frame.
+        std::array<WaveformAssistTimelineStats, 3> frequencyAssistTimeline;
 
         Yuv444Frame frame;
     };
@@ -272,6 +299,10 @@ private:
     };
 
     std::atomic<bool> videoHighlightEnabled_{
+        true
+    };
+
+    std::atomic<bool> videoLineHighlightEnabled_{
         true
     };
 
@@ -514,10 +545,16 @@ private:
     void runDisplayPhase(
         DisplayPhase phase);
     void runWaveformTraceJobs(
+        char phaseLabel,
         std::size_t jobCount,
         const std::function<void(
             std::size_t,
             std::uint32_t)>& job);
+    void runFrequencyCompensationJobs(
+        CapturedFrameSlot& slot,
+        int gainHundredthsDb);
+    bool tryRunFrequencyAssistJob(
+        std::uint32_t workerId);
     bool tryRunWaveformAssistJob(
         std::uint32_t workerId,
         bool enforceDisplayHoldoff);
@@ -593,6 +630,22 @@ private:
         std::atomic<std::uint64_t>,
         2> displayDeinterlaceWorkerUs_{};
 
+
+    // Capture-side F queue.  W0 is the capture thread; W1/W2 are the same
+    // display phase workers used later for R/X.  Display work from the
+    // previous frame still has priority; F waits for all its chunks before
+    // publishing the new capture slot.
+    std::mutex frequencyAssistMutex_;
+    std::condition_variable frequencyAssistDoneCondition_;
+    CapturedFrameSlot* frequencyAssistSlot_ = nullptr;
+    int frequencyAssistGainHundredthsDb_ = 0;
+    std::size_t frequencyAssistJobCount_ = 0;
+    std::size_t frequencyAssistNextJob_ = 0;
+    std::size_t frequencyAssistJobsRunning_ = 0;
+    bool frequencyAssistActive_ = false;
+    std::atomic_bool frequencyAssistWorkAvailable_{false};
+    std::atomic<std::uint64_t> frequencyAssistGeneration_{0};
+
     // Opportunistic low-priority work for the existing display phase worker.
     // The waveform thread also consumes these jobs itself.  Display phases
     // always take priority; helper work is checked only between small stripes.
@@ -605,9 +658,17 @@ private:
     std::size_t waveformAssistNextJob_ = 0;
     std::size_t waveformAssistJobsRunning_ = 0;
     bool waveformAssistActive_ = false;
+
+    // Fast wake predicate for display workers.  This remains true while the
+    // current R/X assist generation still has unclaimed jobs, even if a
+    // helper already observed that generation before being pre-empted by
+    // display work.
+    std::atomic_bool waveformAssistWorkAvailable_{false};
+    char waveformAssistPhaseLabel_ = '?';
     std::atomic<std::uint64_t> waveformAssistGeneration_{ 0 };
     std::atomic<std::uint64_t> waveformAssistCompletedGeneration_{ 0 };
     std::atomic<std::int64_t> waveformAssistCaptureTickNs_{ 0 };
+    std::atomic<std::int64_t> waveformAssistTimelineOriginNs_{ 0 };
     std::atomic<std::int64_t> waveformAssistCompletedCaptureTickNs_{ 0 };
 
     // Display workers may consume low-priority renderer chunks only while
@@ -621,6 +682,10 @@ private:
         std::atomic<std::uint64_t>,
         2> displayAssistWorkEstimateUs_{};
     std::atomic<std::int64_t> latestCaptureTickNs_{ 0 };
+    // Identity of the frame currently in the display pipeline and the common
+    // processing-time zero used by Field/worker diagnostic bars.
+    std::atomic<std::int64_t> displayTimelineCaptureNs_{ 0 };
+    std::atomic<std::int64_t> displayTimelineOriginNs_{ 0 };
 
     std::thread displayPresenterThread_;
     std::mutex displayPresenterMutex_;

@@ -13,6 +13,9 @@ public:
         QWidget* contentWidget,
         QWidget* parent = nullptr);
 
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+
     void focusContent();
 
 signals:

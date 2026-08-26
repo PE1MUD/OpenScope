@@ -47,6 +47,17 @@ ScopeViewport::ScopeViewport(
     }
 }
 
+
+QSize ScopeViewport::sizeHint() const
+{
+    return QSize(0, 0);
+}
+
+QSize ScopeViewport::minimumSizeHint() const
+{
+    return QSize(0, 0);
+}
+
 void ScopeViewport::focusContent()
 {
     if (contentWidget_ != nullptr)

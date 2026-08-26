@@ -30,6 +30,7 @@ namespace
         FieldTiming,
         Field1Ready,
         Field2Ready,
+        WaveformWorker,
         Worker0,
         Worker1,
         Normal
@@ -84,10 +85,6 @@ namespace
         }
 
         painter.save();
-        painter.setPen(QColor(235, 235, 235));
-
-        const int centerY =
-            barRect.center().y();
 
         for (std::uint32_t i = 0;
             i < timeline.count &&
@@ -95,6 +92,7 @@ namespace
             ++i)
         {
             const auto& event = timeline.events[i];
+            const char phase = static_cast<char>(event.phase);
             const int x0 = xForUs(
                 barRect,
                 static_cast<double>(event.startUs));
@@ -107,24 +105,47 @@ namespace
                 std::clamp(x0, barRect.left(), barRect.right());
             const int right =
                 std::clamp(std::max(x1, x0 + 1),
-                    barRect.left(),
-                    barRect.right());
+                    barRect.left(), barRect.right());
 
-            painter.drawLine(
+            const QRect chunkRect(
                 left,
                 barRect.top() + 2,
-                left,
-                barRect.bottom() - 2);
-            painter.drawLine(
-                right,
-                barRect.top() + 2,
-                right,
-                barRect.bottom() - 2);
+                std::max(right - left, 1),
+                std::max(barRect.height() - 4, 1));
 
-            const int midX =
-                left + (right - left) / 2;
-            painter.drawPoint(midX, centerY);
-            painter.drawPoint(midX + 1, centerY);
+            const QColor fill =
+                phase == 'R'
+                ? QColor(220, 220, 220)
+                : phase == 'X'
+                    ? QColor(205, 190, 230)
+                    : QColor(235, 235, 235);
+
+            painter.fillRect(chunkRect, fill);
+            painter.setPen(QColor(45, 45, 45));
+            painter.drawRect(chunkRect.adjusted(0, 0, -1, -1));
+
+            if (chunkRect.width() >= 15)
+            {
+                painter.setPen(Qt::black);
+                painter.drawText(
+                    chunkRect,
+                    Qt::AlignCenter,
+                    QStringLiteral("%1 %2")
+                        .arg(QChar::fromLatin1(phase))
+                        .arg(
+                            static_cast<double>(event.durationUs) / 1000.0,
+                            0,
+                            'f',
+                            1));
+            }
+            else if (chunkRect.width() >= 7)
+            {
+                painter.setPen(Qt::black);
+                painter.drawText(
+                    chunkRect,
+                    Qt::AlignCenter,
+                    QString(QChar::fromLatin1(phase)));
+            }
         }
 
         painter.restore();
@@ -361,6 +382,65 @@ namespace
         }
     }
 
+
+    const char* displayPhaseText(char phase)
+    {
+        switch (phase)
+        {
+        case 'F': return "F";
+        case 'N': return "N";
+        case 'D': return "D";
+        case '1': return "C1";
+        case 'A': return "S1";
+        case '2': return "C2";
+        case 'B': return "S2";
+        default: return "?";
+        }
+    }
+
+    QColor displayPhaseColor(char phase)
+    {
+        switch (phase)
+        {
+        case 'F': return QColor(235, 215, 180);
+        case 'N': return QColor(185, 225, 205);
+        case 'D': return QColor(185, 215, 235);
+        case '1': return QColor(215, 200, 235);
+        case 'A': return QColor(205, 225, 185);
+        case '2': return QColor(205, 190, 230);
+        case 'B': return QColor(190, 215, 170);
+        default: return QColor(205, 205, 205);
+        }
+    }
+
+    void drawDisplayTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const DisplayPhaseTimelineSnapshot& timeline,
+        bool includeSecondField)
+    {
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < DisplayPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase = static_cast<char>(event.phase);
+            if (!includeSecondField && (phase == '2' || phase == 'B'))
+            {
+                continue;
+            }
+
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                displayPhaseColor(phase),
+                displayPhaseText(phase));
+        }
+    }
+
     double nonNegativeRemainder(
         double readyUs,
         double knownUs)
@@ -401,6 +481,11 @@ auto makeBars(
             "Display worker 2",
             nullptr,
             BarType::Worker1 },
+
+        Bar{
+            "Waveform worker W0",
+            nullptr,
+            BarType::WaveformWorker },
 
         Bar{
             "PC video",
@@ -613,6 +698,36 @@ QString makePinnedDetailText(
     switch (bar.detail)
     {
     case DetailKind::WaveformScreen:
+    {
+        std::array<std::uint32_t, 3> publishedRasterJobs{};
+        std::array<double, 3> publishedRasterMs{};
+
+        const std::array<const WaveformAssistTimelineSnapshot*, 3> assistTimelines =
+        {
+            &snapshot.waveformWorkerAssist,
+            &snapshot.displayWorker0Assist,
+            &snapshot.displayWorker1Assist
+        };
+
+        for (std::size_t workerId = 0; workerId < assistTimelines.size(); ++workerId)
+        {
+            const auto& timeline = *assistTimelines[workerId];
+            for (std::uint32_t i = 0;
+                i < timeline.count && i < WaveformAssistTimelineSnapshot::kCapacity;
+                ++i)
+            {
+                const auto& event = timeline.events[i];
+                if (static_cast<char>(event.phase) != 'R')
+                {
+                    continue;
+                }
+
+                ++publishedRasterJobs[workerId];
+                publishedRasterMs[workerId] +=
+                    static_cast<double>(event.durationUs) / 1000.0;
+            }
+        }
+
         return makeWaveformDetails(
             snapshot.waveformScreenPersistence,
             snapshot.waveformScreenTrace,
@@ -669,24 +784,19 @@ QString makePinnedDetailText(
                     0,
                     'f',
                     2)
-                .arg(snapshot.waveformScreenCatWuzleWorkerChunkCount[0])
-                .arg(snapshot.waveformScreenCatWuzleWorkerChunkCount[1])
-                .arg(snapshot.waveformScreenCatWuzleWorkerChunkCount[2])
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleWorkerRenderUs[0]) / 1000.0,
-                    0, 'f', 2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleWorkerRenderUs[1]) / 1000.0,
-                    0, 'f', 2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleWorkerRenderUs[2]) / 1000.0,
-                    0, 'f', 2)
+                .arg(publishedRasterJobs[0])
+                .arg(publishedRasterJobs[1])
+                .arg(publishedRasterJobs[2])
+                .arg(publishedRasterMs[0], 0, 'f', 2)
+                .arg(publishedRasterMs[1], 0, 'f', 2)
+                .arg(publishedRasterMs[2], 0, 'f', 2)
                 .arg(
                     static_cast<double>(snapshot.waveformScreenAssistTotalUs) / 1000.0,
                     0, 'f', 2)
                 .arg(
                     static_cast<double>(snapshot.waveformScreenAssistFinalWaitUs) / 1000.0,
                     0, 'f', 2);
+    }
 
     case DetailKind::WaveformVideo:
         return makeWaveformDetails(
@@ -932,6 +1042,7 @@ void PerformanceWidget::paintEvent(
                 kField2DeadlineUs);
             break;
 
+        case BarType::WaveformWorker:
         case BarType::Worker0:
         case BarType::Worker1:
             painter.fillRect(
@@ -968,114 +1079,23 @@ void PerformanceWidget::paintEvent(
         else if (bar.type == BarType::Field1Ready ||
             bar.type == BarType::Field2Ready)
         {
-            const double noiseUs =
-                static_cast<double>(
-                    snapshot_.noiseReduction.latestUs);
-
-            const double deinterlaceUs =
-                static_cast<double>(
-                    snapshot_.deinterlace.latestUs);
-
-            const double firstConvertUs =
-                static_cast<double>(
-                    snapshot_.displayFirst.latestUs);
-
-            const double secondConvertUs =
-                bar.type == BarType::Field2Ready
-                ? static_cast<double>(
-                    snapshot_.displaySecond.latestUs)
-                : 0.0;
-
-            const double convertUs =
-                firstConvertUs +
-                secondConvertUs;
-
-            const double firstSpoutUs =
-                static_cast<double>(
-                    snapshot_.spoutConvertFirst.latestUs);
-
-            const double secondSpoutUs =
-                bar.type == BarType::Field2Ready
-                ? static_cast<double>(
-                    snapshot_.spoutConvertSecond.latestUs)
-                : 0.0;
-
-            const double spoutUs =
-                firstSpoutUs +
-                secondSpoutUs;
-
-            const double readyUs =
-                static_cast<double>(
-                    bar.metric->latestUs);
-
-            const double knownUs =
-                noiseUs +
-                deinterlaceUs +
-                convertUs +
-                spoutUs;
-
-            const double overheadUs =
-                nonNegativeRemainder(
-                    readyUs,
-                    knownUs);
-
-            double startUs = 0.0;
-
-            drawSegment(
+            // Draw the actual wall-clock display pipeline phases at their real
+            // capture-relative timestamps. Do not reconstruct N/D/C/S by
+            // stacking aggregate durations: assist/pre-emption can insert real
+            // gaps and used to make this bar diverge from the worker rows.
+            drawDisplayTimeline(
                 painter,
                 barRect,
-                startUs,
-                noiseUs,
-                QColor(185, 225, 205),
-                "N");
-
-            startUs +=
-                noiseUs;
-
-            drawSegment(
+                snapshot_.displayFieldPhases,
+                bar.type == BarType::Field2Ready);
+        }
+        else if (bar.type == BarType::WaveformWorker)
+        {
+            drawAssistChunkMarkers(
                 painter,
                 barRect,
-                startUs,
-                deinterlaceUs,
-                QColor(185, 215, 235),
-                "D");
-
-            startUs +=
-                deinterlaceUs;
-
-            drawSegment(
-                painter,
-                barRect,
-                startUs,
-                convertUs,
-                QColor(215, 200, 235),
-                bar.type == BarType::Field1Ready
-                    ? "C1"
-                    : "C1+C2");
-
-            startUs +=
-                convertUs;
-
-            drawSegment(
-                painter,
-                barRect,
-                startUs,
-                spoutUs,
-                QColor(205, 225, 185),
-                bar.type == BarType::Field1Ready
-                    ? "S1"
-                    : "S1+S2");
-
-            startUs +=
-                spoutUs;
-
-            drawSegment(
-                painter,
-                barRect,
-                startUs,
-                overheadUs,
-                QColor(205, 205, 205),
-                "O");
+                snapshot_.waveformWorkerAssist,
+                snapshot_.waveformScreenPhases.generation);
         }
         else if (bar.type == BarType::Worker0 ||
             bar.type == BarType::Worker1)
@@ -1083,58 +1103,40 @@ void PerformanceWidget::paintEvent(
             const bool firstWorker =
                 bar.type == BarType::Worker0;
 
-            const double noiseUs = static_cast<double>(
-                firstWorker
-                    ? snapshot_.displayWorker0Noise.latestUs
-                    : snapshot_.displayWorker1Noise.latestUs);
-            const double deinterlaceUs = static_cast<double>(
-                firstWorker
-                    ? snapshot_.displayWorker0Deinterlace.latestUs
-                    : snapshot_.displayWorker1Deinterlace.latestUs);
-            const double convert1Us = static_cast<double>(
-                firstWorker
-                    ? snapshot_.displayWorker0Convert1.latestUs
-                    : snapshot_.displayWorker1Convert1.latestUs);
-            const double spout1Us = static_cast<double>(
-                firstWorker
-                    ? snapshot_.displayWorker0Spout1.latestUs
-                    : snapshot_.displayWorker1Spout1.latestUs);
-            const double convert2Us = static_cast<double>(
-                firstWorker
-                    ? snapshot_.displayWorker0Convert2.latestUs
-                    : snapshot_.displayWorker1Convert2.latestUs);
-            const double spout2Us = static_cast<double>(
-                firstWorker
-                    ? snapshot_.displayWorker0Spout2.latestUs
-                    : snapshot_.displayWorker1Spout2.latestUs);
-
-            double startUs = 0.0;
-
-            drawSegment(painter, barRect, startUs, noiseUs,
-                QColor(185, 225, 205), "N");
-            startUs += noiseUs;
-            drawSegment(painter, barRect, startUs, deinterlaceUs,
-                QColor(185, 215, 235), "D");
-            startUs += deinterlaceUs;
-            drawSegment(painter, barRect, startUs, convert1Us,
-                QColor(215, 200, 235), "C1");
-            startUs += convert1Us;
-            drawSegment(painter, barRect, startUs, spout1Us,
-                QColor(205, 225, 185), "S1");
-            startUs += spout1Us;
-            drawSegment(painter, barRect, startUs, convert2Us,
-                QColor(205, 190, 230), "C2");
-            startUs += convert2Us;
-            drawSegment(painter, barRect, startUs, spout2Us,
-                QColor(190, 215, 170), "S2");
-
-            drawAssistChunkMarkers(
+            // Same capture-relative timestamps as the Field 1/2 rows above.
+            // This restores the original 1:1 vertical correspondence between
+            // field phases and the workers that actually executed them.
+            drawDisplayTimeline(
                 painter,
                 barRect,
                 firstWorker
-                    ? snapshot_.displayWorker0Assist
-                    : snapshot_.displayWorker1Assist,
-                snapshot_.waveformScreenPhases.generation);
+                    ? snapshot_.displayWorker0Phases
+                    : snapshot_.displayWorker1Phases,
+                true);
+
+            // Only overlay R/X assist chunks when they belong to the exact
+            // same captured frame as this worker's N/D/C/S timeline.  Mixing
+            // independently published generations makes impossible overlaps
+            // (e.g. R apparently running through C1 on one physical thread).
+            const auto& displayTimeline =
+                firstWorker
+                    ? snapshot_.displayWorker0Phases
+                    : snapshot_.displayWorker1Phases;
+            const bool sameCapturedFrame =
+                displayTimeline.generation != 0 &&
+                snapshot_.waveformScreenPhases.generation ==
+                    displayTimeline.generation;
+
+            if (sameCapturedFrame)
+            {
+                drawAssistChunkMarkers(
+                    painter,
+                    barRect,
+                    firstWorker
+                        ? snapshot_.displayWorker0Assist
+                        : snapshot_.displayWorker1Assist,
+                    displayTimeline.generation);
+            }
         }
         else if (bar.detail == DetailKind::WaveformScreen)
         {
@@ -1147,6 +1149,11 @@ void PerformanceWidget::paintEvent(
                 {
                     switch (label)
                     {
+                    case 'F': return QColor(235, 215, 180);
+                    case 'U': return QColor(185, 215, 235);
+                    case 'V': return QColor(225, 205, 235);
+                    case 'M': return QColor(235, 225, 185);
+                    case 'E': return QColor(205, 235, 225);
                     case 'T': return QColor(205, 215, 235);
                     case 'R': return QColor(220, 220, 220);
                     case 'Z': return QColor(205, 190, 230);
@@ -1856,6 +1863,55 @@ void PerformanceWidget::mouseMoveEvent(
                 'f',
                 2);
     }
+    else if (bar.type == BarType::WaveformWorker)
+    {
+        const auto& timeline = snapshot_.waveformWorkerAssist;
+        double frequencyMs = 0.0;
+        double rasterMs = 0.0;
+        double resolveMs = 0.0;
+        std::uint32_t frequencyJobs = 0;
+        std::uint32_t rasterJobs = 0;
+        std::uint32_t resolveJobs = 0;
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase = static_cast<char>(event.phase);
+            if (phase == 'F')
+            {
+                frequencyMs += static_cast<double>(event.durationUs) / 1000.0;
+                ++frequencyJobs;
+            }
+            else if (phase == 'R')
+            {
+                rasterMs += static_cast<double>(event.durationUs) / 1000.0;
+                ++rasterJobs;
+            }
+            else if (phase == 'X')
+            {
+                resolveMs += static_cast<double>(event.durationUs) / 1000.0;
+                ++resolveJobs;
+            }
+        }
+
+        valueText =
+            QString(
+                "Waveform worker W0\n"
+                "F frequency comp: %1 ms  (%2 jobs)\n"
+                "R raster: %3 ms  (%4 jobs)\n"
+                "X resolve: %5 ms  (%6 jobs)\n"
+                "Total assist work: %7 ms")
+            .arg(frequencyMs, 0, 'f', 2)
+            .arg(frequencyJobs)
+            .arg(rasterMs, 0, 'f', 2)
+            .arg(rasterJobs)
+            .arg(resolveMs, 0, 'f', 2)
+            .arg(resolveJobs)
+            .arg(frequencyMs + rasterMs + resolveMs, 0, 'f', 2);
+    }
     else if (bar.type == BarType::Worker0 ||
         bar.type == BarType::Worker1)
     {
@@ -1878,6 +1934,36 @@ void PerformanceWidget::mouseMoveEvent(
                 ? snapshot_.displayWorker0Assist
                 : snapshot_.displayWorker1Assist;
 
+        double frequencyAssistMs = 0.0;
+        double rasterAssistMs = 0.0;
+        double resolveAssistMs = 0.0;
+        std::uint32_t frequencyAssistJobs = 0;
+        std::uint32_t rasterAssistJobs = 0;
+        std::uint32_t resolveAssistJobs = 0;
+        for (std::uint32_t i = 0;
+            i < assistTimeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = assistTimeline.events[i];
+            const char phase = static_cast<char>(event.phase);
+            if (phase == 'F')
+            {
+                frequencyAssistMs += static_cast<double>(event.durationUs) / 1000.0;
+                ++frequencyAssistJobs;
+            }
+            else if (phase == 'R')
+            {
+                rasterAssistMs += static_cast<double>(event.durationUs) / 1000.0;
+                ++rasterAssistJobs;
+            }
+            else if (phase == 'X')
+            {
+                resolveAssistMs += static_cast<double>(event.durationUs) / 1000.0;
+                ++resolveAssistJobs;
+            }
+        }
+
         valueText =
             QString(
                 "Display worker %1: %2ms\n"
@@ -1887,7 +1973,10 @@ void PerformanceWidget::mouseMoveEvent(
                 "S1  Field 1 Spout RGB: %6ms\n"
                 "C2  Field 2 RGB: %7ms\n"
                 "S2  Field 2 Spout RGB: %8ms\n"
-                "Chunks: %9")
+                "Assist F: %9 ms (%10 jobs)\n"
+                "Assist R: %11 ms (%12 jobs)\n"
+                "Assist X: %13 ms (%14 jobs)\n"
+                "Assist total: %15 ms")
             .arg(firstWorker ? 1 : 2)
             .arg(totalMs, 0, 'f', 2)
             .arg(n.latestMs(), 0, 'f', 2)
@@ -1896,7 +1985,13 @@ void PerformanceWidget::mouseMoveEvent(
             .arg(s1.latestMs(), 0, 'f', 2)
             .arg(c2.latestMs(), 0, 'f', 2)
             .arg(s2.latestMs(), 0, 'f', 2)
-            .arg(assistTimeline.count);
+            .arg(frequencyAssistMs, 0, 'f', 2)
+            .arg(frequencyAssistJobs)
+            .arg(rasterAssistMs, 0, 'f', 2)
+            .arg(rasterAssistJobs)
+            .arg(resolveAssistMs, 0, 'f', 2)
+            .arg(resolveAssistJobs)
+            .arg(frequencyAssistMs + rasterAssistMs + resolveAssistMs, 0, 'f', 2);
     }
     else
     {

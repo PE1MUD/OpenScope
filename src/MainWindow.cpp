@@ -13,6 +13,7 @@
 #include "standards/VideoStandard.h"
 #include "output/SpoutOutput.h"
 #include "sources/philips/PhilipsPatternRomSource.h"
+#include "diagnostics/TraceLog.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -155,6 +156,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     const OpenScopeSettings& initialSettings =
         settingsService_->settings();
+
+    videoWidget_->setSafetyAreas(
+        initialSettings.local.display.safetyArea90,
+        initialSettings.local.display.textSafetyArea80);
+    videoEngine_->setVideoLineHighlightEnabled(
+        initialSettings.local.display.lineSelectorVisible);
 
     pendingLineNumber_ =
         initialSettings.control
@@ -1242,6 +1249,24 @@ MainWindow::MainWindow(QWidget* parent)
             .waveform
             .vintageLook);
 
+    videoEngine_->setWaveformAntiAliasing(
+        initialSettings.control
+            .instrument
+            .waveform
+            .antiAliasing);
+
+    videoEngine_->setWaveformColorizeIllegalLuminance(
+        initialSettings.control
+            .instrument
+            .waveform
+            .colorizeIllegalLuminance);
+
+    videoEngine_->setVectorscopeColorizeGamutErrors(
+        initialSettings.control
+            .instrument
+            .vectorscope
+            .colorizeGamutErrors);
+
     videoEngine_->setWaveformChromaFillIntensity(
         initialSettings.control
             .instrument
@@ -1524,6 +1549,108 @@ MainWindow::MainWindow(QWidget* parent)
 
             videoEngine_->setWaveformColor(
                 colorEnabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::antiAliasingChanged,
+        this,
+        [this](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.control
+                        .instrument
+                        .waveform
+                        .antiAliasing = enabled;
+                });
+
+            videoEngine_->setWaveformAntiAliasing(enabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::colorizeIllegalLuminanceChanged,
+        this,
+        [this](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.control.instrument.waveform.colorizeIllegalLuminance = enabled;
+                });
+
+            videoEngine_->setWaveformColorizeIllegalLuminance(enabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::colorizeGamutErrorsChanged,
+        this,
+        [this](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.control.instrument.vectorscope.colorizeGamutErrors = enabled;
+                });
+
+            videoEngine_->setVectorscopeColorizeGamutErrors(enabled);
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::lineSelectorVisibleChanged,
+        this,
+        [this](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local.display.lineSelectorVisible = enabled;
+                });
+
+            videoEngine_->setVideoLineHighlightEnabled(
+                enabled);
+        });
+
+    const auto updateSafetyAreas =
+        [this]()
+        {
+            const auto& display =
+                settingsService_->settings().local.display;
+            videoWidget_->setSafetyAreas(
+                display.safetyArea90,
+                display.textSafetyArea80);
+        };
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::safetyArea90Changed,
+        this,
+        [this, updateSafetyAreas](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local.display.safetyArea90 = enabled;
+                });
+            updateSafetyAreas();
+        });
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::textSafetyArea80Changed,
+        this,
+        [this, updateSafetyAreas](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local.display.textSafetyArea80 = enabled;
+                });
+            updateSafetyAreas();
         });
 
     connect(
@@ -2807,6 +2934,18 @@ bool MainWindow::nativeEvent(
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
+    if (event != nullptr)
+    {
+        if (event->type() == QEvent::ApplicationActivate)
+        {
+            traceLog(TraceEventType::FocusGain);
+        }
+        else if (event->type() == QEvent::ApplicationDeactivate)
+        {
+            traceLog(TraceEventType::FocusLost);
+        }
+    }
+
     if (event != nullptr &&
         event->type() == QEvent::KeyPress)
     {
@@ -2918,13 +3057,24 @@ void MainWindow::closeEvent(
         workspace_ != nullptr &&
         workspace_->hasFloatingSettingsPosition();
 
+    const QSize settingsSize =
+        workspace_ != nullptr
+        ? workspace_->floatingSettingsSize()
+        : QSize();
+
+    const bool settingsSizeValid =
+        workspace_ != nullptr &&
+        workspace_->hasFloatingSettingsSize();
+
     settingsService_->update(
         [&geometry,
          this,
          performancePosition,
          performancePositionValid,
          settingsPosition,
-         settingsPositionValid](OpenScopeSettings& settings)
+         settingsPositionValid,
+         settingsSize,
+         settingsSizeValid](OpenScopeSettings& settings)
         {
             settings.control
                 .instrument
@@ -2969,22 +3119,21 @@ void MainWindow::closeEvent(
 
             if (settingsPositionValid)
             {
-                settings.local
-                    .floaties
-                    .settings
-                    .x =
+                settings.local.floaties.settings.x =
                     settingsPosition.x();
-
-                settings.local
-                    .floaties
-                    .settings
-                    .y =
+                settings.local.floaties.settings.y =
                     settingsPosition.y();
+                settings.local.floaties.settings.positionValid =
+                    true;
+            }
 
-                settings.local
-                    .floaties
-                    .settings
-                    .positionValid =
+            if (settingsSizeValid)
+            {
+                settings.local.floaties.settings.width =
+                    settingsSize.width();
+                settings.local.floaties.settings.height =
+                    settingsSize.height();
+                settings.local.floaties.settings.sizeValid =
                     true;
             }
         });

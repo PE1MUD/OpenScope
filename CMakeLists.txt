@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.8.2
+    VERSION 0.8.3
     LANGUAGES C CXX
 )
 
@@ -27,6 +27,7 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(Spout2 CONFIG REQUIRED)
@@ -61,9 +62,13 @@ configure_file(
 )
 
 if(WIN32)
+    set(OPENSCOPE_ICON_FILE
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/OpenScope.ico"
+    )
+
     configure_file(
-        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenScope.rc.in"
-        "${OPENSCOPE_GENERATED_DIR}/OpenScope.rc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenScopeAppIcon.rc.in"
+        "${OPENSCOPE_GENERATED_DIR}/OpenScopeAppIcon.rc"
         @ONLY
     )
 endif()
@@ -114,6 +119,7 @@ add_custom_target(DeckLinkApiGenerated
 
 qt_add_executable(OpenScope
 src/main.cpp
+resources/OpenScope.qrc
 
 src/MainWindow.h
 src/MainWindow.cpp
@@ -157,6 +163,7 @@ src/processing/NoiseReducer.h
 src/processing/NoiseReducer.cpp
 src/processing/LumaHighFrequencyCompensator.h
 src/processing/LumaHighFrequencyCompensator.cpp
+src/processing/LumaHighFrequencyCompensatorAvx2.cpp
 
 src/rendering/WaveformRenderer.h
 src/rendering/WaveformRenderer.cpp
@@ -218,7 +225,7 @@ src/widgets/ControlWidget.cpp
 if(WIN32)
     target_sources(OpenScope
         PRIVATE
-            "${OPENSCOPE_GENERATED_DIR}/OpenScope.rc"
+            "${OPENSCOPE_GENERATED_DIR}/OpenScopeAppIcon.rc"
     )
 endif()
 
@@ -230,6 +237,12 @@ endif()
 
 set_source_files_properties(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/SignalReconstructorAvx2.cpp"
+    PROPERTIES
+    COMPILE_OPTIONS "/arch:AVX2"
+)
+
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/processing/LumaHighFrequencyCompensatorAvx2.cpp"
     PROPERTIES
     COMPILE_OPTIONS "/arch:AVX2"
 )

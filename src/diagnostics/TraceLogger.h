@@ -17,6 +17,12 @@ enum class TraceRendererId : std::uint8_t
 enum class TraceEventType : std::uint16_t
 {
     Frame,
+    FocusGain,
+    FocusLost,
+    PresenterField1Tick,
+    PresenterField2Tick,
+    WaveformWorkerBegin,
+    WaveformWorkerEnd,
     CatGenerationBegin,
     DirectBegin,
     DirectCore,

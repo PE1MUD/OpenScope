@@ -140,6 +140,24 @@ OpenScopeSettings SettingsStorage::load() const
             .deinterlace)
         .toBool();
 
+    result.local.display.lineSelectorVisible =
+        settings.value(
+            "Local/Display/LineSelectorVisible",
+            result.local.display.lineSelectorVisible)
+        .toBool();
+
+    result.local.display.safetyArea90 =
+        settings.value(
+            "Local/Display/SafetyArea90",
+            result.local.display.safetyArea90)
+        .toBool();
+
+    result.local.display.textSafetyArea80 =
+        settings.value(
+            "Local/Display/TextSafetyArea80",
+            result.local.display.textSafetyArea80)
+        .toBool();
+
     result.control
         .instrument
         .lineNumber =
@@ -149,6 +167,32 @@ OpenScopeSettings SettingsStorage::load() const
             .instrument
             .lineNumber)
         .toInt();
+
+    result.control
+        .instrument
+        .waveform
+        .antiAliasing =
+        settings.value(
+            "Control/Instrument/Waveform/AntiAliasing",
+            settings.value(
+                "Local/Display/AntiAliasing",
+                result.control
+                    .instrument
+                    .waveform
+                    .antiAliasing))
+        .toBool();
+
+    result.control
+        .instrument
+        .waveform
+        .colorizeIllegalLuminance =
+        settings.value(
+            "Control/Instrument/Waveform/ColorizeIllegalLuminance",
+            result.control
+                .instrument
+                .waveform
+                .colorizeIllegalLuminance)
+        .toBool();
 
     result.control
         .instrument
@@ -266,6 +310,18 @@ OpenScopeSettings SettingsStorage::load() const
             .instrument
             .vectorscope
             .showHundredPercentTargets)
+        .toBool();
+
+    result.control
+        .instrument
+        .vectorscope
+        .colorizeGamutErrors =
+        settings.value(
+            "Control/Instrument/Vectorscope/ColorizeGamutErrors",
+            result.control
+                .instrument
+                .vectorscope
+                .colorizeGamutErrors)
         .toBool();
 
     result.control
@@ -521,6 +577,24 @@ OpenScopeSettings SettingsStorage::load() const
             result.local.floaties.settings.positionValid)
         .toBool();
 
+    result.local.floaties.settings.width =
+        settings.value(
+            "Local/Floaties/Settings/Width",
+            result.local.floaties.settings.width)
+        .toInt();
+
+    result.local.floaties.settings.height =
+        settings.value(
+            "Local/Floaties/Settings/Height",
+            result.local.floaties.settings.height)
+        .toInt();
+
+    result.local.floaties.settings.sizeValid =
+        settings.value(
+            "Local/Floaties/Settings/SizeValid",
+            result.local.floaties.settings.sizeValid)
+        .toBool();
+
     return result;
 }
 
@@ -551,10 +625,36 @@ void SettingsStorage::save(
         .deinterlace);
 
     storage.setValue(
+        "Local/Display/LineSelectorVisible",
+        settings.local.display.lineSelectorVisible);
+
+    storage.setValue(
+        "Local/Display/SafetyArea90",
+        settings.local.display.safetyArea90);
+
+    storage.setValue(
+        "Local/Display/TextSafetyArea80",
+        settings.local.display.textSafetyArea80);
+
+    storage.setValue(
         "Control/Instrument/LineNumber",
         settings.control
         .instrument
         .lineNumber);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/AntiAliasing",
+        settings.control
+            .instrument
+            .waveform
+            .antiAliasing);
+
+    storage.setValue(
+        "Control/Instrument/Waveform/ColorizeIllegalLuminance",
+        settings.control
+            .instrument
+            .waveform
+            .colorizeIllegalLuminance);
 
     storage.setValue(
         "Control/Instrument/Waveform/Zoom",
@@ -609,6 +709,13 @@ void SettingsStorage::save(
         .instrument
         .vectorscope
         .showHundredPercentTargets);
+
+    storage.setValue(
+        "Control/Instrument/Vectorscope/ColorizeGamutErrors",
+        settings.control
+            .instrument
+            .vectorscope
+            .colorizeGamutErrors);
 
     storage.setValue(
         "Control/Instrument/Vectorscope/PersistenceFrames",
@@ -764,6 +871,18 @@ void SettingsStorage::save(
     storage.setValue(
         "Local/Floaties/Settings/PositionValid",
         settings.local.floaties.settings.positionValid);
+
+    storage.setValue(
+        "Local/Floaties/Settings/Width",
+        settings.local.floaties.settings.width);
+
+    storage.setValue(
+        "Local/Floaties/Settings/Height",
+        settings.local.floaties.settings.height);
+
+    storage.setValue(
+        "Local/Floaties/Settings/SizeValid",
+        settings.local.floaties.settings.sizeValid);
 
     storage.sync();
 }

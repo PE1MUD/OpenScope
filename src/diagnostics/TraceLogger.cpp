@@ -23,6 +23,12 @@ const char* eventName(TraceEventType type) noexcept
     switch (type)
     {
     case TraceEventType::Frame: return "FRAME";
+    case TraceEventType::FocusGain: return "FOCUS_GAIN";
+    case TraceEventType::FocusLost: return "FOCUS_LOST";
+    case TraceEventType::PresenterField1Tick: return "TICK_F1";
+    case TraceEventType::PresenterField2Tick: return "TICK_F2";
+    case TraceEventType::WaveformWorkerBegin: return "WF_WORKER_BEGIN";
+    case TraceEventType::WaveformWorkerEnd: return "WF_WORKER_END";
     case TraceEventType::CatGenerationBegin: return "CAT_BEGIN";
     case TraceEventType::DirectBegin: return "DIRECT_BEGIN";
     case TraceEventType::DirectCore: return "DIRECT_CORE";
@@ -69,7 +75,7 @@ TraceLogger& TraceLogger::instance()
 TraceLogger::TraceLogger()
     : start_(std::chrono::steady_clock::now())
 {
-    if constexpr (OpenScopeBuild::kDebugBuild)
+    if constexpr (OpenScopeBuild::kTraceLoggingEnabled)
     {
         writer_ = std::thread([this]() { writerLoop(); });
     }
@@ -104,7 +110,7 @@ void TraceLogger::log(
     std::uint64_t value1,
     TraceRendererId rendererId) noexcept
 {
-    if constexpr (!OpenScopeBuild::kDebugBuild)
+    if constexpr (!OpenScopeBuild::kTraceLoggingEnabled)
     {
         return;
     }

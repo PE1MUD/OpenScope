@@ -99,6 +99,7 @@ namespace
     {
         std::uint16_t u = 32768u;
         std::uint16_t v = 32768u;
+        std::size_t sampleIndex = 0u;
     };
 
     struct GamutAnalysis
@@ -231,7 +232,8 @@ namespace
                 result.offenders.push_back(
                     GamutOffender{
                         frame.u[index],
-                        frame.v[index]});
+                        frame.v[index],
+                        index});
             };
 
         for (std::size_t i = firstSample;
@@ -423,6 +425,22 @@ namespace
         pen.setWidthF(2.0);
         pen.setCapStyle(Qt::RoundCap);
         painter.setPen(pen);
+        // Draw the complete confirmed illegal run, not just isolated dots.
+        // Only connect samples that were adjacent in the source frame so
+        // separate offender runs (or separate lines) never get bridged.
+        for (qsizetype i = 1; i < points.size(); ++i)
+        {
+            const GamutOffender& previous =
+                gamutAnalysis.offenders.at(i - 1);
+            const GamutOffender& current =
+                gamutAnalysis.offenders.at(i);
+
+            if (current.sampleIndex == previous.sampleIndex + 1u)
+            {
+                painter.drawLine(points.at(i - 1), points.at(i));
+            }
+        }
+
         painter.drawPoints(
             points.constData(),
             static_cast<int>(points.size()));
@@ -602,6 +620,14 @@ void VectorscopeRenderer::setGlow(int glow)
     analyzer_.setGlow(glow);
 }
 
+void VectorscopeRenderer::setColorizeGamutErrors(
+    bool enabled) noexcept
+{
+    colorizeGamutErrors_.store(
+        enabled,
+        std::memory_order_release);
+}
+
 void VectorscopeRenderer::setHorizontalWindow(
     int zoomFactor,
     double scrollPosition)
@@ -727,11 +753,50 @@ double VectorscopeRenderer::screenOwnerWidth(const QRectF& bounds) const
 
 QRectF VectorscopeRenderer::screenScopeRect(const QRectF& bounds) const
 {
+    constexpr double kScreenMargin = 8.0;
+    constexpr double kScreenGap = 8.0;
+
+    const double ownerWidth =
+        screenOwnerWidth(bounds);
+
+    const double availableLeft =
+        bounds.left() +
+        kScreenMargin +
+        ownerWidth +
+        kScreenGap;
+
+    const double availableRight =
+        bounds.right() -
+        kScreenMargin;
+
+    const double availableTop =
+        bounds.top() +
+        kScreenMargin;
+
+    const double availableBottom =
+        bounds.bottom() -
+        kScreenMargin;
+
+    const QRectF available(
+        availableLeft,
+        availableTop,
+        std::max(1.0, availableRight - availableLeft),
+        std::max(1.0, availableBottom - availableTop));
+
+    const double size =
+        std::min(
+            available.width(),
+            available.height());
+
+    // Screen profile: centre the largest possible square in the space
+    // between the left information cards and the right edge.  Previously
+    // the same square was pinned to the right edge.
     return snapSquare(
-        ViewportOverlay::vectorscopeScopeRect(
-            bounds,
-            false,
-            screenOwnerWidth(bounds)));
+        QRectF(
+            available.center().x() - size * 0.5,
+            available.center().y() - size * 0.5,
+            size,
+            size));
 }
 
 QRectF VectorscopeRenderer::videoScopeRect(
@@ -1046,11 +1111,16 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
         painter.restore();
     }
 
-    drawGamutOffenders(
-        painter,
-        scopeRect,
-        gamutAnalysis,
-        profile_ == Profile::Video);
+    if (colorizeGamutErrors_.load(std::memory_order_acquire))
+    {
+        // Draw every confirmed illegal sample. There is deliberately no
+        // top-N cap: every point that contributed to GAMUT ERROR is red.
+        drawGamutOffenders(
+            painter,
+            scopeRect,
+            gamutAnalysis,
+            profile_ == Profile::Video);
+    }
 
     drawGamutStatus(
         painter,

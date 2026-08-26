@@ -207,7 +207,7 @@ constexpr AnalogVideoLevels analogLevels(
             0.0,   // sync tip
             0.3,   // black
             1.0,   // white
-            1.2,   // graticule max
+            1.3,   // graticule max
             0.35   // nominal chroma component peak
         };
 
@@ -217,7 +217,7 @@ constexpr AnalogVideoLevels analogLevels(
             0.0,
             0.0,
             1.0,
-            1.2
+            1.3
         };
     }
 }
