@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QWidget>
 
@@ -59,10 +59,12 @@ private:
     QPushButton* pauseButton_ = nullptr;
     QSlider* timelineZoomSlider_ = nullptr;
     QScrollBar* timelineScrollBar_ = nullptr;
+    QScrollBar* detailScrollBar_ = nullptr;
 
     bool paused_ = false;
     bool autoPauseArmed_ = false;
     double autoPauseThresholdUs_ = 0.0;
     double timelineStartUs_ = 0.0;
     double timelineSpanUs_ = 80000.0;
+    int detailScrollOffset_ = 0;
 };

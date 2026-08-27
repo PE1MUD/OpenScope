@@ -282,7 +282,7 @@ struct WaveformPhaseTimelineSnapshot
 {
     // Screen-waveform renderer sub-phases only.  Top-level Screen/Spout/
     // measurement/publish chronology is kept separately on the worker lane.
-    static constexpr std::size_t kCapacity = 24;
+    static constexpr std::size_t kCapacity = 64;
     std::uint64_t generation = 0;
     std::uint32_t count = 0;
     std::array<WaveformPhaseEventSnapshot, kCapacity> events{};
@@ -607,6 +607,7 @@ struct PerformanceSnapshot
     WaveformAssistTimelineSnapshot displayWorker1Assist;
     WaveformAssistTimelineSnapshot vectorscopeWorkerAssist;
     WaveformPhaseTimelineSnapshot waveformScreenPhases;
+    WaveformPhaseTimelineSnapshot waveformVideoPhases;
     DisplayPhaseTimelineSnapshot displayFieldPhases;
     DisplayPhaseTimelineSnapshot displayWorker0Phases;
     DisplayPhaseTimelineSnapshot displayWorker1Phases;
@@ -650,6 +651,7 @@ struct PerformanceStats
     std::array<WaveformAssistTimelineStats, 2> displayWorkerAssistTimeline;
     WaveformAssistTimelineStats vectorscopeWorkerAssistTimeline;
     WaveformPhaseTimelineStats waveformScreenPhaseTimeline;
+    WaveformPhaseTimelineStats waveformVideoPhaseTimeline;
 
     // The three assist timelines and the waveform phase timeline are written
     // asynchronously while a waveform frame is being processed.  The
@@ -662,6 +664,7 @@ struct PerformanceStats
     WaveformAssistTimelineSnapshot publishedDisplayWorker1Assist;
     WaveformAssistTimelineSnapshot publishedVectorscopeWorkerAssist;
     WaveformPhaseTimelineSnapshot publishedWaveformScreenPhases;
+    WaveformPhaseTimelineSnapshot publishedWaveformVideoPhases;
 
     mutable std::mutex vectorscopeDiagnosticPublishMutex;
     WorkerPhaseTimelineSnapshot publishedVectorscopeWorkerPhases;
@@ -725,6 +728,8 @@ struct PerformanceStats
             vectorscopeWorkerAssistTimeline.snapshot();
         const WaveformPhaseTimelineSnapshot phases =
             waveformScreenPhaseTimeline.snapshot();
+        const WaveformPhaseTimelineSnapshot videoPhases =
+            waveformVideoPhaseTimeline.snapshot();
 
         std::lock_guard<std::mutex> lock(waveformDiagnosticPublishMutex);
         publishedWaveformWorkerPhases = workerPhases;
@@ -733,6 +738,7 @@ struct PerformanceStats
         publishedDisplayWorker1Assist = displayWorker1;
         publishedVectorscopeWorkerAssist = vectorscopeWorker;
         publishedWaveformScreenPhases = phases;
+        publishedWaveformVideoPhases = videoPhases;
     }
 
     void clearPublishedWaveformDiagnosticTimelines() noexcept
@@ -743,6 +749,7 @@ struct PerformanceStats
         publishedDisplayWorker1Assist = {};
         publishedVectorscopeWorkerAssist = {};
         publishedWaveformScreenPhases = {};
+        publishedWaveformVideoPhases = {};
     }
 
     void clearPublishedVectorscopeDiagnosticTimeline() noexcept
@@ -861,6 +868,7 @@ struct PerformanceStats
         WaveformAssistTimelineSnapshot publishedDisplayWorker1;
         WaveformAssistTimelineSnapshot publishedVectorscopeWorkerAssistSnapshot;
         WaveformPhaseTimelineSnapshot publishedWaveformPhases;
+        WaveformPhaseTimelineSnapshot publishedWaveformVideoPhaseSnapshot;
         DisplayPhaseTimelineSnapshot publishedDisplayField;
         DisplayPhaseTimelineSnapshot publishedDisplayWorker0Phase;
         DisplayPhaseTimelineSnapshot publishedDisplayWorker1Phase;
@@ -880,6 +888,7 @@ struct PerformanceStats
             publishedDisplayWorker1 = publishedDisplayWorker1Assist;
             publishedVectorscopeWorkerAssistSnapshot = publishedVectorscopeWorkerAssist;
             publishedWaveformPhases = publishedWaveformScreenPhases;
+            publishedWaveformVideoPhaseSnapshot = publishedWaveformVideoPhases;
         }
         {
             std::lock_guard<std::mutex> lock(vectorscopeDiagnosticPublishMutex);
@@ -1077,6 +1086,7 @@ struct PerformanceStats
             publishedDisplayWorker1,
             publishedVectorscopeWorkerAssistSnapshot,
             publishedWaveformPhases,
+            publishedWaveformVideoPhaseSnapshot,
             publishedDisplayField,
             publishedDisplayWorker0Phase,
             publishedDisplayWorker1Phase

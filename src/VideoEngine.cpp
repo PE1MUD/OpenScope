@@ -1,4 +1,4 @@
-﻿#include <QMetaObject>
+#include <QMetaObject>
 #include "VideoEngine.h"
 #include "BuildConfig.h"
 
@@ -508,10 +508,49 @@ VideoEngine::VideoEngine(QObject* parent)
             runWaveformTraceJobs(
                 phaseLabel,
                 jobCount,
-                job);
+                job,
+                TraceRendererId::PcWaveform);
         });
 
     waveformScreenRenderer_.setTraceHelperAvailability(
+        [this]()
+        {
+            for (std::size_t workerIndex = 0;
+                workerIndex < displayPhaseWorkers_.size();
+                ++workerIndex)
+            {
+                if (canDisplayWorkerAcceptAssist(workerIndex))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        });
+
+    // Delta 58 / Cerium: the PAL/Spout waveform renderer uses the same
+    // four-worker assist queue as the Screen renderer.  Lower-case assist
+    // labels keep Spout R/X jobs distinct in diagnostics while the UI renders
+    // them compatibly as R/X.
+    waveformVideoRenderer_.setTraceJobExecutor(
+        [this](
+            char phaseLabel,
+            std::size_t jobCount,
+            const WaveformRenderer::TraceJob& job)
+        {
+            const char assistLabel =
+                phaseLabel == 'R' ? 'r' :
+                phaseLabel == 'X' ? 'x' :
+                phaseLabel;
+
+            runWaveformTraceJobs(
+                assistLabel,
+                jobCount,
+                job,
+                TraceRendererId::SpoutWaveform);
+        });
+
+    waveformVideoRenderer_.setTraceHelperAvailability(
         [this]()
         {
             for (std::size_t workerIndex = 0;
@@ -2244,6 +2283,7 @@ bool VideoEngine::tryRunWaveformAssistJob(
         std::uint32_t)> job;
     std::size_t jobIndex = 0;
     char phaseLabel = '?';
+    TraceRendererId rendererId = TraceRendererId::PcWaveform;
 
     {
         std::lock_guard<std::mutex> lock(
@@ -2267,6 +2307,7 @@ bool VideoEngine::tryRunWaveformAssistJob(
         ++waveformAssistJobsRunning_;
         job = waveformAssistJob_;
         phaseLabel = waveformAssistPhaseLabel_;
+        rendererId = waveformAssistRendererId_;
     }
 
     // Wake the publisher as soon as a helper has actually claimed work.
@@ -2290,7 +2331,7 @@ bool VideoEngine::tryRunWaveformAssistJob(
         static_cast<std::uint32_t>(jobIndex),
         0u,
         0u,
-        TraceRendererId::PcWaveform);
+        rendererId);
 
     job(jobIndex, workerId);
 
@@ -2309,7 +2350,7 @@ bool VideoEngine::tryRunWaveformAssistJob(
         static_cast<std::uint32_t>(jobIndex),
         assistDurationUs,
         0u,
-        TraceRendererId::PcWaveform);
+        rendererId);
 
     if (workerId <= 3u)
     {
@@ -2398,7 +2439,8 @@ void VideoEngine::runWaveformTraceJobs(
     std::size_t jobCount,
     const std::function<void(
         std::size_t,
-        std::uint32_t)>& job)
+        std::uint32_t)>& job,
+    TraceRendererId rendererId)
 {
     QElapsedTimer assistTimer;
     assistTimer.start();
@@ -2419,9 +2461,15 @@ void VideoEngine::runWaveformTraceJobs(
             (assistWallStartNs - assistTimelineOriginNs) / 1000)
         : 0u;
 
-    performanceStats_.waveformScreenAssistTotalUs.store(0, std::memory_order_relaxed);
-    performanceStats_.waveformScreenAssistFinalWaitStartUs.store(0, std::memory_order_relaxed);
-    performanceStats_.waveformScreenAssistFinalWaitUs.store(0, std::memory_order_relaxed);
+    const bool screenAssist =
+        rendererId == TraceRendererId::PcWaveform;
+
+    if (screenAssist)
+    {
+        performanceStats_.waveformScreenAssistTotalUs.store(0, std::memory_order_relaxed);
+        performanceStats_.waveformScreenAssistFinalWaitStartUs.store(0, std::memory_order_relaxed);
+        performanceStats_.waveformScreenAssistFinalWaitUs.store(0, std::memory_order_relaxed);
+    }
 
     std::uint64_t assistGeneration = 0;
 
@@ -2443,6 +2491,7 @@ void VideoEngine::runWaveformTraceJobs(
 
         waveformAssistJob_ = job;
         waveformAssistPhaseLabel_ = phaseLabel;
+        waveformAssistRendererId_ = rendererId;
         waveformAssistJobCount_ = jobCount;
         waveformAssistNextJob_ = 0;
         waveformAssistJobsRunning_ = 0;
@@ -2463,7 +2512,7 @@ void VideoEngine::runWaveformTraceJobs(
             0u,
             static_cast<std::uint64_t>(jobCount),
             0u,
-            TraceRendererId::PcWaveform);
+            rendererId);
 
         const std::uint64_t timelineGeneration =
             assistCaptureNs > 0
@@ -2514,7 +2563,7 @@ void VideoEngine::runWaveformTraceJobs(
             0u,
             0u,
             0u,
-            TraceRendererId::PcWaveform);
+            rendererId);
 
         waveformAssistDoneCondition_.wait(
             lock,
@@ -2536,14 +2585,17 @@ void VideoEngine::runWaveformTraceJobs(
             0u,
             finalWaitEndUs - finalWaitStartUs,
             0u,
-            TraceRendererId::PcWaveform);
+            rendererId);
 
-        performanceStats_.waveformScreenAssistFinalWaitStartUs.store(
-            assistStartFromCaptureUs + finalWaitStartUs,
-            std::memory_order_relaxed);
-        performanceStats_.waveformScreenAssistFinalWaitUs.store(
-            finalWaitEndUs - finalWaitStartUs,
-            std::memory_order_relaxed);
+        if (screenAssist)
+        {
+            performanceStats_.waveformScreenAssistFinalWaitStartUs.store(
+                assistStartFromCaptureUs + finalWaitStartUs,
+                std::memory_order_relaxed);
+            performanceStats_.waveformScreenAssistFinalWaitUs.store(
+                finalWaitEndUs - finalWaitStartUs,
+                std::memory_order_relaxed);
+        }
 
         waveformAssistActive_ = false;
         waveformAssistWorkAvailable_.store(
@@ -2552,9 +2604,12 @@ void VideoEngine::runWaveformTraceJobs(
         waveformAssistJob_ = {};
     }
 
-    performanceStats_.waveformScreenAssistTotalUs.store(
-        static_cast<std::uint64_t>(assistTimer.nsecsElapsed() / 1000),
-        std::memory_order_relaxed);
+    if (screenAssist)
+    {
+        performanceStats_.waveformScreenAssistTotalUs.store(
+            static_cast<std::uint64_t>(assistTimer.nsecsElapsed() / 1000),
+            std::memory_order_relaxed);
+    }
 
     waveformAssistCompletedCaptureTickNs_.store(
         assistCaptureNs,
@@ -4832,10 +4887,23 @@ void VideoEngine::waveformWorkerLoop()
             const auto waveformSpoutStart =
                 std::chrono::steady_clock::now();
 
-            // Keep screen and Spout rendering independent for now.  The attempted
-            // prepared-luma reuse caused a fullscreen timing regression.
-            // Performance accounting remains separate: this render belongs only
-            // to the Waveform video lane and is not appended to PC waveform.
+            const auto& preparedScreenLuma =
+                waveformScreenRenderer_.reconstructedLumaSamples();
+            const std::size_t expectedPreparedLumaSize =
+                static_cast<std::size_t>(waveformFrame.width) * 4u;
+
+            if (screenRenderEnabled &&
+                waveformUsesRawSelectedLine &&
+                preparedScreenLuma.size() == expectedPreparedLumaSize)
+            {
+                waveformVideoRenderer_.setPreparedReconstructedLuma(
+                    &preparedScreenLuma);
+            }
+            else
+            {
+                waveformVideoRenderer_.setPreparedReconstructedLuma(nullptr);
+            }
+
             waveformVideoRenderer_.analyze(
                 waveformFrame);
 
@@ -4854,6 +4922,51 @@ void VideoEngine::waveformWorkerLoop()
 
             const auto& videoTimings =
                 waveformVideoRenderer_.renderTimings();
+
+            // Delta 52: publish the *internal* Spout renderer chronology as a
+            // real capture-relative timeline.  V remains the outer envelope
+            // on the waveform-worker row; this child timeline tells us where
+            // the milliseconds inside V are actually spent.
+            const std::int64_t waveformSpoutStartNs =
+                static_cast<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        waveformSpoutStart.time_since_epoch()).count());
+            const std::int64_t waveformSpoutOriginNs =
+                captureSlot.diagnosticOriginNs.load(
+                    std::memory_order_acquire);
+            const std::int64_t waveformSpoutCaptureNs =
+                captureSlot.captureTickNs.load(
+                    std::memory_order_acquire);
+            const std::uint64_t waveformSpoutTimelineGeneration =
+                waveformSpoutCaptureNs > 0
+                ? static_cast<std::uint64_t>(waveformSpoutCaptureNs)
+                : generation;
+            const std::uint64_t waveformSpoutStartFromCaptureUs =
+                waveformSpoutOriginNs > 0 &&
+                waveformSpoutStartNs > waveformSpoutOriginNs
+                ? static_cast<std::uint64_t>(
+                    (waveformSpoutStartNs - waveformSpoutOriginNs) / 1000)
+                : 0u;
+
+            performanceStats_.waveformVideoPhaseTimeline.reset(
+                waveformSpoutTimelineGeneration);
+            for (std::uint32_t phaseIndex = 0;
+                phaseIndex < videoTimings.phaseCount &&
+                phaseIndex < WaveformRenderTimings::kPhaseCapacity;
+                ++phaseIndex)
+            {
+                const auto& phase = videoTimings.phases[phaseIndex];
+                performanceStats_.waveformVideoPhaseTimeline.append(
+                    phase.label,
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(
+                            waveformSpoutStartFromCaptureUs + phase.startUs,
+                            80'000u)),
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(
+                            phase.durationUs,
+                            80'000u)));
+            }
 
             performanceStats_.waveformVideoPersistence.update(
                 videoTimings.persistenceUs);
@@ -4880,6 +4993,7 @@ void VideoEngine::waveformWorkerLoop()
         else
         {
             performanceStats_.waveformVideo.update(0);
+            performanceStats_.waveformVideoPhaseTimeline.reset(0);
             performanceStats_.waveformVideoPersistence.update(0);
             performanceStats_.waveformVideoTrace.update(0);
             performanceStats_.waveformVideoCompose.update(0);

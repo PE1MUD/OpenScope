@@ -114,6 +114,8 @@ public:
     [[nodiscard]] const std::vector<float>& visibleLumaVolts() const noexcept;
     [[nodiscard]] const std::vector<float>& fullLumaVolts() const noexcept;
     [[nodiscard]] const std::vector<float>& reconstructedLumaSamples() const noexcept;
+    void setPreparedReconstructedLuma(
+        const std::vector<float>* samples) noexcept;
     [[nodiscard]] const WaveformRenderTimings& renderTimings() const noexcept;
 
     void setChromaFillIntensity(
@@ -261,7 +263,11 @@ private:
 
     [[nodiscard]] WaveformGraticuleLayout graticuleLayout() const;
     QRectF scaledScopeRect() const;
+    void prepareImageForRender();
+
     QImage image_;
+    QImage imageSpare1_;
+    QImage imageSpare2_;
 
     WaveformGraticule graticule_;
     QRectF viewportRect() const;
@@ -284,6 +290,7 @@ private:
 
     std::vector<float> singleLineSource_;
     std::vector<float> singleLineReconstructed_;
+    const std::vector<float>* preparedReconstructedLuma_ = nullptr;
     std::vector<float> fullLumaVolts_;
 
     // Persistent target-resolution scratch buffer. Reallocated only when the

@@ -1,4 +1,4 @@
-﻿# OpenScope 0.8.4 - rolling delta log
+# OpenScope 0.8.4 - rolling delta log
 
 ## Delta 01 - Performance floaty consistency
 - Began centralising waveform phase names and colours.
@@ -639,3 +639,70 @@ Screen waveform diagnostics now show the actual renderer chronology directly, in
 - Frame clipping is based on the next diagnostic time origin, not incomparable generation-number encodings; late handoffs stay in the correct frame.
 - V1/V2 can therefore show a returned HIGH slot later in the same frame, while WF/VS cannot inherit red segments from the following frame.
 - Lower illegal-luma presentation keeps the intended 0.298 V signal threshold but compensates the finite AA/glow beam footprint so a legal 0.300 V black trace no longer grows an immediate red lower fringe.
+
+## Delta 51 - Persistent QImage transport pool / Base-clear COW removal
+- Removes the expensive implicit-sharing penalty hidden inside waveform `B` (Base image clear).
+- The completed waveform QImage is handed to the UI/Spout path by implicit sharing; clearing that same shared image on the next frame forced Qt to detach and deep-copy the entire previous framebuffer before writing black.
+- Adds two same-resolution spare QImage transport surfaces per WaveformRenderer. Steady-state rendering swaps onto an already allocated detached surface before `B`, so no old-frame copy is required.
+- The transport pool is recreated only when target resolution changes, matching the persistent-buffer policy already used for the phosphor-energy target.
+- If all three surfaces are still held by consumers, a rare back-pressure fallback allocates a fresh target rather than copying the old image.
+- Applies the same acquire-before-clear path to All Lines rendering.
+- Delta marker bumped to 51.
+
+
+## Delta 52 - Spout waveform V internal chronology
+
+- Instrumented the complete Spout-waveform `V` envelope using the renderer's own exact phase events.
+- Added a capture-relative `waveformVideoPhases` diagnostic timeline, published atomically with the existing waveform diagnostics.
+- The Spout waveform child row now shows real `U/e/H/A/L/J/R/X/B/G/C/Q/O/...` work instead of one opaque `V` block.
+- Pinned/hover details show start/end, phase, duration and description for every published Spout renderer phase.
+- No optimization or worker-count change yet: this delta is deliberately measurement-first, so the next change is driven by evidence.
+
+
+## Delta 53 - Spout V worker-row truth
+
+- The Waveform worker row now expands the Spout `V` section into the same exact renderer phases already shown by the Spout child timeline/details.
+- `V` remains visible only as an unfilled dashed parent envelope; it no longer hides the real `U/e/H/A/L/J/R/X/B/G/C/Q/O/...` work.
+- This is display/accounting only. No Spout rendering, worker scheduling or parallelism has changed yet.
+- Establishes a clean visual baseline before the next delta parallelises the expensive Spout `R` trace raster.
+
+## Delta 54 - Herbie Spout R visibility fix
+
+- Fixes Delta 53 worker-row accounting: the Spout renderer's real `R` Trace raster phase was accidentally filtered together with the Screen renderer's synthetic/assist `R` handling.
+- The Waveform worker row now draws Spout `R` inside the dashed `V` parent envelope, followed by the real `B/G/C/Q/O/...` tail phases.
+- The Spout child timeline/detail output is unchanged and remains the reference chronology.
+- Display/accounting only; no renderer scheduling or parallelisation yet. The planned multi-worker Spout `R` change moves to the next delta.
+
+
+## Delta 55 - Herbie report chronology truth
+
+- Fixes the pinned Waveform-worker report so it matches the worker-row timeline.
+- Suppresses outer `V` as a serial event in the authoritative chronology; `V` remains a visual envelope.
+- Adds the real Spout waveform renderer sub-phases (`U/T/K/e/A/L/R/B/G/C/Q/O/...`) at their capture-relative positions, tagged `WV`.
+- No Spout raster parallelisation yet; this remains the clean pre-optimisation measurement baseline.
+
+
+## Delta 56 - Scrollable diagnostics + shared selected-line reconstruction
+
+- Adds a vertical scrollbar to the lower pinned/details panel so long authoritative chronology reports remain inspectable without growing the performance window.
+- Reuses the Screen waveform renderer's already reconstructed 4x selected-line luma for the immediately following Spout waveform render.
+- The Spout renderer skips its duplicate `U` FIR upsample only when Screen rendered the same single selected line in the same worker iteration; All Lines and Spout-only operation retain the normal local reconstruction path.
+- The reused luma is copied into the Spout renderer's own small working vector, keeping renderer ownership independent.
+- No Spout `R` parallelisation yet.
+
+## Delta 57 - Diagnostics scrollbar viewport fix
+
+- Fixed the pinned diagnostics text viewport: scrolling now moves a full-height content rectangle behind the clipped viewport instead of translating a viewport-sized draw rectangle.
+- This prevents the report from going blank after the first visible page while keeping the existing vertical scrollbar behavior.
+- No scheduling, rendering, or shared-luma behavior changed from Delta 56.
+
+
+## Delta 58 — Cerium: parallel Spout waveform raster
+
+- PAL/Spout waveform `R` trace raster now uses the existing shared WF/V1/V2/VS assist queue.
+- The hard scheduling rule remains unchanged: at most two workers are HIGH priority; the other helpers remain NORMAL priority.
+- Spout assist jobs use internal `r`/`x` tags so Screen and Spout accounting cannot be mixed; the UI renders them compatibly as `R`/`X`.
+- Spout child timeline now shows a parallel `RR..`/`XX..` wallclock envelope while worker rows retain the real per-worker chunks.
+- Pinned Spout/worker reports show the actual worker ownership for parallel Spout chunks.
+- CatWuzle worker accounting expanded to four worker IDs so VS assist is no longer folded into V2.
+- No change to waveform appearance or priority arbitration.

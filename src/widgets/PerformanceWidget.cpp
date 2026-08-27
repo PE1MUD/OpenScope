@@ -457,7 +457,8 @@ namespace
         case 'A': return "A";
         case 'L': return "L";
         case 'J': return "J";
-        case 'R': return "R";
+        case 'R':
+        case 'r': return "R";
         case 'Z': return "Z";
         case 'P': return "P";
         case 'B': return "B";
@@ -465,7 +466,8 @@ namespace
         case 'Q': return "Q";
         case 'C': return "C";
         case 'O': return "O";
-        case 'X': return "X";
+        case 'X':
+        case 'x': return "X";
         case 'W': return "W";
         default:  return "?";
         }
@@ -486,6 +488,7 @@ namespace
         case 'L': return "Raster load / cost analysis";
         case 'J': return "Chunk partition / job dispatch";
         case 'R': return "Trace raster";
+        case 'r': return "Spout trace raster";
         case 'Z': return "Raster zipper";
         case 'P': return "ScopePhor feedback / history";
         case 'B': return "Base image clear";
@@ -494,6 +497,7 @@ namespace
         case 'C': return "Chroma compose";
         case 'O': return "Line-info / overlay";
         case 'X': return "Resolve/output chunk";
+        case 'x': return "Spout resolve/output chunk";
         case 'W': return "Assist rejoin wait";
         default:  return "Unknown waveform phase";
         }
@@ -504,7 +508,7 @@ namespace
         std::uint32_t chunkIndex)
     {
         const char* base = waveformPhaseName(phase);
-        if (phase == 'R' || phase == 'X')
+        if (phase == 'R' || phase == 'X' || phase == 'r' || phase == 'x')
         {
             return QStringLiteral("%1 chunk %2")
                 .arg(QString::fromLatin1(base))
@@ -528,7 +532,8 @@ namespace
         case 'A': return QColor(195, 215, 230);
         case 'L': return QColor(185, 210, 225);
         case 'J': return QColor(175, 205, 220);
-        case 'R': return QColor(238, 210, 165);
+        case 'R':
+        case 'r': return QColor(238, 210, 165);
         case 'Z': return QColor(205, 190, 230);
         case 'P': return QColor(185, 225, 205);
         case 'B': return QColor(215, 205, 230);
@@ -536,7 +541,8 @@ namespace
         case 'Q': return QColor(160, 215, 195);
         case 'C': return QColor(205, 225, 185);
         case 'O': return QColor(225, 205, 205);
-        case 'X': return QColor(190, 200, 235);
+        case 'X':
+        case 'x': return QColor(190, 200, 235);
         case 'W': return QColor(235, 205, 150);
         default:  return QColor(195, 195, 195);
         }
@@ -692,12 +698,14 @@ namespace
                 continue;
             }
 
-            // S is a parent wallclock envelope, not measured work of its own.
-            // On the waveform worker row keep it as context only: an unfilled
-            // dashed outline. Any time not covered by a real child phase must
-            // remain visibly empty so instrumentation gaps stand out.
+            // S and V are parent wallclock envelopes, not measured work of
+            // their own. On the waveform worker row keep them as context only:
+            // unfilled dashed outlines. Their exact renderer child phases are
+            // drawn on top below. Any time not covered by a real child phase
+            // must remain visibly empty so instrumentation gaps stand out.
             const bool outlineOnly =
-                outlineScreenEnvelope && phase == 'S';
+                outlineScreenEnvelope &&
+                (phase == 'S' || phase == 'V');
 
             drawSegment(
                 painter,
@@ -875,20 +883,113 @@ namespace
     void drawWaveformSpoutTimeline(
         QPainter& painter,
         const QRect& barRect,
-        const WorkerPhaseTimelineSnapshot& timeline)
+        const PerformanceSnapshot& snapshot)
     {
+        const auto& rendererTimeline = snapshot.waveformVideoPhases;
+
+        // Draw all serial Spout renderer phases except R/X.  R/X are aggregate
+        // renderer envelopes once the shared worker queue is enabled; their
+        // real wallclock shape comes from lower-case r/x assist jobs below.
+        if (rendererTimeline.generation != 0u && rendererTimeline.count > 0u)
+        {
+            for (std::uint32_t i = 0;
+                i < rendererTimeline.count &&
+                i < WaveformPhaseTimelineSnapshot::kCapacity;
+                ++i)
+            {
+                const auto& event = rendererTimeline.events[i];
+                const char phase = static_cast<char>(event.label);
+                if (phase == 'R' || phase == 'X')
+                {
+                    continue;
+                }
+
+                drawSegment(
+                    painter,
+                    barRect,
+                    static_cast<double>(event.startUs),
+                    static_cast<double>(event.durationUs),
+                    waveformPhaseColor(phase),
+                    QString::fromLatin1(waveformPhaseText(phase)));
+            }
+
+            const auto drawParallelEnvelope =
+                [&](char assistPhase, char visiblePhase)
+                {
+                    bool found = false;
+                    std::uint64_t firstUs = 0u;
+                    std::uint64_t lastUs = 0u;
+                    int workerCount = 0;
+                    const auto include =
+                        [&](const WaveformAssistTimelineSnapshot& assist)
+                        {
+                            bool used = false;
+                            for (std::uint32_t i = 0;
+                                i < assist.count &&
+                                i < WaveformAssistTimelineSnapshot::kCapacity;
+                                ++i)
+                            {
+                                const auto& event = assist.events[i];
+                                if (static_cast<char>(event.phase) != assistPhase)
+                                {
+                                    continue;
+                                }
+                                used = true;
+                                const std::uint64_t begin = event.startUs;
+                                const std::uint64_t finish = begin + event.durationUs;
+                                if (!found)
+                                {
+                                    firstUs = begin;
+                                    lastUs = finish;
+                                    found = true;
+                                }
+                                else
+                                {
+                                    firstUs = std::min(firstUs, begin);
+                                    lastUs = std::max(lastUs, finish);
+                                }
+                            }
+                            if (used)
+                            {
+                                ++workerCount;
+                            }
+                        };
+
+                    include(snapshot.waveformWorkerAssist);
+                    include(snapshot.displayWorker0Assist);
+                    include(snapshot.displayWorker1Assist);
+                    include(snapshot.vectorscopeWorkerAssist);
+
+                    if (found && lastUs >= firstUs)
+                    {
+                        drawSegment(
+                            painter,
+                            barRect,
+                            static_cast<double>(firstUs),
+                            static_cast<double>(lastUs - firstUs),
+                            waveformPhaseColor(visiblePhase),
+                            QString(
+                                std::max(1, workerCount),
+                                QChar::fromLatin1(visiblePhase)));
+                    }
+                };
+
+            drawParallelEnvelope('r', 'R');
+            drawParallelEnvelope('x', 'X');
+            return;
+        }
+
+        const auto& workerTimeline = snapshot.waveformWorkerPhases;
         for (std::uint32_t i = 0;
-            i < timeline.count &&
+            i < workerTimeline.count &&
             i < WorkerPhaseTimelineSnapshot::kCapacity;
             ++i)
         {
-            const auto& event = timeline.events[i];
-            const char phase = static_cast<char>(event.phase);
-            if (phase != 'V')
+            const auto& event = workerTimeline.events[i];
+            if (static_cast<char>(event.phase) != 'V')
             {
                 continue;
             }
-
             drawSegment(
                 painter,
                 barRect,
@@ -918,6 +1019,39 @@ namespace
             // X is only a render envelope. F here is the Waveform
             // worker's own one-line frequency compensation.
             if (phase == 'X' || phase == 'R')
+            {
+                continue;
+            }
+
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                waveformPhaseColor(phase),
+                QString::fromLatin1(waveformPhaseText(phase)));
+        }
+    }
+
+    void drawWaveformWorkerSpoutPhases(
+        QPainter& painter,
+        const QRect& barRect,
+        const WaveformPhaseTimelineSnapshot& timeline)
+    {
+        // These are the exact Spout-render sub-phases. They belong on the
+        // same Waveform worker chronology as the outer V envelope.
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase =
+                static_cast<char>(event.label);
+
+            // Delta 58: Spout R/X are parallel assist envelopes now.  The
+            // individual r/x chunks are drawn from the shared assist timeline.
+            if (phase == 'R' || phase == 'X')
             {
                 continue;
             }
@@ -1644,15 +1778,15 @@ namespace
 
         constexpr std::size_t kDetailCapacity =
             WorkerPhaseTimelineSnapshot::kCapacity +
-            WaveformPhaseTimelineSnapshot::kCapacity +
+            2u * WaveformPhaseTimelineSnapshot::kCapacity +
             4u * WaveformAssistTimelineSnapshot::kCapacity;
 
         std::array<DetailEvent, kDetailCapacity> events{};
         std::size_t count = 0;
         std::uint32_t sequence = 0;
 
-        // S is only the complete screen-render envelope.  Keep the real V/M/E
-        // serial work, but do not mix wrapper envelopes into the event stream.
+        // S and V are wrapper envelopes. Their real Screen/Spout sub-phases are
+        // added below, so do not mix either wrapper into the chronological stream.
         const auto& workerTimeline = snapshot.waveformWorkerPhases;
         for (std::uint32_t i = 0;
             i < workerTimeline.count &&
@@ -1661,7 +1795,7 @@ namespace
         {
             const auto& event = workerTimeline.events[i];
             const char phase = static_cast<char>(event.phase);
-            if (phase == '^' || phase == 'S')
+            if (phase == '^' || phase == 'S' || phase == 'V')
             {
                 continue;
             }
@@ -1698,6 +1832,32 @@ namespace
                 event.startUs,
                 event.durationUs,
                 "WF",
+                waveformPhaseName(phase),
+                false,
+                0u,
+                sequence++ };
+        }
+
+        // Spout waveform is serial in Delta 55, but its real renderer
+        // sub-phases must appear in the same authoritative chronology as the
+        // worker-row wapper.  V itself is only the outer envelope above.
+        const auto& spoutPhases = snapshot.waveformVideoPhases;
+        for (std::uint32_t i = 0;
+            i < spoutPhases.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity &&
+            count < events.size(); ++i)
+        {
+            const auto& event = spoutPhases.events[i];
+            const char phase = static_cast<char>(event.label);
+            if (phase == 'R' || phase == 'X')
+            {
+                continue;
+            }
+            events[count++] = {
+                phase,
+                event.startUs,
+                event.durationUs,
+                "WV",
                 waveformPhaseName(phase),
                 false,
                 0u,
@@ -1777,7 +1937,9 @@ namespace
                 .arg(startMs, 0, 'f', 2)
                 .arg(endMs, 0, 'f', 2)
                 .arg(QString::fromLatin1(event.worker))
-                .arg(QChar::fromLatin1(event.phase))
+                .arg(QChar::fromLatin1(
+                    event.phase == 'r' ? 'R' :
+                    event.phase == 'x' ? 'X' : event.phase))
                 .arg(durationMs, 0, 'f', 2)
                 .arg(description);
         }
@@ -1940,14 +2102,13 @@ namespace
             QStringLiteral("Spout waveform [timeline]"),
             snapshot.waveformVideo);
 
-        bool found = false;
-        const auto& timeline = snapshot.waveformWorkerPhases;
+        // First show the authoritative outer V envelope.
         for (std::uint32_t i = 0;
-            i < timeline.count &&
+            i < snapshot.waveformWorkerPhases.count &&
             i < WorkerPhaseTimelineSnapshot::kCapacity;
             ++i)
         {
-            const auto& event = timeline.events[i];
+            const auto& event = snapshot.waveformWorkerPhases.events[i];
             if (static_cast<char>(event.phase) != 'V')
             {
                 continue;
@@ -1960,31 +2121,87 @@ namespace
             const double durationMs =
                 static_cast<double>(event.durationUs) / 1000.0;
             lines << QStringLiteral(
-                "%1-%2 ms | WF | V | %3 ms | Spout waveform render")
+                "%1-%2 ms | WF | V | %3 ms | Spout waveform render envelope")
                 .arg(startMs, 0, 'f', 2)
                 .arg(endMs, 0, 'f', 2)
                 .arg(durationMs, 0, 'f', 2);
-            found = true;
-        }
-
-        if (!found)
-        {
-            lines << QStringLiteral("inactive / no published Spout-waveform timeline phase");
+            break;
         }
 
         lines << QStringLiteral("");
         lines << QStringLiteral(
-            "Internal cost counters (not capture-positioned):");
-        lines << QStringLiteral("R trace: %1 ms")
-            .arg(snapshot.waveformVideoTrace.latestMs(), 0, 'f', 2);
-        lines << QStringLiteral("P* persistence total: %1 ms")
-            .arg(snapshot.waveformVideoPersistence.latestMs(), 0, 'f', 2);
-        lines << QStringLiteral("C compose: %1 ms")
-            .arg(snapshot.waveformVideoCompose.latestMs(), 0, 'f', 2);
-        lines << QStringLiteral("G glow: %1 ms")
-            .arg(snapshot.waveformVideoGlow.latestMs(), 0, 'f', 2);
-        lines << QStringLiteral("O overlay: %1 ms")
-            .arg(snapshot.waveformVideoOverlay.latestMs(), 0, 'f', 2);
+            "Spout renderer sub-phases (capture-relative chronology):");
+
+        bool foundDetail = false;
+        const auto& phases = snapshot.waveformVideoPhases;
+        for (std::uint32_t i = 0;
+            i < phases.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = phases.events[i];
+            const char phase = static_cast<char>(event.label);
+            if (phase == 'R' || phase == 'X')
+            {
+                continue;
+            }
+            const double startMs =
+                static_cast<double>(event.startUs) / 1000.0;
+            const double endMs =
+                static_cast<double>(event.startUs + event.durationUs) / 1000.0;
+            const double durationMs =
+                static_cast<double>(event.durationUs) / 1000.0;
+            lines << QStringLiteral(
+                "%1-%2 ms | WV | %3 | %4 ms | %5")
+                .arg(startMs, 0, 'f', 2)
+                .arg(endMs, 0, 'f', 2)
+                .arg(QChar::fromLatin1(phase))
+                .arg(durationMs, 0, 'f', 2)
+                .arg(QString::fromLatin1(waveformPhaseName(phase)));
+            foundDetail = true;
+        }
+
+        const auto appendSpoutAssist =
+            [&](const WaveformAssistTimelineSnapshot& assist,
+                const char* workerName)
+            {
+                for (std::uint32_t i = 0;
+                    i < assist.count &&
+                    i < WaveformAssistTimelineSnapshot::kCapacity;
+                    ++i)
+                {
+                    const auto& event = assist.events[i];
+                    const char assistPhase = static_cast<char>(event.phase);
+                    if (assistPhase != 'r' && assistPhase != 'x')
+                    {
+                        continue;
+                    }
+                    const double startMs = static_cast<double>(event.startUs) / 1000.0;
+                    const double endMs = static_cast<double>(event.startUs + event.durationUs) / 1000.0;
+                    const double durationMs = static_cast<double>(event.durationUs) / 1000.0;
+                    const char visiblePhase = assistPhase == 'r' ? 'R' : 'X';
+                    lines << QStringLiteral(
+                        "%1-%2 ms | %3 | %4 | %5 ms | %6")
+                        .arg(startMs, 0, 'f', 2)
+                        .arg(endMs, 0, 'f', 2)
+                        .arg(QString::fromLatin1(workerName))
+                        .arg(QChar::fromLatin1(visiblePhase))
+                        .arg(durationMs, 0, 'f', 2)
+                        .arg(waveformAssistDescription(assistPhase, event.jobIndex));
+                    foundDetail = true;
+                }
+            };
+
+        appendSpoutAssist(snapshot.waveformWorkerAssist, "WF");
+        appendSpoutAssist(snapshot.displayWorker0Assist, "V1");
+        appendSpoutAssist(snapshot.displayWorker1Assist, "V2");
+        appendSpoutAssist(snapshot.vectorscopeWorkerAssist, "VS");
+
+        if (!foundDetail)
+        {
+            lines << QStringLiteral(
+                "inactive / no published Spout renderer sub-phases");
+        }
 
         return lines.join(QLatin1Char('\n'));
     }
@@ -2391,6 +2608,25 @@ PerformanceWidget::PerformanceWidget(
         {
             timelineStartUs_ =
                 static_cast<double>(value);
+            update();
+        });
+
+    detailScrollBar_ =
+        new QScrollBar(
+            Qt::Vertical,
+            this);
+
+    detailScrollBar_->setRange(0, 0);
+    detailScrollBar_->setSingleStep(24);
+    detailScrollBar_->setPageStep(120);
+
+    connect(
+        detailScrollBar_,
+        &QScrollBar::valueChanged,
+        this,
+        [this](int value)
+        {
+            detailScrollOffset_ = value;
             update();
         });
 
@@ -2988,6 +3224,14 @@ void PerformanceWidget::paintEvent(
                 barRect,
                 snapshot_.waveformScreenPhases);
 
+            // Delta 53: make the worker-row Spout section compatible with the
+            // detailed child row. V stays as a dashed parent envelope while
+            // its exact renderer phases fill the real chronology.
+            drawWaveformWorkerSpoutPhases(
+                painter,
+                barRect,
+                snapshot_.waveformVideoPhases);
+
             drawAssistTimeline(
                 painter,
                 barRect,
@@ -3013,7 +3257,7 @@ void PerformanceWidget::paintEvent(
             drawWaveformSpoutTimeline(
                 painter,
                 barRect,
-                snapshot_.waveformWorkerPhases);
+                snapshot_);
             break;
 
         case RowKind::VectorscopeWorker:
@@ -3156,6 +3400,15 @@ void PerformanceWidget::paintEvent(
         std::max(width() - kMargin * 2, 1),
         std::max(height() - y - kMargin, 120));
 
+    if (detailScrollBar_ != nullptr)
+    {
+        detailScrollBar_->setGeometry(
+            detailRect.right() - 14,
+            detailRect.top() + 1,
+            14,
+            std::max(detailRect.height() - 2, 1));
+    }
+
     painter.fillRect(
         detailRect,
         QColor(30, 30, 30));
@@ -3186,10 +3439,52 @@ void PerformanceWidget::paintEvent(
                 pinnedRowIndex_);
     }
 
+    const QRect detailTextRect =
+        detailRect.adjusted(
+            10,
+            8,
+            detailScrollBar_ != nullptr ? -28 : -10,
+            -8);
+
+    const QRect measuredTextRect =
+        painter.boundingRect(
+            QRect(0, 0, detailTextRect.width(), 100000),
+            Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+            detailText);
+
+    const int maximumDetailOffset =
+        std::max(
+            measuredTextRect.height() - detailTextRect.height(),
+            0);
+
+    if (detailScrollBar_ != nullptr)
+    {
+        detailScrollBar_->setRange(0, maximumDetailOffset);
+        detailScrollBar_->setPageStep(
+            std::max(detailTextRect.height(), 1));
+        detailScrollBar_->setVisible(maximumDetailOffset > 0);
+
+        if (detailScrollOffset_ > maximumDetailOffset)
+        {
+            detailScrollOffset_ = maximumDetailOffset;
+            detailScrollBar_->setValue(maximumDetailOffset);
+        }
+    }
+
+    painter.save();
+    painter.setClipRect(detailTextRect);
+
+    const QRect scrolledDetailTextRect(
+        detailTextRect.left(),
+        detailTextRect.top() - detailScrollOffset_,
+        detailTextRect.width(),
+        std::max(measuredTextRect.height(), detailTextRect.height()));
+
     painter.drawText(
-        detailRect.adjusted(10, 8, -10, -8),
-        Qt::AlignLeft | Qt::AlignTop,
+        scrolledDetailTextRect,
+        Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
         detailText);
+    painter.restore();
 }
 
 void PerformanceWidget::mouseMoveEvent(

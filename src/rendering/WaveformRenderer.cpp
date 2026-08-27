@@ -811,6 +811,16 @@ WaveformRenderer::WaveformRenderer()
     }
 
     image_.fill(Qt::black);
+
+    imageSpare1_ = QImage(
+        image_.width(),
+        image_.height(),
+        QImage::Format_RGB32);
+
+    imageSpare2_ = QImage(
+        image_.width(),
+        image_.height(),
+        QImage::Format_RGB32);
 }
 
 void WaveformRenderer::setTraceRendererId(
@@ -852,6 +862,18 @@ void WaveformRenderer::setOutputSize(
         allLinesPersistence_.capacity() < requestedPixelCount;
 
     image_ =
+        QImage(
+            width,
+            height,
+            QImage::Format_RGB32);
+
+    imageSpare1_ =
+        QImage(
+            width,
+            height,
+            QImage::Format_RGB32);
+
+    imageSpare2_ =
         QImage(
             width,
             height,
@@ -994,6 +1016,53 @@ void WaveformRenderer::setScrollPosition(
     }
 
     scrollPosition_ = newPosition;
+}
+
+void WaveformRenderer::prepareImageForRender()
+{
+    // QImage is implicitly shared. waveformChanged()/waveformVideoChanged() hand
+    // the completed image to another thread; on the next frame a direct fill()
+    // of that still-shared image would first detach and deep-copy the entire
+    // previous framebuffer. At UHD-ish widget sizes that copy dominated B.
+    //
+    // Keep two same-resolution spare transport surfaces. In steady state one of
+    // them is detached/free by the time the next frame needs a target, so the
+    // renderer swaps to already-allocated memory instead of copying old pixels.
+    // Only if the consumer is more than two frames behind do we fall back to a
+    // fresh allocation; importantly that still avoids copying the old frame.
+    if (image_.isDetached())
+    {
+        return;
+    }
+
+    auto trySwap =
+        [this](QImage& spare)
+        {
+            if (spare.width() != image_.width() ||
+                spare.height() != image_.height() ||
+                spare.format() != image_.format() ||
+                !spare.isDetached())
+            {
+                return false;
+            }
+
+            image_.swap(spare);
+            return true;
+        };
+
+    if (trySwap(imageSpare1_) ||
+        trySwap(imageSpare2_))
+    {
+        return;
+    }
+
+    // Exceptional back-pressure path: all three target surfaces are still
+    // referenced by consumers. Do not detach/copy the old image; create a clean
+    // replacement target. Normal steady-state rendering should never hit this.
+    image_ = QImage(
+        image_.width(),
+        image_.height(),
+        QImage::Format_RGB32);
 }
 
 void WaveformRenderer::analyze(
@@ -1210,39 +1279,58 @@ void WaveformRenderer::renderSingleLine(
     singleLineSource_.resize(sourceWidth);
     singleLineReconstructed_.resize(reconstructedWidth);
 
-    for (std::size_t x = 0;
-        x < sourceWidth;
-        ++x)
+    const std::vector<float>* preparedLuma =
+        preparedReconstructedLuma_;
+    preparedReconstructedLuma_ = nullptr;
+
+    const bool canReusePreparedLuma =
+        preparedLuma != nullptr &&
+        preparedLuma->size() == reconstructedWidth;
+
+    if (canReusePreparedLuma)
     {
-        singleLineSource_[x] =
-            static_cast<float>(
-                frame.y[sourceLineOffset + x]);
+        std::copy(
+            preparedLuma->begin(),
+            preparedLuma->end(),
+            singleLineReconstructed_.begin());
+        renderTimings_.resamplerCacheRebuilt = false;
     }
+    else
+    {
+        for (std::size_t x = 0;
+            x < sourceWidth;
+            ++x)
+        {
+            singleLineSource_[x] =
+                static_cast<float>(
+                    frame.y[sourceLineOffset + x]);
+        }
 
-    const std::uint64_t resamplerGenerationBefore =
-        singleLineReconstructor_.cacheGeneration();
+        const std::uint64_t resamplerGenerationBefore =
+            singleLineReconstructor_.cacheGeneration();
 
-    const std::uint64_t upsampleStartUs =
-        static_cast<std::uint64_t>(
-            frameTimer.nsecsElapsed() / 1000);
-    QElapsedTimer upsampleTimer;
-    upsampleTimer.start();
+        const std::uint64_t upsampleStartUs =
+            static_cast<std::uint64_t>(
+                frameTimer.nsecsElapsed() / 1000);
+        QElapsedTimer upsampleTimer;
+        upsampleTimer.start();
 
-    singleLineReconstructor_.resample(
-        singleLineSource_,
-        singleLineReconstructed_);
+        singleLineReconstructor_.resample(
+            singleLineSource_,
+            singleLineReconstructed_);
 
-    const std::uint64_t upsampleUs =
-        static_cast<std::uint64_t>(
-            upsampleTimer.nsecsElapsed() / 1000);
-    recordPhase(
-        'U',
-        upsampleStartUs,
-        upsampleUs);
+        const std::uint64_t upsampleUs =
+            static_cast<std::uint64_t>(
+                upsampleTimer.nsecsElapsed() / 1000);
+        recordPhase(
+            'U',
+            upsampleStartUs,
+            upsampleUs);
 
-    renderTimings_.resamplerCacheRebuilt =
-        singleLineReconstructor_.cacheGeneration() !=
-        resamplerGenerationBefore;
+        renderTimings_.resamplerCacheRebuilt =
+            singleLineReconstructor_.cacheGeneration() !=
+            resamplerGenerationBefore;
+    }
 
     fullLumaVolts_.resize(reconstructedWidth);
 
@@ -1898,6 +1986,9 @@ void WaveformRenderer::renderSingleLine(
     phaseTimer.restart();
 
     // image_ is only the final Qt transport surface. Phosphor math is raw.
+    // Acquire a detached, already-allocated transport surface before clearing.
+    // This avoids QImage copy-on-write detaching the published previous frame.
+    prepareImageForRender();
     image_.fill(Qt::black);
 
     renderTimings_.baseClearUs =
@@ -5095,6 +5186,7 @@ void WaveformRenderer::renderAllLines(
 
     // Build the graticule first.  The all-lines density trace only writes
     // non-zero pixels afterwards, so the trace naturally sits on top.
+    prepareImageForRender();
     image_.fill(Qt::black);
     {
         QPainter graticulePainter(&image_);
@@ -5778,6 +5870,12 @@ const std::vector<float>& WaveformRenderer::fullLumaVolts() const noexcept
 const std::vector<float>& WaveformRenderer::reconstructedLumaSamples() const noexcept
 {
     return singleLineReconstructed_;
+}
+
+void WaveformRenderer::setPreparedReconstructedLuma(
+    const std::vector<float>* samples) noexcept
+{
+    preparedReconstructedLuma_ = samples;
 }
 
 const WaveformRenderTimings& WaveformRenderer::renderTimings() const noexcept

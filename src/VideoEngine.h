@@ -563,7 +563,8 @@ private:
         std::size_t jobCount,
         const std::function<void(
             std::size_t,
-            std::uint32_t)>& job);
+            std::uint32_t)>& job,
+        TraceRendererId rendererId);
     void runFrequencyCompensationJobs(
         CapturedFrameSlot& slot,
         int gainHundredthsDb);
@@ -683,6 +684,7 @@ private:
     // display work.
     std::atomic_bool waveformAssistWorkAvailable_{false};
     char waveformAssistPhaseLabel_ = '?';
+    TraceRendererId waveformAssistRendererId_ = TraceRendererId::PcWaveform;
     std::atomic<std::uint64_t> waveformAssistGeneration_{ 0 };
     std::atomic<std::uint64_t> waveformAssistCompletedGeneration_{ 0 };
     std::atomic<std::int64_t> waveformAssistCaptureTickNs_{ 0 };
