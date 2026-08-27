@@ -37,9 +37,12 @@ struct WaveformRenderPhaseEvent
 
 struct WaveformRenderTimings
 {
-    static constexpr std::size_t kPhaseCapacity = 12;
+    static constexpr std::size_t kPhaseCapacity = 20;
 
     std::uint64_t persistenceUs = 0;
+    std::uint64_t baseClearUs = 0;
+    std::uint64_t graticuleUs = 0;
+    std::uint64_t phosphorComposeUs = 0;
     std::uint64_t traceUs = 0;
     std::uint64_t tracePrepUs = 0;
     std::uint64_t traceRasterUs = 0;
@@ -58,8 +61,8 @@ struct WaveformRenderTimings
     std::uint64_t catWuzleChunkRenderAvgUs = 0;
     std::uint64_t catWuzleChunkRenderMaxUs = 0;
     std::uint64_t catWuzleChunkQueueWaitMaxUs = 0;
-    std::array<std::uint32_t, 3> catWuzleWorkerChunkCount{};
-    std::array<std::uint64_t, 3> catWuzleWorkerRenderUs{};
+    std::array<std::uint32_t, 4> catWuzleWorkerChunkCount{};
+    std::array<std::uint64_t, 4> catWuzleWorkerRenderUs{};
     std::uint32_t phaseCount = 0;
     std::array<WaveformRenderPhaseEvent, kPhaseCapacity> phases{};
     double beamCoreRadiusPx = 0.0;
@@ -173,8 +176,8 @@ private:
         std::uint64_t chunkRenderAvgUs = 0;
         std::uint64_t chunkRenderMaxUs = 0;
         std::uint64_t chunkQueueWaitMaxUs = 0;
-        std::array<std::uint32_t, 3> workerChunkCount{};
-        std::array<std::uint64_t, 3> workerRenderUs{};
+        std::array<std::uint32_t, 4> workerChunkCount{};
+        std::array<std::uint64_t, 4> workerRenderUs{};
     };
 
     [[nodiscard]] std::vector<BeamPoint> buildCurrentLumaPolyline(
@@ -186,7 +189,7 @@ private:
         const std::vector<BeamPoint>& polyline,
         DenseSteepStats* stats = nullptr) const;
 
-    [[nodiscard]] std::vector<std::uint16_t> renderCurrentPhosphorEnergy(
+    void renderCurrentPhosphorEnergy(
         const std::vector<BeamPoint>& polyline,
         const std::vector<bool>& denseSteepSegment,
         const QRectF& plotRect,
@@ -196,7 +199,8 @@ private:
         int& activeMinY,
         int& activeMaxX,
         int& activeMaxY,
-        CatWuzleFrameStats& frameStats);
+        CatWuzleFrameStats& frameStats,
+        std::uint64_t timelineBaseUs);
 
     void clearScopephorFrames();
     void applyScopephorFeedback(
@@ -281,6 +285,12 @@ private:
     std::vector<float> singleLineSource_;
     std::vector<float> singleLineReconstructed_;
     std::vector<float> fullLumaVolts_;
+
+    // Persistent target-resolution scratch buffer. Reallocated only when the
+    // waveform render target pixel count changes; cleared for each render.
+    std::vector<std::uint16_t> currentPhosphorEnergy_;
+    int currentPhosphorEnergyWidth_ = 0;
+    int currentPhosphorEnergyHeight_ = 0;
 
     std::vector<std::uint16_t> scopephorPreviousEnergy_;
     int scopephorPreviousMinX_ = 0;

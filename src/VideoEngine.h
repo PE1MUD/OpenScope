@@ -243,10 +243,16 @@ private:
         std::atomic<std::uint32_t> frequencyCompensationUs{ 0 };
 
         // Per-worker F chunks for this exact captured frame.  These are
-        // seeded into the published waveform-assist timeline later so the
-        // Performance floaty can show F -> R -> X on W0/W1/W2 without a
-        // global-timeline race against the previous waveform frame.
-        std::array<WaveformAssistTimelineStats, 3> frequencyAssistTimeline;
+        // Published independently to the four real worker lanes:
+        // Display 1, Display 2, Waveform, Vectorscope.
+        std::array<WaveformAssistTimelineStats, 2> frequencyAssistTimeline;
+
+        std::atomic<std::uint64_t> vectorscopeGeneration{ 0 };
+        Yuv444Frame vectorscopeFrame;
+
+        std::atomic<std::uint64_t> waveformGeneration{ 0 };
+        std::atomic<bool> waveformRawSelectedLine{ false };
+        Yuv444Frame waveformFrame;
 
         Yuv444Frame frame;
     };
@@ -407,6 +413,14 @@ private:
         kInvalidSlotIndex
     };
 
+    std::atomic<int> latestVectorscopeSlot_{
+        kInvalidSlotIndex
+    };
+
+    std::atomic<int> latestWaveformSlot_{
+        kInvalidSlotIndex
+    };
+
     std::size_t nextCaptureWriteSlot_ = 0;
     std::size_t activeCaptureWriteSlot_ = 0;
 
@@ -553,6 +567,7 @@ private:
     void runFrequencyCompensationJobs(
         CapturedFrameSlot& slot,
         int gainHundredthsDb);
+    [[nodiscard]] bool hasLumaCompensationConsumer() const noexcept;
     bool tryRunFrequencyAssistJob(
         std::uint32_t workerId);
     bool tryRunWaveformAssistJob(
@@ -631,10 +646,13 @@ private:
         2> displayDeinterlaceWorkerUs_{};
 
 
-    // Capture-side F queue.  W0 is the capture thread; W1/W2 are the same
-    // display phase workers used later for R/X.  Display work from the
-    // previous frame still has priority; F waits for all its chunks before
-    // publishing the new capture slot.
+    // Conditional F queue.  The capture thread only orchestrates/barriers.
+    // Only the two HIGH-priority display workers may consume F chunks:
+    //   0 = Display worker 1
+    //   1 = Display worker 2
+    //
+    // This is intentional: no NORMAL-priority instrument worker may become
+    // part of a barrier on which the hard video path waits.
     std::mutex frequencyAssistMutex_;
     std::condition_variable frequencyAssistDoneCondition_;
     CapturedFrameSlot* frequencyAssistSlot_ = nullptr;
@@ -675,6 +693,10 @@ private:
     // there is enough measured slack before the next 40 ms capture tick.
     // The holdoff is an EMA of the worker's actual display load + 50%.
     std::atomic<bool> displayPipelineActive_{ false };
+    // At most one nice-to-have instrument worker receives the temporary
+    // scheduler boost while the hard-video path is idle.
+    // 0 = none, 1 = Waveform, 2 = Vectorscope.
+    std::atomic<int> instrumentPriorityOwner_{ 0 };
     std::array<
         std::atomic<std::uint64_t>,
         2> displayCurrentFrameWorkerUs_{};

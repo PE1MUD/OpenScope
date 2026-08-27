@@ -1,4 +1,4 @@
-#include "rendering/WaveformRenderer.h"
+﻿#include "rendering/WaveformRenderer.h"
 #include "diagnostics/TraceLog.h"
 #include "ui/ViewportOverlay.h"
 #include "processing/SignalReconstructor.h"
@@ -1435,6 +1435,9 @@ void WaveformRenderer::renderSingleLine(
     // before rasterisation.  TRUE means dense/steep packet: expensive AA may
     // be bypassed for that segment (except at the stitched packet edges).
     DenseSteepStats denseSteepStats;
+    const std::uint64_t packetClassifyStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
     QElapsedTimer mudTimer;
     mudTimer.start();
 
@@ -1446,6 +1449,14 @@ void WaveformRenderer::renderSingleLine(
     const std::uint64_t mudDetectUs =
         static_cast<std::uint64_t>(
             mudTimer.nsecsElapsed() / 1000);
+
+    // This used to be the unexplained wallclock gap between T and the
+    // first parallel raster chunk. Make it a first-class phase so the
+    // composite Screen waveform timeline accounts for that time directly.
+    recordPhase(
+        'K',
+        packetClassifyStartUs,
+        mudDetectUs);
 
     traceLog(
         TraceEventType::MudDetect,
@@ -1495,8 +1506,7 @@ void WaveformRenderer::renderSingleLine(
             frameTimer.nsecsElapsed() / 1000);
     phaseTimer.restart();
 
-    std::vector<std::uint16_t> currentPhosphorEnergy =
-        renderCurrentPhosphorEnergy(
+    renderCurrentPhosphorEnergy(
             currentLumaPolyline,
             denseSteepSegment,
             scope,
@@ -1506,7 +1516,10 @@ void WaveformRenderer::renderSingleLine(
             phosphorMinY,
             phosphorMaxX,
             phosphorMaxY,
-            catWuzleFrameStats);
+            catWuzleFrameStats,
+            traceRasterStartUs);
+
+    auto& currentPhosphorEnergy = currentPhosphorEnergy_;
 
     renderTimings_.catWuzleChunkCount =
         catWuzleFrameStats.chunkCount;
@@ -1842,20 +1855,65 @@ void WaveformRenderer::renderSingleLine(
     renderTimings_.traceRasterUs =
         currentCoreUs;
 
-    const std::uint64_t persistenceStartUs =
+    renderTimings_.persistenceUs = 0;
+
+    if (persistence_ > 0)
+    {
+        const std::uint64_t persistenceStartUs =
+            static_cast<std::uint64_t>(
+                frameTimer.nsecsElapsed() / 1000);
+
+        phaseTimer.restart();
+
+        applyScopephorFeedback(
+            currentPhosphorEnergy,
+            phosphorMinX,
+            phosphorMinY,
+            phosphorMaxX,
+            phosphorMaxY);
+
+        renderTimings_.persistenceUs =
+            static_cast<std::uint64_t>(
+                phaseTimer.nsecsElapsed() / 1000);
+
+        recordPhase(
+            'P',
+            persistenceStartUs,
+            renderTimings_.persistenceUs);
+
+        traceLog(
+            TraceEventType::WaveformPersistence,
+            logGeneration,
+            0u,
+            0u,
+            renderTimings_.persistenceUs,
+            static_cast<std::uint64_t>(persistence_),
+            traceRendererId_);
+    }
+
+    const std::uint64_t baseClearStartUs =
         static_cast<std::uint64_t>(
             frameTimer.nsecsElapsed() / 1000);
-    phaseTimer.restart();
 
-    applyScopephorFeedback(
-        currentPhosphorEnergy,
-        phosphorMinX,
-        phosphorMinY,
-        phosphorMaxX,
-        phosphorMaxY);
+    phaseTimer.restart();
 
     // image_ is only the final Qt transport surface. Phosphor math is raw.
     image_.fill(Qt::black);
+
+    renderTimings_.baseClearUs =
+        static_cast<std::uint64_t>(
+            phaseTimer.nsecsElapsed() / 1000);
+
+    recordPhase(
+        'B',
+        baseClearStartUs,
+        renderTimings_.baseClearUs);
+
+    const std::uint64_t graticuleStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
+
+    phaseTimer.restart();
 
     // Draw the graticule first. Signal traces are composed afterwards so
     // the beam remains visually in front of the graticule.
@@ -1867,22 +1925,14 @@ void WaveformRenderer::renderSingleLine(
             VideoStandard::pal625());
     }
 
-    renderTimings_.persistenceUs =
+    renderTimings_.graticuleUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
-    recordPhase(
-        'P',
-        persistenceStartUs,
-        renderTimings_.persistenceUs);
 
-    traceLog(
-        TraceEventType::WaveformPersistence,
-        logGeneration,
-        0u,
-        0u,
-        renderTimings_.persistenceUs,
-        static_cast<std::uint64_t>(persistence_),
-        traceRendererId_);
+    recordPhase(
+        'G',
+        graticuleStartUs,
+        renderTimings_.graticuleUs);
 
     if (chromaFillIntensity_ > 0 &&
         !measurementProbePresentation_)
@@ -2321,6 +2371,21 @@ void WaveformRenderer::renderSingleLine(
         const AnalogVideoLevels legalAnalog =
             analogLevels(VideoColorStandard::Rec601_625);
 
+        // Legality is currently applied while the finite-width phosphor beam
+        // is resolved to RGB. Without a footprint allowance the lower AA/glow
+        // edge of a perfectly legal 0.300 V black trace crosses the 0.298 V
+        // row and becomes red even though the trace centre is legal. Treat
+        // roughly the visible lower beam footprint as presentation margin.
+        // This keeps the *signal* trip point at 0.298 V instead of making the
+        // antialiased skirt look illegal immediately below 0.300 V.
+        const double voltsPerRasterRow =
+            legalAnalog.graticuleMaxVolts /
+            (std::max)(scope.height(), 1.0);
+        const double lowBeamFootprintGuardVolts =
+            3.0 * voltsPerRasterRow;
+        const double illegalLowRenderVolts =
+            kIllegalLowVolts - lowBeamFootprintGuardVolts;
+
         for (int y = phosphorMinY;
             y <= phosphorMaxY;
             ++y)
@@ -2341,7 +2406,7 @@ void WaveformRenderer::renderSingleLine(
 
             const bool illegalLuminanceRow =
                 colorizeIllegalLuminance &&
-                (rowVolts < kIllegalLowVolts ||
+                (rowVolts < illegalLowRenderVolts ||
                  rowVolts > kIllegalHighVolts);
 
             for (int x = phosphorMinX;
@@ -2432,7 +2497,8 @@ void WaveformRenderer::renderSingleLine(
     const std::uint64_t phosphorComposeUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
-    renderTimings_.persistenceUs +=
+
+    renderTimings_.phosphorComposeUs =
         phosphorComposeUs;
 
     // Illegal luminance is colourized during ScopePhor RGB composition
@@ -2440,7 +2506,7 @@ void WaveformRenderer::renderSingleLine(
     // phosphor history the same red as the live beam.
 
     recordPhase(
-        'P',
+        'Q',
         phosphorComposeStartUs,
         phosphorComposeUs);
 
@@ -3022,7 +3088,7 @@ std::vector<bool> WaveformRenderer::buildDenseSteepPacketMask(
     return denseSteepSegment;
 }
 
-std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
+void WaveformRenderer::renderCurrentPhosphorEnergy(
     const std::vector<BeamPoint>& polyline,
     const std::vector<bool>& denseSteepSegment,
     const QRectF& plotRect,
@@ -3032,12 +3098,39 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
     int& activeMinY,
     int& activeMaxX,
     int& activeMaxY,
-    CatWuzleFrameStats& frameStats)
+    CatWuzleFrameStats& frameStats,
+    std::uint64_t timelineBaseUs)
 {
     (void)plotRect;
     frameStats = {};
     glowUs = 0u;
     coreUs = 0u;
+
+    // Delta 41: sub-phases inside this helper need the same capture-relative
+    // clock as the parent render.  Keep a local elapsed clock and add the
+    // caller-supplied base instead of referring to renderSingleLine locals.
+    QElapsedTimer phaseClock;
+    phaseClock.start();
+
+    const auto recordLocalPhase =
+        [this](char label,
+            std::uint64_t startUs,
+            std::uint64_t durationUs)
+        {
+            if (durationUs == 0u ||
+                renderTimings_.phaseCount >=
+                    WaveformRenderTimings::kPhaseCapacity)
+            {
+                return;
+            }
+
+            auto& event =
+                renderTimings_.phases[
+                    renderTimings_.phaseCount++];
+            event.label = label;
+            event.startUs = startUs;
+            event.durationUs = durationUs;
+        };
 
     const int width =
         image_.width();
@@ -3049,17 +3142,61 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         width <= 0 ||
         height <= 0)
     {
-        return {};
+        currentPhosphorEnergy_.clear();
+        currentPhosphorEnergyWidth_ = 0;
+        currentPhosphorEnergyHeight_ = 0;
+        return;
     }
 
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) *
         static_cast<std::size_t>(height);
 
-    // Monochrome 16-bit beam-energy target buffer.
-    std::vector<std::uint16_t> currentEnergy(
-        pixelCount,
-        0u);
+    // Persistent monochrome 16-bit beam-energy target. Allocation is paid only
+    // when the target resolution changes. E is resize/reallocation; lower-case
+    // e is the steady-state clear. A resolution change gets fresh zeroed storage
+    // and therefore does not immediately clear the same memory a second time.
+    const bool energyTargetChanged =
+        currentPhosphorEnergyWidth_ != width ||
+        currentPhosphorEnergyHeight_ != height ||
+        currentPhosphorEnergy_.size() != pixelCount;
+
+    if (energyTargetChanged)
+    {
+        const std::uint64_t allocationStartUs =
+            timelineBaseUs +
+            static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+        QElapsedTimer allocationTimer;
+        allocationTimer.start();
+
+        std::vector<std::uint16_t> freshEnergy(pixelCount, 0u);
+        currentPhosphorEnergy_.swap(freshEnergy);
+        currentPhosphorEnergyWidth_ = width;
+        currentPhosphorEnergyHeight_ = height;
+
+        const std::uint64_t allocationUs =
+            static_cast<std::uint64_t>(allocationTimer.nsecsElapsed() / 1000);
+        recordLocalPhase('E', allocationStartUs, allocationUs);
+    }
+    else
+    {
+        const std::uint64_t clearStartUs =
+            timelineBaseUs +
+            static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+        QElapsedTimer clearTimer;
+        clearTimer.start();
+
+        std::fill(
+            currentPhosphorEnergy_.begin(),
+            currentPhosphorEnergy_.end(),
+            std::uint16_t{0});
+
+        const std::uint64_t clearUs =
+            static_cast<std::uint64_t>(clearTimer.nsecsElapsed() / 1000);
+        recordLocalPhase('e', clearStartUs, clearUs);
+    }
+
+    auto& currentEnergy = currentPhosphorEnergy_;
 
     const double renderDimension =
         static_cast<double>(
@@ -3206,7 +3343,15 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
 
     /*
      * Glow only.  No white core lives in these kernels anymore.
+     * Building the subpixel kernels contains hypot/exp work; measure it as a
+     * separate phase so a non-zero glow cannot hide in pre-raster setup.
      */
+    const std::uint64_t glowKernelStartUs =
+        timelineBaseUs +
+        static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+    QElapsedTimer glowKernelTimer;
+    glowKernelTimer.start();
+
     if (glowGain > 0.0)
     {
         constexpr int kCoverageSamples = 4;
@@ -3323,6 +3468,16 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
             }
         }
     }
+
+    const std::uint64_t glowKernelUs =
+        static_cast<std::uint64_t>(glowKernelTimer.nsecsElapsed() / 1000);
+    recordLocalPhase('H', glowKernelStartUs, glowKernelUs);
+
+    const std::uint64_t aaSetupStartUs =
+        timelineBaseUs +
+        static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+    QElapsedTimer aaSetupTimer;
+    aaSetupTimer.start();
 
     const auto addEnergy =
         [&currentEnergy,
@@ -3483,6 +3638,16 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
      */
     constexpr std::size_t kPreferredChunkCount = 8u;
 
+    const std::uint64_t aaSetupUs =
+        static_cast<std::uint64_t>(aaSetupTimer.nsecsElapsed() / 1000);
+    recordLocalPhase('A', aaSetupStartUs, aaSetupUs);
+
+    const std::uint64_t rasterLoadStartUs =
+        timelineBaseUs +
+        static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+    QElapsedTimer rasterLoadTimer;
+    rasterLoadTimer.start();
+
     std::vector<std::uint64_t> columnCost(
         static_cast<std::size_t>(width),
         1u);
@@ -3563,6 +3728,16 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         }
     }
 
+    const std::uint64_t rasterLoadUs =
+        static_cast<std::uint64_t>(rasterLoadTimer.nsecsElapsed() / 1000);
+    recordLocalPhase('L', rasterLoadStartUs, rasterLoadUs);
+
+    const std::uint64_t jobPartitionStartUs =
+        timelineBaseUs +
+        static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+    QElapsedTimer jobPartitionTimer;
+    jobPartitionTimer.start();
+
     std::size_t chunkCount = 1u;
     if (traceJobExecutor_ &&
         width >= 320)
@@ -3630,6 +3805,10 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
 
     frameStats.chunkCount = static_cast<std::uint32_t>(strips.size());
     renderTimings_.traceParallel = strips.size() > 1u;
+
+    const std::uint64_t jobPartitionUs =
+        static_cast<std::uint64_t>(jobPartitionTimer.nsecsElapsed() / 1000);
+    recordLocalPhase('J', jobPartitionStartUs, jobPartitionUs);
 
     const auto renderCoreStrip =
         [&](int clipFirstX, int clipLastX)
@@ -4324,7 +4503,7 @@ std::vector<std::uint16_t> WaveformRenderer::renderCurrentPhosphorEnergy(
         static_cast<std::uint64_t>(
             timer.nsecsElapsed() / 1000);
 
-    return currentEnergy;
+    return;
 }
 
 void WaveformRenderer::clearScopephorFrames()
@@ -5505,11 +5684,20 @@ void WaveformRenderer::setSelectedLine(
 void WaveformRenderer::setPersistence(
     int persistence)
 {
-    persistence_ =
+    const int normalizedPersistence =
         std::clamp(
             persistence,
             0,
             200);
+
+    if (normalizedPersistence == 0 &&
+        persistence_ != 0)
+    {
+        clearScopephorFrames();
+    }
+
+    persistence_ =
+        normalizedPersistence;
 }
 
 void WaveformRenderer::setCoreIntensity(

@@ -1,4 +1,4 @@
-#include <QMetaObject>
+﻿#include <QMetaObject>
 #include "VideoEngine.h"
 #include "BuildConfig.h"
 
@@ -9,6 +9,7 @@
 #include <QDebug>
 #include <QElapsedTimer>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <thread>
 #include <chrono>
@@ -19,6 +20,434 @@
 #include <avrt.h>
 
 #pragma comment(lib, "Avrt.lib")
+
+namespace
+{
+    constexpr unsigned kPriorityVideo1 = 0x01u;
+    constexpr unsigned kPriorityVideo2 = 0x02u;
+    constexpr unsigned kPriorityWaveform = 0x04u;
+    constexpr unsigned kPriorityVectorscope = 0x08u;
+    constexpr unsigned kPriorityVideoPair =
+        kPriorityVideo1 | kPriorityVideo2;
+
+    std::atomic<unsigned> gPriorityMask{kPriorityVideoPair};
+    // Instrument busy bits: bit 0 = Waveform own task, bit 1 = Vectorscope own task.
+    std::atomic<unsigned> gInstrumentBusyMask{0u};
+    std::atomic<bool> gVideoCriticalOwnership{true};
+    std::mutex gPriorityMaskMutex;
+
+    struct PriorityMaskTransition
+    {
+        std::int64_t timestampNs = 0;
+        unsigned mask = kPriorityVideoPair;
+    };
+
+    constexpr std::size_t kPriorityTransitionCapacity = 128;
+    std::array<PriorityMaskTransition, kPriorityTransitionCapacity>
+        gPriorityTransitions{};
+    std::size_t gPriorityTransitionWriteIndex = 0;
+    std::size_t gPriorityTransitionCount = 0;
+
+    std::array<std::atomic<HANDLE>, 2> gVideoWorkerHandles{};
+    std::atomic<HANDLE> gWaveformWorkerHandle{nullptr};
+    std::atomic<HANDLE> gVectorscopeWorkerHandle{nullptr};
+
+    HANDLE duplicateCurrentThreadHandle()
+    {
+        HANDLE handle = nullptr;
+
+        if (!DuplicateHandle(
+                GetCurrentProcess(),
+                GetCurrentThread(),
+                GetCurrentProcess(),
+                &handle,
+                THREAD_SET_INFORMATION |
+                    THREAD_QUERY_INFORMATION,
+                FALSE,
+                0))
+        {
+            return nullptr;
+        }
+
+        return handle;
+    }
+
+    void applyPriority(HANDLE handle, int priority)
+    {
+        if (handle != nullptr)
+        {
+            SetThreadPriority(handle, priority);
+        }
+    }
+
+    std::int64_t steadyNowNs()
+    {
+        return static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    void recordPriorityMaskTransitionLocked(unsigned mask)
+    {
+        gPriorityTransitions[gPriorityTransitionWriteIndex] =
+            PriorityMaskTransition{ steadyNowNs(), mask };
+
+        gPriorityTransitionWriteIndex =
+            (gPriorityTransitionWriteIndex + 1u) %
+            kPriorityTransitionCapacity;
+
+        gPriorityTransitionCount =
+            std::min<std::size_t>(
+                gPriorityTransitionCount + 1u,
+                kPriorityTransitionCapacity);
+    }
+
+    unsigned postVideoPriorityMask(unsigned instrumentBusyMask)
+    {
+        unsigned mask = 0u;
+        unsigned highSlots = 0u;
+
+        if ((instrumentBusyMask & 0x1u) != 0u)
+        {
+            mask |= kPriorityWaveform;
+            ++highSlots;
+        }
+        if ((instrumentBusyMask & 0x2u) != 0u && highSlots < 2u)
+        {
+            mask |= kPriorityVectorscope;
+            ++highSlots;
+        }
+
+        // An instrument that finishes its OWN task decharges its HIGH slot
+        // back to a video worker, but remains available at NORMAL priority to
+        // help the remaining waveform R/X queue.
+        if (highSlots < 2u)
+        {
+            mask |= kPriorityVideo1;
+            ++highSlots;
+        }
+        if (highSlots < 2u)
+        {
+            mask |= kPriorityVideo2;
+        }
+
+        return mask;
+    }
+
+    void applyPriorityMask(unsigned mask)
+    {
+        std::lock_guard<std::mutex> lock(gPriorityMaskMutex);
+
+        // Demote everybody first. This guarantees that the transition never
+        // creates more than two HIGH-priority OpenScope workers.
+        for (auto& handle : gVideoWorkerHandles)
+        {
+            applyPriority(
+                handle.load(std::memory_order_acquire),
+                THREAD_PRIORITY_NORMAL);
+        }
+        applyPriority(
+            gWaveformWorkerHandle.load(std::memory_order_acquire),
+            THREAD_PRIORITY_NORMAL);
+        applyPriority(
+            gVectorscopeWorkerHandle.load(std::memory_order_acquire),
+            THREAD_PRIORITY_NORMAL);
+
+        if ((mask & kPriorityVideo1) != 0u)
+        {
+            applyPriority(
+                gVideoWorkerHandles[0].load(std::memory_order_acquire),
+                THREAD_PRIORITY_HIGHEST);
+        }
+        if ((mask & kPriorityVideo2) != 0u)
+        {
+            applyPriority(
+                gVideoWorkerHandles[1].load(std::memory_order_acquire),
+                THREAD_PRIORITY_HIGHEST);
+        }
+        if ((mask & kPriorityWaveform) != 0u)
+        {
+            applyPriority(
+                gWaveformWorkerHandle.load(std::memory_order_acquire),
+                THREAD_PRIORITY_HIGHEST);
+        }
+        if ((mask & kPriorityVectorscope) != 0u)
+        {
+            applyPriority(
+                gVectorscopeWorkerHandle.load(std::memory_order_acquire),
+                THREAD_PRIORITY_HIGHEST);
+        }
+
+        gPriorityMask.store(mask, std::memory_order_release);
+        // Repeated new-frame Video masks are intentional frame-local anchors.
+        recordPriorityMaskTransitionLocked(mask);
+    }
+
+    template <typename Timeline>
+    void appendPriorityOwnershipIntervals(
+        Timeline& timeline,
+        std::int64_t diagnosticOriginNs,
+        const std::chrono::steady_clock::time_point& intervalStart,
+        const std::chrono::steady_clock::time_point& intervalEnd,
+        unsigned ownerBit)
+    {
+        if (diagnosticOriginNs <= 0 || intervalEnd <= intervalStart)
+        {
+            return;
+        }
+
+        const std::int64_t startNs =
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    intervalStart.time_since_epoch()).count());
+        const std::int64_t endNs =
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    intervalEnd.time_since_epoch()).count());
+
+        std::array<PriorityMaskTransition, kPriorityTransitionCapacity> copy{};
+        std::size_t copyCount = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(gPriorityMaskMutex);
+            copyCount = gPriorityTransitionCount;
+            const std::size_t first =
+                (gPriorityTransitionWriteIndex +
+                 kPriorityTransitionCapacity -
+                 copyCount) %
+                kPriorityTransitionCapacity;
+
+            for (std::size_t i = 0; i < copyCount; ++i)
+            {
+                copy[i] =
+                    gPriorityTransitions[
+                        (first + i) % kPriorityTransitionCapacity];
+            }
+        }
+
+        unsigned activeMask = kPriorityVideoPair;
+        std::int64_t segmentStartNs = startNs;
+
+        for (std::size_t i = 0; i < copyCount; ++i)
+        {
+            const auto& transition = copy[i];
+            if (transition.timestampNs <= startNs)
+            {
+                activeMask = transition.mask;
+                continue;
+            }
+            if (transition.timestampNs >= endNs)
+            {
+                break;
+            }
+
+            if ((activeMask & ownerBit) != 0u &&
+                transition.timestampNs > segmentStartNs)
+            {
+                const std::uint64_t relativeStartUs =
+                    segmentStartNs > diagnosticOriginNs
+                    ? static_cast<std::uint64_t>(
+                        (segmentStartNs - diagnosticOriginNs) / 1000)
+                    : 0u;
+                const std::uint64_t durationUs =
+                    static_cast<std::uint64_t>(
+                        (transition.timestampNs - segmentStartNs) / 1000);
+
+                timeline.append(
+                    '^',
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(relativeStartUs, 80'000u)),
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(durationUs, 80'000u)));
+            }
+
+            activeMask = transition.mask;
+            segmentStartNs = transition.timestampNs;
+        }
+
+        if ((activeMask & ownerBit) != 0u && endNs > segmentStartNs)
+        {
+            const std::uint64_t relativeStartUs =
+                segmentStartNs > diagnosticOriginNs
+                ? static_cast<std::uint64_t>(
+                    (segmentStartNs - diagnosticOriginNs) / 1000)
+                : 0u;
+            const std::uint64_t durationUs =
+                static_cast<std::uint64_t>(
+                    (endNs - segmentStartNs) / 1000);
+
+            timeline.append(
+                '^',
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(relativeStartUs, 80'000u)),
+                static_cast<std::uint32_t>(
+                    std::min<std::uint64_t>(durationUs, 80'000u)));
+        }
+    }
+
+    WorkerPhaseTimelineSnapshot priorityOwnershipSnapshot(
+        std::int64_t diagnosticOriginNs,
+        const std::chrono::steady_clock::time_point& intervalEnd,
+        unsigned ownerBit,
+        std::uint64_t generation)
+    {
+        WorkerPhaseTimelineSnapshot result{};
+        result.generation = generation;
+
+        if (diagnosticOriginNs <= 0)
+        {
+            return result;
+        }
+
+        const std::int64_t endNs =
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    intervalEnd.time_since_epoch()).count());
+
+        if (endNs <= diagnosticOriginNs)
+        {
+            return result;
+        }
+
+        std::array<PriorityMaskTransition, kPriorityTransitionCapacity> copy{};
+        std::size_t copyCount = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(gPriorityMaskMutex);
+            copyCount = gPriorityTransitionCount;
+            const std::size_t first =
+                (gPriorityTransitionWriteIndex +
+                 kPriorityTransitionCapacity -
+                 copyCount) %
+                kPriorityTransitionCapacity;
+
+            for (std::size_t i = 0; i < copyCount; ++i)
+            {
+                copy[i] =
+                    gPriorityTransitions[
+                        (first + i) % kPriorityTransitionCapacity];
+            }
+        }
+
+        unsigned activeMask = kPriorityVideoPair;
+        std::int64_t segmentStartNs = diagnosticOriginNs;
+
+        auto appendInterval =
+            [&result, diagnosticOriginNs](
+                std::int64_t startNs,
+                std::int64_t stopNs)
+            {
+                if (stopNs <= startNs ||
+                    result.count >= WorkerPhaseTimelineSnapshot::kCapacity)
+                {
+                    return;
+                }
+
+                auto& event = result.events[result.count++];
+                event.phase = static_cast<std::uint8_t>('^');
+                event.startUs = static_cast<std::uint32_t>(
+                    std::min<std::int64_t>(
+                        (std::max)(startNs - diagnosticOriginNs,
+                                   std::int64_t{0}) / 1000,
+                        80'000));
+                event.durationUs = static_cast<std::uint32_t>(
+                    std::min<std::int64_t>(
+                        (stopNs - startNs) / 1000,
+                        80'000));
+            };
+
+        for (std::size_t i = 0; i < copyCount; ++i)
+        {
+            const auto& transition = copy[i];
+
+            if (transition.timestampNs <= diagnosticOriginNs)
+            {
+                activeMask = transition.mask;
+                continue;
+            }
+
+            if (transition.timestampNs >= endNs)
+            {
+                break;
+            }
+
+            if ((activeMask & ownerBit) != 0u)
+            {
+                appendInterval(segmentStartNs, transition.timestampNs);
+            }
+
+            activeMask = transition.mask;
+            segmentStartNs = transition.timestampNs;
+        }
+
+        if ((activeMask & ownerBit) != 0u)
+        {
+            appendInterval(segmentStartNs, endNs);
+        }
+
+        return result;
+    }
+
+    class InstrumentBusyLease
+    {
+    public:
+        explicit InstrumentBusyLease(unsigned bit)
+            : bit_(bit)
+        {
+            const unsigned busy =
+                gInstrumentBusyMask.fetch_or(
+                    bit_,
+                    std::memory_order_acq_rel) | bit_;
+
+            if (!gVideoCriticalOwnership.load(
+                    std::memory_order_acquire))
+            {
+                applyPriorityMask(postVideoPriorityMask(busy));
+            }
+        }
+
+        ~InstrumentBusyLease()
+        {
+            const unsigned previous =
+                gInstrumentBusyMask.fetch_and(
+                    ~bit_,
+                    std::memory_order_acq_rel);
+            const unsigned remaining = previous & ~bit_;
+
+            if (!gVideoCriticalOwnership.load(std::memory_order_acquire))
+            {
+                applyPriorityMask(postVideoPriorityMask(remaining));
+            }
+        }
+
+        InstrumentBusyLease(const InstrumentBusyLease&) = delete;
+        InstrumentBusyLease& operator=(const InstrumentBusyLease&) = delete;
+
+    private:
+        unsigned bit_ = 0u;
+    };
+
+    void registerPriorityHandle(
+        std::atomic<HANDLE>& destination,
+        unsigned workerBit)
+    {
+        HANDLE handle = duplicateCurrentThreadHandle();
+
+        std::lock_guard<std::mutex> lock(gPriorityMaskMutex);
+
+        destination.store(handle, std::memory_order_release);
+
+        const unsigned mask =
+            gPriorityMask.load(std::memory_order_acquire);
+
+        SetThreadPriority(
+            GetCurrentThread(),
+            (mask & workerBit) != 0u
+            ? THREAD_PRIORITY_HIGHEST
+            : THREAD_PRIORITY_NORMAL);
+    }
+
+}
 
 VideoEngine::VideoEngine(QObject* parent)
     : QObject(parent)
@@ -101,6 +530,12 @@ VideoEngine::VideoEngine(QObject* parent)
     for (CapturedFrameSlot& slot : captureSlots_)
     {
         slot.frame.resize(
+            kCaptureWidth,
+            kCaptureHeight);
+        slot.vectorscopeFrame.resize(
+            kCaptureWidth,
+            kCaptureHeight);
+        slot.waveformFrame.resize(
             kCaptureWidth,
             kCaptureHeight);
     }
@@ -273,6 +708,14 @@ void VideoEngine::submitWriteFrame()
     const auto captureTickTime =
         std::chrono::steady_clock::now();
 
+    // New-frame override: hard video owns the two HIGH-priority slots
+    // immediately, before F/N/D/C/S work is even scheduled. This ownership
+    // flag prevents early instrument wakeups from stealing priority back.
+    gVideoCriticalOwnership.store(
+        true,
+        std::memory_order_release);
+    applyPriorityMask(kPriorityVideoPair);
+
     const std::size_t slotIndex =
         activeCaptureWriteSlot_;
 
@@ -300,15 +743,110 @@ void VideoEngine::submitWriteFrame()
         timeline.reset(frequencyTimelineGeneration);
     }
 
-    const bool applyLumaCompensation =
+    const std::uint64_t generation =
+        captureGeneration_.fetch_add(
+            1,
+            std::memory_order_relaxed) + 1;
+
+    slot.generation.store(
+        generation,
+        std::memory_order_release);
+
+    traceLog(
+        TraceEventType::Frame,
+        generation,
+        0u,
+        static_cast<std::uint32_t>(slotIndex),
+        slot.frame.inputSignalValid ? 1u : 0u,
+        0u);
+
+    const bool vectorscopeHasConsumer =
+        vectorscopeScreenRenderEnabled_.load(std::memory_order_acquire) ||
+        vectorscopeVideoEnabled_.load(std::memory_order_acquire);
+
+    if (vectorscopeHasConsumer)
+    {
+        slot.vectorscopeFrame = slot.frame;
+        slot.vectorscopeGeneration.store(
+            generation,
+            std::memory_order_release);
+        latestVectorscopeSlot_.store(
+            static_cast<int>(slotIndex),
+            std::memory_order_release);
+        vectorscopeCondition_.notify_one();
+    }
+
+    const bool waveformHasConsumer =
+        waveformScreenRenderEnabled_.load(std::memory_order_acquire) ||
+        waveformVideoEnabled_.load(std::memory_order_acquire);
+
+    const int earlyWaveformLine =
+        selectedLine_.load(std::memory_order_acquire);
+
+    const bool waveformCanStartEarly =
+        waveformHasConsumer &&
+        earlyWaveformLine >= 0 &&
+        earlyWaveformLine < slot.frame.height;
+
+    if (waveformCanStartEarly)
+    {
+        slot.waveformFrame.width = slot.frame.width;
+        slot.waveformFrame.height = slot.frame.height;
+        slot.waveformFrame.sampleClockHz = slot.frame.sampleClockHz;
+        slot.waveformFrame.inputSignalValid = slot.frame.inputSignalValid;
+
+        const std::size_t width =
+            static_cast<std::size_t>(slot.frame.width);
+        const std::size_t offset =
+            static_cast<std::size_t>(earlyWaveformLine) * width;
+
+        std::copy_n(slot.frame.y.data() + offset, width,
+                    slot.waveformFrame.y.data() + offset);
+        std::copy_n(slot.frame.u.data() + offset, width,
+                    slot.waveformFrame.u.data() + offset);
+        std::copy_n(slot.frame.v.data() + offset, width,
+                    slot.waveformFrame.v.data() + offset);
+
+        slot.waveformRawSelectedLine.store(
+            true,
+            std::memory_order_release);
+        slot.waveformGeneration.store(
+            generation,
+            std::memory_order_release);
+        latestWaveformSlot_.store(
+            static_cast<int>(slotIndex),
+            std::memory_order_release);
+        waveformCondition_.notify_one();
+    }
+    else
+    {
+        slot.waveformRawSelectedLine.store(
+            false,
+            std::memory_order_release);
+    }
+
+    const bool compensationEnabled =
         lumaCompensationSourceEnabled_.load(
             std::memory_order_acquire) &&
         lumaCompensationEnabled_.load(
             std::memory_order_acquire);
 
-    std::uint32_t frequencyCompensationUs = 0u;
+    const bool compensationHasConsumer =
+        compensationEnabled &&
+        hasLumaCompensationConsumer();
 
-    if (applyLumaCompensation)
+    std::uint32_t frequencyCompensationUs = 0u;
+    std::uint64_t frequencyCompensationCompleteUs = 0u;
+
+    FrequencyCompensationState frequencyState =
+        FrequencyCompensationState::Disabled;
+
+    if (compensationEnabled && !compensationHasConsumer)
+    {
+        frequencyState =
+            FrequencyCompensationState::NoConsumer;
+    }
+    else if (compensationHasConsumer)
     {
         const auto frequencyCompensationStart =
             std::chrono::steady_clock::now();
@@ -330,28 +868,43 @@ void VideoEngine::submitWriteFrame()
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             frequencyCompensationEnd -
                             frequencyCompensationStart).count())));
+
+        const std::int64_t frequencyEndNs =
+            static_cast<std::int64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    frequencyCompensationEnd.time_since_epoch()).count());
+
+        frequencyCompensationCompleteUs =
+            captureTickNs > 0 &&
+            frequencyEndNs > captureTickNs
+            ? static_cast<std::uint64_t>(
+                (frequencyEndNs - captureTickNs) / 1000)
+            : static_cast<std::uint64_t>(
+                frequencyCompensationUs);
+
+        frequencyState =
+            FrequencyCompensationState::Completed;
     }
 
     slot.frequencyCompensationUs.store(
         frequencyCompensationUs,
         std::memory_order_release);
 
-    const std::uint64_t generation =
-        captureGeneration_.fetch_add(
-            1,
-            std::memory_order_relaxed) + 1;
+    std::array<WaveformAssistTimelineSnapshot, 2>
+        frequencyWorkerSnapshots{};
 
-    traceLog(
-        TraceEventType::Frame,
-        generation,
-        0u,
-        static_cast<std::uint32_t>(slotIndex),
-        slot.frame.inputSignalValid ? 1u : 0u,
-        0u);
+    for (std::size_t workerIndex = 0u;
+        workerIndex < frequencyWorkerSnapshots.size();
+        ++workerIndex)
+    {
+        frequencyWorkerSnapshots[workerIndex] =
+            slot.frequencyAssistTimeline[workerIndex].snapshot();
+    }
 
-    slot.generation.store(
-        generation,
-        std::memory_order_release);
+    performanceStats_.publishFrequencyDiagnostics(
+        frequencyState,
+        frequencyCompensationCompleteUs,
+        frequencyWorkerSnapshots);
 
     {
         std::lock_guard<std::mutex> lock(
@@ -377,6 +930,20 @@ void VideoEngine::submitWriteFrame()
         static_cast<int>(slotIndex),
         std::memory_order_release);
 
+    if (waveformHasConsumer &&
+        !waveformCanStartEarly)
+    {
+        slot.waveformRawSelectedLine.store(
+            false,
+            std::memory_order_release);
+        slot.waveformGeneration.store(
+            generation,
+            std::memory_order_release);
+        latestWaveformSlot_.store(
+            static_cast<int>(slotIndex),
+            std::memory_order_release);
+    }
+
     emit inputSignalStateChanged(
         slot.frame.inputSignalValid);
 
@@ -398,8 +965,12 @@ void VideoEngine::submitWriteFrame()
     displayPresenterCondition_.notify_one();
 
     displayCondition_.notify_one();
-    vectorscopeCondition_.notify_one();
-    waveformCondition_.notify_one();
+
+    if (waveformHasConsumer &&
+        !waveformCanStartEarly)
+    {
+        waveformCondition_.notify_one();
+    }
 }
 
 
@@ -856,6 +1427,16 @@ void VideoEngine::setVectorscopeVideoEnabled(bool enabled)
     vectorscopeVideoEnabled_.store(
         enabled,
         std::memory_order_release);
+
+    if (!enabled)
+    {
+        performanceStats_.vectorscopeVideo.update(0);
+        if (!vectorscopeScreenRenderEnabled_.load(std::memory_order_acquire))
+        {
+            performanceStats_.vectorscopeWorkerPhaseTimeline.reset(0);
+            performanceStats_.clearPublishedVectorscopeDiagnosticTimeline();
+        }
+    }
 }
 
 
@@ -864,6 +1445,17 @@ void VideoEngine::setWaveformVideoEnabled(bool enabled)
     waveformVideoEnabled_.store(
         enabled,
         std::memory_order_release);
+
+    if (!enabled)
+    {
+        performanceStats_.waveformVideo.update(0);
+        if (!waveformScreenRenderEnabled_.load(std::memory_order_acquire))
+        {
+            performanceStats_.waveformWorkerPhaseTimeline.reset(0);
+            performanceStats_.waveformScreenPhaseTimeline.reset(0);
+            performanceStats_.clearPublishedWaveformDiagnosticTimelines();
+        }
+    }
 }
 
 
@@ -939,6 +1531,12 @@ void VideoEngine::setWaveformScrollPosition(
 void VideoEngine::displayPhaseWorkerLoop(
     std::size_t workerIndex)
 {
+    // Register the physical worker so priority ownership can move as one
+    // deterministic pair: Video1+Video2 <-> Waveform+Vectorscope.
+    registerPriorityHandle(
+        gVideoWorkerHandles[workerIndex],
+        workerIndex == 0u ? kPriorityVideo1 : kPriorityVideo2);
+
     std::uint64_t lastPhaseGeneration = 0;
     std::uint64_t lastFrequencyAssistGeneration = 0;
     std::uint64_t lastAssistGeneration = 0;
@@ -1287,6 +1885,7 @@ void VideoEngine::displayPhaseWorkerLoop(
                     displayPhaseLabel,
                     static_cast<std::uint32_t>(std::min<std::uint64_t>(displayWorkerStartUs, 80'000u)),
                     static_cast<std::uint32_t>(std::min<std::uint64_t>(displayWorkerDurationUs, 80'000u)));
+
             }
 
             {
@@ -1327,8 +1926,11 @@ void VideoEngine::displayPhaseWorkerLoop(
                 }
             }
 
-            if (!tryRunFrequencyAssistJob(
-                static_cast<std::uint32_t>(workerIndex + 1u)))
+            const bool ranFrequencyJob =
+                tryRunFrequencyAssistJob(
+                    static_cast<std::uint32_t>(workerIndex));
+
+            if (!ranFrequencyJob)
             {
                 break;
             }
@@ -1367,6 +1969,39 @@ void VideoEngine::displayPhaseWorkerLoop(
 
     }
 }
+
+bool VideoEngine::hasLumaCompensationConsumer() const noexcept
+{
+    // Full-frame F exists only for consumers that actually need a
+    // frequency-compensated full Y frame.
+    //
+    // Single-line Waveform is deliberately NOT such a consumer: it starts
+    // immediately from its copied raw line and performs local one-line F.
+    // Vectorscope is independent of Y frequency compensation.
+    const bool videoConsumer =
+        videoScreenRenderEnabled_.load(
+            std::memory_order_acquire) ||
+        spoutVideoEnabled_.load(
+            std::memory_order_acquire);
+
+    const bool waveformConsumer =
+        waveformScreenRenderEnabled_.load(
+            std::memory_order_acquire) ||
+        waveformVideoEnabled_.load(
+            std::memory_order_acquire);
+
+    const bool waveformNeedsFullFrame =
+        waveformConsumer &&
+        selectedLine_.load(
+            std::memory_order_acquire) < 0;
+
+    return
+        videoConsumer ||
+        waveformNeedsFullFrame ||
+        flatFieldSpectrumRequested_.load(
+            std::memory_order_acquire);
+}
+
 
 void VideoEngine::runFrequencyCompensationJobs(
     CapturedFrameSlot& slot,
@@ -1408,14 +2043,11 @@ void VideoEngine::runFrequencyCompensationJobs(
             std::memory_order_acq_rel);
     }
 
+    // Wake only the two Video workers. They promote themselves to HIGHEST
+    // only while executing this hard-video job. The capture thread
+    // only orchestrates and waits at the barrier; Waveform/Vectorscope never
+    // participate in a hard-video dependency.
     displayPhaseCondition_.notify_all();
-
-    // W0 for F is the capture thread itself.  W1/W2 join whenever they are
-    // not busy finishing display work from the previous frame.
-    while (tryRunFrequencyAssistJob(0u))
-    {
-        std::this_thread::yield();
-    }
 
     {
         std::unique_lock<std::mutex> lock(
@@ -1444,10 +2076,14 @@ void VideoEngine::runFrequencyCompensationJobs(
 bool VideoEngine::tryRunFrequencyAssistJob(
     std::uint32_t workerId)
 {
-    // W1/W2 never interrupt the previous frame's display pipeline for F.
-    // W0 is the capture thread and starts immediately.
-    if (workerId > 0u &&
-        displayPipelineActive_.load(std::memory_order_acquire))
+    if (workerId >= 2u)
+    {
+        return false;
+    }
+
+    // F is critical-path work, but never at the expense of unfinished
+    // Field 1/2 work from the previous frame.
+    if (displayPipelineActive_.load(std::memory_order_acquire))
     {
         return false;
     }
@@ -1531,7 +2167,8 @@ bool VideoEngine::tryRunFrequencyAssistJob(
         static_cast<std::uint32_t>(
             std::min<std::uint64_t>(startUs, 80'000u)),
         static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(durationUs, 80'000u)));
+            std::min<std::uint64_t>(durationUs, 80'000u)),
+        static_cast<std::uint32_t>(jobIndex));
 
     {
         std::lock_guard<std::mutex> lock(
@@ -1574,8 +2211,11 @@ bool VideoEngine::canDisplayWorkerAcceptAssist(
      * display pipeline has completed and wakes the assist workers there, so
      * no predictive capture-time holdoff is needed here.
      */
-    return !displayPipelineActive_.load(
-        std::memory_order_acquire);
+    return
+        !gVideoCriticalOwnership.load(
+            std::memory_order_acquire) &&
+        !displayPipelineActive_.load(
+            std::memory_order_acquire);
 }
 
 bool VideoEngine::tryRunWaveformAssistJob(
@@ -1671,7 +2311,7 @@ bool VideoEngine::tryRunWaveformAssistJob(
         0u,
         TraceRendererId::PcWaveform);
 
-    if (workerId <= 2u)
+    if (workerId <= 3u)
     {
         const std::int64_t timelineOriginNs =
             waveformAssistTimelineOriginNs_.load(
@@ -1697,18 +2337,39 @@ bool VideoEngine::tryRunWaveformAssistJob(
                 (startNs - timelineOriginNs) / 1000)
             : 0u;
 
-        WaveformAssistTimelineStats* timeline =
-            workerId == 0u
-            ? &performanceStats_.waveformWorkerAssistTimeline
-            : &performanceStats_.displayWorkerAssistTimeline[
+        WaveformAssistTimelineStats* timeline = nullptr;
+        if (workerId == 0u)
+        {
+            timeline = &performanceStats_.waveformWorkerAssistTimeline;
+        }
+        else if (workerId <= 2u)
+        {
+            timeline = &performanceStats_.displayWorkerAssistTimeline[
                 static_cast<std::size_t>(workerId - 1u)];
+        }
+        else
+        {
+            timeline = &performanceStats_.vectorscopeWorkerAssistTimeline;
+        }
 
         timeline->append(
             phaseLabel,
             static_cast<std::uint32_t>(
                 std::min<std::uint64_t>(startUs64, 80'000u)),
             static_cast<std::uint32_t>(
-                std::min<std::uint64_t>(durationUs64, 80'000u)));
+                std::min<std::uint64_t>(durationUs64, 80'000u)),
+            static_cast<std::uint32_t>(jobIndex));
+
+        if (workerId == 1u || workerId == 2u)
+        {
+            appendPriorityOwnershipIntervals(
+                performanceStats_.displayWorkerPhaseTimeline[
+                    static_cast<std::size_t>(workerId - 1u)],
+                timelineOriginNs,
+                assistStart,
+                assistEnd,
+                workerId == 1u ? kPriorityVideo1 : kPriorityVideo2);
+        }
     }
 
     {
@@ -1817,10 +2478,13 @@ void VideoEngine::runWaveformTraceJobs(
             {
                 timeline.reset(timelineGeneration);
             }
+            performanceStats_.vectorscopeWorkerAssistTimeline.reset(
+                timelineGeneration);
         }
     }
 
     displayPhaseCondition_.notify_all();
+    vectorscopeCondition_.notify_one();
 
     // W0 starts immediately.  Helpers join opportunistically when display
     // work/holdoff allows it; there is no artificial launch delay anymore.
@@ -2143,6 +2807,14 @@ void VideoEngine::displayWorkerLoop()
                 false,
                 std::memory_order_release);
 
+            gVideoCriticalOwnership.store(
+                false,
+                std::memory_order_release);
+
+            applyPriorityMask(
+                postVideoPriorityMask(
+                    gInstrumentBusyMask.load(std::memory_order_acquire)));
+
             performanceStats_.displayWorker0Noise.update(0);
             performanceStats_.displayWorker1Noise.update(0);
             performanceStats_.displayWorker0Deinterlace.update(0);
@@ -2151,6 +2823,12 @@ void VideoEngine::displayWorkerLoop()
             performanceStats_.deinterlaceWorker1.update(0);
             performanceStats_.noiseReduction.update(0);
             performanceStats_.deinterlace.update(0);
+
+            // No Screen/Video-Spout consumer means there is no video frame
+            // to become ready.  Do not leave the previous generation's
+            // wallclock values frozen in the floaty.
+            performanceStats_.field1Ready.update(0);
+            performanceStats_.field2Ready.update(0);
             performanceStats_.videoScreen.update(0);
             performanceStats_.displayFirst.update(0);
             performanceStats_.displaySecond.update(0);
@@ -2212,6 +2890,8 @@ void VideoEngine::displayWorkerLoop()
         displayPipelineActive_.store(
             true,
             std::memory_order_release);
+
+        applyPriorityMask(kPriorityVideoPair);
 
         const std::int64_t displayCaptureNs =
             captureSlot.captureTickNs.load(std::memory_order_acquire);
@@ -2398,6 +3078,12 @@ void VideoEngine::displayWorkerLoop()
             displayPipelineActive_.store(
                 false,
                 std::memory_order_release);
+            gVideoCriticalOwnership.store(
+                false,
+                std::memory_order_release);
+            applyPriorityMask(
+                postVideoPriorityMask(
+                    gInstrumentBusyMask.load(std::memory_order_acquire)));
             waveformAssistGeneration_.fetch_add(
                 1,
                 std::memory_order_release);
@@ -2678,32 +3364,6 @@ void VideoEngine::displayWorkerLoop()
         performanceStats_.spoutConvertSecond.update(
             secondSpoutConvertUs);
 
-        /*
-         * All physical display-worker phases for this captured frame are now
-         * complete.  Release W1/W2 to waveform assist HERE, before presenter
-         * publication, stats folding, deadline bookkeeping and other serial
-         * display-thread administration.
-         *
-         * This is the deterministic ownership boundary the scheduler needs:
-         *     N/D/C1/S1/C2/S2 -> assist allowed
-         *
-         * Releasing only at the end of displayWorkerLoop() made helper
-         * availability timing-dependent: sometimes W0 had already consumed
-         * every remaining R chunk, while on slower frames W1/W2 happened to
-         * catch the tail of the same R queue.
-         */
-        displayPipelineActive_.store(
-            false,
-            std::memory_order_release);
-
-        // Helpers may have observed the current assist generation while they
-        // were still owned by display work.  Bump the wake generation and
-        // notify them immediately so they can rejoin that SAME R/X queue.
-        waveformAssistGeneration_.fetch_add(
-            1,
-            std::memory_order_release);
-        displayPhaseCondition_.notify_all();
-
         const auto secondReadyWallTime =
             std::chrono::steady_clock::now();
 
@@ -2744,6 +3404,54 @@ void VideoEngine::displayWorkerLoop()
 
         displayPresenterCondition_.
             notify_one();
+
+        const auto videoCommitWallTime =
+            std::chrono::steady_clock::now();
+
+        if (displayTimelineOriginNs > 0)
+        {
+            const auto videoEpochStart =
+                std::chrono::steady_clock::time_point(
+                    std::chrono::nanoseconds(displayTimelineOriginNs));
+
+            appendPriorityOwnershipIntervals(
+                performanceStats_.displayWorkerPhaseTimeline[0],
+                displayTimelineOriginNs,
+                videoEpochStart,
+                videoCommitWallTime,
+                kPriorityVideo1);
+            appendPriorityOwnershipIntervals(
+                performanceStats_.displayWorkerPhaseTimeline[1],
+                displayTimelineOriginNs,
+                videoEpochStart,
+                videoCommitWallTime,
+                kPriorityVideo2);
+        }
+
+        /*
+         * Video commitment boundary. The two video workers keep BOTH HIGH
+         * slots until the completed second field has been moved into the
+         * presenter slot and the presenter has been notified. Only then is
+         * the mission-critical video transaction actually committed.
+         */
+        displayPipelineActive_.store(
+            false,
+            std::memory_order_release);
+
+        gVideoCriticalOwnership.store(
+            false,
+            std::memory_order_release);
+
+        applyPriorityMask(
+            postVideoPriorityMask(
+                gInstrumentBusyMask.load(std::memory_order_acquire)));
+
+        // W1/W2 may now join any already-running R/X queue.
+        waveformAssistGeneration_.fetch_add(
+            1,
+            std::memory_order_release);
+        displayPhaseCondition_.notify_all();
+        vectorscopeCondition_.notify_one();
 
         performanceStats_.videoScreen.update(
             firstConvertUs + secondConvertUs);
@@ -2932,6 +3640,18 @@ void VideoEngine::displayWorkerLoop()
 
 void VideoEngine::displayPresenterLoop()
 {
+    constexpr std::uint32_t kTracePresenterReanchor = 0xA001u;
+    constexpr std::uint32_t kTracePresenterGenerationSkip = 0xA002u;
+
+    const auto diagnosticNowUs =
+        []() -> std::uint64_t
+        {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+        };
+
     using Clock =
         std::chrono::steady_clock;
 
@@ -3167,6 +3887,21 @@ void VideoEngine::displayPresenterLoop()
             if (!exactGenerationReady &&
                 readyGeneration > nextGeneration)
             {
+                const std::uint64_t skipped =
+                    readyGeneration - nextGeneration;
+
+                performanceStats_.presenterGenerationSkip.record(
+                    diagnosticNowUs(),
+                    skipped);
+
+                traceLog(
+                    TraceEventType::PresenterField1Tick,
+                    nextGeneration,
+                    0u,
+                    kTracePresenterGenerationSkip,
+                    skipped,
+                    readyGeneration);
+
                 nextGeneration = readyGeneration;
             }
 
@@ -3414,6 +4149,28 @@ void VideoEngine::displayPresenterLoop()
             nextFirstFieldTime +
                 framePeriod)
         {
+            const auto reanchorLateUs =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    now - nextFirstFieldTime).count();
+
+            performanceStats_.presenterReanchor.record(
+                diagnosticNowUs(),
+                static_cast<std::uint64_t>(
+                    std::max<std::int64_t>(
+                        reanchorLateUs,
+                        0)));
+
+            traceLog(
+                TraceEventType::PresenterField1Tick,
+                nextGeneration,
+                0u,
+                kTracePresenterReanchor,
+                static_cast<std::uint64_t>(
+                    std::max<std::int64_t>(
+                        reanchorLateUs,
+                        0)),
+                0u);
+
             std::lock_guard<std::mutex> lock(
                 displayPresenterMutex_);
 
@@ -3448,6 +4205,21 @@ void VideoEngine::displayPresenterLoop()
 
 void VideoEngine::waveformWorkerLoop()
 {
+    registerPriorityHandle(
+        gWaveformWorkerHandle,
+        kPriorityWaveform);
+
+    constexpr std::uint32_t kTraceWaveformGenerationSkip = 0xA003u;
+
+    const auto diagnosticNowUs =
+        []() -> std::uint64_t
+        {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+        };
+
     for (;;)
     {
         std::uint64_t generation = 0;
@@ -3469,7 +4241,7 @@ void VideoEngine::waveformWorkerLoop()
                     }
 
                     const int latestSlot =
-                        latestCaptureSlot_.load(
+                        latestWaveformSlot_.load(
                             std::memory_order_acquire);
 
                     if (latestSlot == kInvalidSlotIndex)
@@ -3483,7 +4255,7 @@ void VideoEngine::waveformWorkerLoop()
                                 latestSlot)];
 
                     const std::uint64_t latestGeneration =
-                        slot.generation.load(
+                        slot.waveformGeneration.load(
                             std::memory_order_acquire);
 
                     return
@@ -3497,14 +4269,14 @@ void VideoEngine::waveformWorkerLoop()
             }
 
             captureSlotIndex =
-                latestCaptureSlot_.load(
+                latestWaveformSlot_.load(
                     std::memory_order_acquire);
 
             generation =
                 captureSlots_[
                     static_cast<std::size_t>(
                         captureSlotIndex)]
-                .generation.load(
+                .waveformGeneration.load(
                     std::memory_order_acquire);
 
             const std::uint64_t previousGeneration =
@@ -3516,11 +4288,24 @@ void VideoEngine::waveformWorkerLoop()
             if (previousGeneration != 0 &&
                 generation > previousGeneration + 1)
             {
+                const std::uint64_t skipped =
+                    generation - previousGeneration - 1;
+
+                performanceStats_.waveformGenerationSkip.record(
+                    diagnosticNowUs(),
+                    skipped);
+
+                traceLog(
+                    TraceEventType::WaveformWorkerBegin,
+                    generation,
+                    0u,
+                    kTraceWaveformGenerationSkip,
+                    skipped,
+                    previousGeneration);
+
                 qDebug()
                     << "Waveform skipped"
-                    << (generation -
-                        previousGeneration -
-                        1)
+                    << skipped
                     << "frame(s)";
             }
         }
@@ -3530,10 +4315,21 @@ void VideoEngine::waveformWorkerLoop()
             continue;
         }
 
-        const auto& captureSlot =
+        InstrumentBusyLease instrumentBusyLease(0x1u);
+
+        auto& captureSlot =
             captureSlots_[
                 static_cast<std::size_t>(
                     captureSlotIndex)];
+
+        const bool waveformUsesRawSelectedLine =
+            captureSlot.waveformRawSelectedLine.load(
+                std::memory_order_acquire);
+
+        Yuv444Frame& waveformFrame =
+            waveformUsesRawSelectedLine
+            ? captureSlot.waveformFrame
+            : captureSlot.frame;
 
         const auto waveformWorkerStart =
             std::chrono::steady_clock::now();
@@ -3542,14 +4338,17 @@ void VideoEngine::waveformWorkerLoop()
             captureSlot.diagnosticOriginNs.load(
                 std::memory_order_acquire);
 
-        const auto waveformPhaseAppend =
+        // Top-level worker timeline: this is the authoritative answer to
+        // "what ran on the waveform thread, and when?".  It deliberately
+        // includes Screen, Spout, measurement and publish as sibling phases.
+        performanceStats_.waveformWorkerPhaseTimeline.reset(generation);
+
+        const auto waveformWorkerPhaseAppend =
             [&](char label,
                 const std::chrono::steady_clock::time_point& phaseStart,
                 const std::chrono::steady_clock::time_point& phaseEnd)
             {
-                if (!waveformScreenRenderEnabled_.load(
-                        std::memory_order_acquire) ||
-                    waveformDiagnosticOriginNs <= 0 ||
+                if (waveformDiagnosticOriginNs <= 0 ||
                     phaseEnd <= phaseStart)
                 {
                     return;
@@ -3568,7 +4367,7 @@ void VideoEngine::waveformWorkerLoop()
                         (startNs - waveformDiagnosticOriginNs) / 1000)
                     : 0u;
 
-                performanceStats_.waveformScreenPhaseTimeline.append(
+                performanceStats_.waveformWorkerPhaseTimeline.append(
                     label,
                     static_cast<std::uint32_t>(
                         std::min<std::uint64_t>(startUs, 80'000u)),
@@ -3615,6 +4414,47 @@ void VideoEngine::waveformWorkerLoop()
         const int glow =
             vectorscopeGlow_.load(
                 std::memory_order_acquire);
+
+        std::uint64_t waveformLocalFrequencyStartUs = 0u;
+        std::uint64_t waveformLocalFrequencyUs = 0u;
+
+        if (waveformUsesRawSelectedLine &&
+            lumaCompensationSourceEnabled_.load(std::memory_order_acquire) &&
+            lumaCompensationEnabled_.load(std::memory_order_acquire))
+        {
+            const auto localFrequencyStart =
+                std::chrono::steady_clock::now();
+
+            const std::int64_t localFrequencyStartNs =
+                static_cast<std::int64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        localFrequencyStart.time_since_epoch()).count());
+
+            lumaHighFrequencyCompensator_.processRange(
+                waveformFrame,
+                lumaCompensationGainHundredthsDb_.load(
+                    std::memory_order_acquire),
+                selectedLine,
+                selectedLine + 1);
+
+            const auto localFrequencyEnd =
+                std::chrono::steady_clock::now();
+
+            waveformLocalFrequencyUs =
+                static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        localFrequencyEnd - localFrequencyStart).count());
+
+            const std::int64_t originNs =
+                captureSlot.diagnosticOriginNs.load(
+                    std::memory_order_acquire);
+
+            waveformLocalFrequencyStartUs =
+                originNs > 0 && localFrequencyStartNs > originNs
+                ? static_cast<std::uint64_t>(
+                    (localFrequencyStartNs - originNs) / 1000)
+                : 0u;
+        }
 
         const bool screenRenderEnabled =
             waveformScreenRenderEnabled_.load(
@@ -3678,13 +4518,14 @@ void VideoEngine::waveformWorkerLoop()
                 waveformTimelineOriginNs,
                 std::memory_order_release);
 
-            // Seed the R/X assist timelines with the capture-side F chunks
-            // from this exact frame.  The waveform worker is sequential, so
-            // the previous frame has already published before these live
-            // timelines are reset.  R and X will append to the same generation.
+            // R/X diagnostics remain waveform-owned.  Frequency
+            // compensation is published independently to all four worker
+            // lanes at the F barrier and is no longer smuggled through this
+            // waveform-only diagnostic path.
             const std::uint64_t assistTimelineGeneration =
                 waveformTimelineCaptureNs > 0
-                ? static_cast<std::uint64_t>(waveformTimelineCaptureNs)
+                ? static_cast<std::uint64_t>(
+                    waveformTimelineCaptureNs)
                 : generation;
 
             performanceStats_.waveformWorkerAssistTimeline.reset(
@@ -3693,34 +4534,24 @@ void VideoEngine::waveformWorkerLoop()
                 assistTimelineGeneration);
             performanceStats_.displayWorkerAssistTimeline[1].reset(
                 assistTimelineGeneration);
-
-            const std::array<WaveformAssistTimelineStats*, 3> targetAssist =
-            {
-                &performanceStats_.waveformWorkerAssistTimeline,
-                &performanceStats_.displayWorkerAssistTimeline[0],
-                &performanceStats_.displayWorkerAssistTimeline[1]
-            };
-
-            for (std::size_t assistWorker = 0u;
-                assistWorker < targetAssist.size();
-                ++assistWorker)
-            {
-                const auto frequencySnapshot =
-                    captureSlot.frequencyAssistTimeline[assistWorker].snapshot();
-                for (std::uint32_t eventIndex = 0u;
-                    eventIndex < frequencySnapshot.count;
-                    ++eventIndex)
-                {
-                    const auto& event = frequencySnapshot.events[eventIndex];
-                    targetAssist[assistWorker]->append(
-                        static_cast<char>(event.phase),
-                        event.startUs,
-                        event.durationUs);
-                }
-            }
+            // VS is also a waveform-assist worker now. Reset its assist
+            // accounting at the same waveform-frame boundary; otherwise its
+            // R/X chunks accumulate across frames and appear as stale blocks
+            // (and giant duplicate detail lists) far to the right of the
+            // current capture-relative timeline.
+            performanceStats_.vectorscopeWorkerAssistTimeline.reset(
+                assistTimelineGeneration);
 
             waveformScreenRenderer_.analyze(
-                captureSlot.frame);
+                waveformFrame);
+
+            const auto waveformWallEnd =
+                std::chrono::steady_clock::now();
+
+            waveformWorkerPhaseAppend(
+                'S',
+                waveformWallStart,
+                waveformWallEnd);
 
             if constexpr (OpenScopeBuild::kDebugBuild)
             {
@@ -3752,15 +4583,18 @@ void VideoEngine::waveformWorkerLoop()
             performanceStats_.waveformScreenPhaseTimeline.reset(
                 waveformTimelineGeneration);
 
-            const std::uint32_t waveformFrequencyCompensationUs =
-                captureSlot.frequencyCompensationUs.load(
-                    std::memory_order_acquire);
-            if (waveformFrequencyCompensationUs > 0u)
+            if (waveformLocalFrequencyUs > 0u)
             {
                 performanceStats_.waveformScreenPhaseTimeline.append(
                     'F',
-                    0u,
-                    waveformFrequencyCompensationUs);
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(
+                            waveformLocalFrequencyStartUs,
+                            80'000u)),
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(
+                            waveformLocalFrequencyUs,
+                            80'000u)));
             }
 
             const std::uint64_t waveformWallUs =
@@ -3790,6 +4624,12 @@ void VideoEngine::waveformWorkerLoop()
 
             performanceStats_.waveformScreenPersistence.update(
                 timings.persistenceUs);
+            performanceStats_.waveformScreenBaseClear.update(
+                timings.baseClearUs);
+            performanceStats_.waveformScreenGraticule.update(
+                timings.graticuleUs);
+            performanceStats_.waveformScreenPhosphorCompose.update(
+                timings.phosphorComposeUs);
             performanceStats_.waveformScreenTrace.update(
                 timings.traceUs);
             performanceStats_.waveformScreenTracePrep.update(
@@ -3874,8 +4714,9 @@ void VideoEngine::waveformWorkerLoop()
                 timings.glowActiveHeight);
 
             // Publication is deferred until the complete waveform worker
-            // iteration has finished.  V/M/E below belong to the same frame
-            // and must be part of the same coherent diagnostic snapshot.
+            // iteration has finished so the Screen sub-phases, assist chunks
+            // and top-level Screen/Spout/measurement/publish worker timeline
+            // are one coherent diagnostic snapshot.
         }
         else
         {
@@ -3883,6 +4724,9 @@ void VideoEngine::waveformWorkerLoop()
             performanceStats_.waveformScreenPhaseTimeline.reset(0);
             performanceStats_.clearPublishedWaveformDiagnosticTimelines();
             performanceStats_.waveformScreenPersistence.update(0);
+            performanceStats_.waveformScreenBaseClear.update(0);
+            performanceStats_.waveformScreenGraticule.update(0);
+            performanceStats_.waveformScreenPhosphorCompose.update(0);
             performanceStats_.waveformScreenTrace.update(0);
             performanceStats_.waveformScreenTracePrep.update(0);
             performanceStats_.waveformScreenTraceRaster.update(0);
@@ -3985,19 +4829,23 @@ void VideoEngine::waveformWorkerLoop()
             QElapsedTimer videoTimer;
             videoTimer.start();
 
-            const auto waveformVideoPhaseStart =
+            const auto waveformSpoutStart =
                 std::chrono::steady_clock::now();
 
+            // Keep screen and Spout rendering independent for now.  The attempted
+            // prepared-luma reuse caused a fullscreen timing regression.
+            // Performance accounting remains separate: this render belongs only
+            // to the Waveform video lane and is not appended to PC waveform.
             waveformVideoRenderer_.analyze(
-                captureSlot.frame);
+                waveformFrame);
 
-            const auto waveformVideoPhaseEnd =
+            const auto waveformSpoutEnd =
                 std::chrono::steady_clock::now();
 
-            waveformPhaseAppend(
+            waveformWorkerPhaseAppend(
                 'V',
-                waveformVideoPhaseStart,
-                waveformVideoPhaseEnd);
+                waveformSpoutStart,
+                waveformSpoutEnd);
 
             performanceStats_.waveformVideo.update(
                 static_cast<std::uint64_t>(
@@ -4184,7 +5032,7 @@ void VideoEngine::waveformWorkerLoop()
         const auto waveformMeasurementPhaseEnd =
             std::chrono::steady_clock::now();
 
-        waveformPhaseAppend(
+        waveformWorkerPhaseAppend(
             'M',
             waveformMeasurementPhaseStart,
             waveformMeasurementPhaseEnd);
@@ -4207,7 +5055,7 @@ void VideoEngine::waveformWorkerLoop()
         const auto waveformEmitPhaseEnd =
             std::chrono::steady_clock::now();
 
-        waveformPhaseAppend(
+        waveformWorkerPhaseAppend(
             'E',
             waveformEmitPhaseStart,
             waveformEmitPhaseEnd);
@@ -4230,11 +5078,19 @@ void VideoEngine::waveformWorkerLoop()
             captureValid ? 1u : 0u,
             TraceRendererId::PcWaveform);
 
+        // Draw the real ownership intervals, not an inferred whole-iteration
+        // underline based on the thread priority sampled at the end.
+        appendPriorityOwnershipIntervals(
+            performanceStats_.waveformWorkerPhaseTimeline,
+            waveformDiagnosticOriginNs,
+            waveformWorkerStart,
+            waveformWorkerEnd,
+            kPriorityWaveform);
+
         if (screenRenderEnabled)
         {
-            // Publish only after V/M/E have been appended.  The floaty then
-            // shows one complete waveform-worker iteration, not just the PC
-            // renderer portion.
+            // Publish only after V/M/E and priority state have been appended.
+            // The floaty then shows one complete waveform-worker iteration.
             performanceStats_.publishWaveformDiagnosticTimelines();
         }
     }
@@ -4242,6 +5098,21 @@ void VideoEngine::waveformWorkerLoop()
 
 void VideoEngine::vectorscopeWorkerLoop()
 {
+    registerPriorityHandle(
+        gVectorscopeWorkerHandle,
+        kPriorityVectorscope);
+
+    constexpr std::uint32_t kTraceVectorscopeGenerationSkip = 0xA004u;
+
+    const auto diagnosticNowUs =
+        []() -> std::uint64_t
+        {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count());
+        };
+
     for (;;)
     {
         std::size_t slotIndex = 0;
@@ -4261,26 +5132,30 @@ void VideoEngine::vectorscopeWorkerLoop()
                     }
 
                     const int latestSlot =
-                        latestCaptureSlot_.load(
+                        latestVectorscopeSlot_.load(
                             std::memory_order_acquire);
 
-                    if (latestSlot == kInvalidSlotIndex)
+                    bool newVectorscopeFrame = false;
+                    if (latestSlot != kInvalidSlotIndex)
                     {
-                        return false;
+                        const auto& slot =
+                            captureSlots_[
+                                static_cast<std::size_t>(
+                                    latestSlot)];
+
+                        const std::uint64_t latestGeneration =
+                            slot.vectorscopeGeneration.load(
+                                std::memory_order_acquire);
+
+                        newVectorscopeFrame =
+                            latestGeneration !=
+                            vectorscopeLastGeneration_;
                     }
 
-                    const auto& slot =
-                        captureSlots_[
-                            static_cast<std::size_t>(
-                                latestSlot)];
-
-                    const std::uint64_t latestGeneration =
-                        slot.generation.load(
-                            std::memory_order_acquire);
-
                     return
-                        latestGeneration !=
-                        vectorscopeLastGeneration_;
+                        newVectorscopeFrame ||
+                        waveformAssistWorkAvailable_.load(
+                            std::memory_order_acquire);
                 });
 
             if (vectorscopeStop_)
@@ -4289,8 +5164,25 @@ void VideoEngine::vectorscopeWorkerLoop()
             }
 
             const int latestSlot =
-                latestCaptureSlot_.load(
+                latestVectorscopeSlot_.load(
                     std::memory_order_acquire);
+
+            const bool hasNewVectorscopeFrame =
+                latestSlot != kInvalidSlotIndex &&
+                captureSlots_[static_cast<std::size_t>(latestSlot)]
+                    .vectorscopeGeneration.load(std::memory_order_acquire) !=
+                vectorscopeLastGeneration_;
+
+            if (!hasNewVectorscopeFrame)
+            {
+                lock.unlock();
+                // Own vectorscope task is idle/done. Stay available as a
+                // NORMAL-priority fourth worker on the shared waveform R/X
+                // queue. A newly arrived vectorscope frame wins before the
+                // next chunk because this loop re-enters the wait predicate.
+                tryRunWaveformAssistJob(3u, false);
+                continue;
+            }
 
             slotIndex =
                 static_cast<std::size_t>(
@@ -4298,7 +5190,7 @@ void VideoEngine::vectorscopeWorkerLoop()
 
             generation =
                 captureSlots_[slotIndex]
-                .generation.load(
+                .vectorscopeGeneration.load(
                     std::memory_order_acquire);
 
             const std::uint64_t previousGeneration =
@@ -4310,12 +5202,111 @@ void VideoEngine::vectorscopeWorkerLoop()
             if (previousGeneration != 0 &&
                 generation > previousGeneration + 1)
             {
+                const std::uint64_t skipped =
+                    generation - previousGeneration - 1;
+
+                performanceStats_.vectorscopeGenerationSkip.record(
+                    diagnosticNowUs(),
+                    skipped);
+
+                // Trace sentinel A004: vectorscope generation skip.
+                traceLog(
+                    TraceEventType::Frame,
+                    generation,
+                    0u,
+                    kTraceVectorscopeGenerationSkip,
+                    skipped,
+                    previousGeneration);
+
                 qDebug()
                     << "Vectorscope skipped"
-                    << (generation - previousGeneration - 1)
+                    << skipped
                     << "frame(s)";
             }
         }
+
+        InstrumentBusyLease instrumentBusyLease(0x2u);
+
+        const auto vectorscopePriorityStart =
+            std::chrono::steady_clock::now();
+
+        const std::int64_t vectorscopeDiagnosticOriginNs =
+            captureSlots_[slotIndex].diagnosticOriginNs.load(
+                std::memory_order_acquire);
+
+        performanceStats_.vectorscopeWorkerPhaseTimeline.reset(generation);
+
+        const auto vectorscopeWorkerPhaseAppend =
+            [&](char label,
+                const std::chrono::steady_clock::time_point& phaseStart,
+                const std::chrono::steady_clock::time_point& phaseEnd)
+            {
+                if (vectorscopeDiagnosticOriginNs <= 0 ||
+                    phaseEnd <= phaseStart)
+                {
+                    return;
+                }
+
+                const auto startNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        phaseStart.time_since_epoch()).count();
+                const auto durationUs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        phaseEnd - phaseStart).count();
+
+                const std::uint64_t startUs =
+                    startNs > vectorscopeDiagnosticOriginNs
+                    ? static_cast<std::uint64_t>(
+                        (startNs - vectorscopeDiagnosticOriginNs) / 1000)
+                    : 0u;
+
+                performanceStats_.vectorscopeWorkerPhaseTimeline.append(
+                    label,
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(startUs, 80'000u)),
+                    static_cast<std::uint32_t>(
+                        std::min<std::uint64_t>(
+                            static_cast<std::uint64_t>(durationUs),
+                            80'000u)));
+            };
+
+        const auto appendVectorscopeRendererPhases =
+            [&](const VectorscopeRenderTimings& timings,
+                const std::chrono::steady_clock::time_point& renderStart,
+                bool spout)
+            {
+                const auto appendOne =
+                    [&](char screenLabel,
+                        std::uint64_t startOffsetUs,
+                        std::uint64_t durationUs)
+                    {
+                        if (durationUs == 0u)
+                        {
+                            return;
+                        }
+
+                        const char label =
+                            spout
+                            ? static_cast<char>(
+                                std::tolower(
+                                    static_cast<unsigned char>(
+                                        screenLabel)))
+                            : screenLabel;
+
+                        vectorscopeWorkerPhaseAppend(
+                            label,
+                            renderStart +
+                                std::chrono::microseconds(startOffsetUs),
+                            renderStart +
+                                std::chrono::microseconds(
+                                    startOffsetUs + durationUs));
+                    };
+
+                appendOne('A', timings.analyzerStartUs, timings.analyzerUs);
+                appendOne('P', timings.glowPersistenceStartUs, timings.glowPersistenceUs);
+                appendOne('C', timings.composeStartUs, timings.composeUs);
+                appendOne('O', timings.overlayStartUs, timings.overlayUs);
+            };
 
         VectorscopePresentationInfo presentation;
 
@@ -4384,8 +5375,11 @@ void VideoEngine::vectorscopeWorkerLoop()
             QElapsedTimer timer;
             timer.start();
 
+            const auto vectorscopeScreenStart =
+                std::chrono::steady_clock::now();
+
             vectorscopeScreenRenderer_.analyze(
-                captureSlots_[slotIndex].frame);
+                captureSlots_[slotIndex].vectorscopeFrame);
 
             performanceStats_.vectorscopeScreen.update(
                 static_cast<std::uint64_t>(
@@ -4416,6 +5410,18 @@ void VideoEngine::vectorscopeWorkerLoop()
 
             emit vectorscopeChanged(
                 vectorscopeScreenRenderer_.image());
+
+            const auto vectorscopeScreenEnd =
+                std::chrono::steady_clock::now();
+
+            vectorscopeWorkerPhaseAppend(
+                'S',
+                vectorscopeScreenStart,
+                vectorscopeScreenEnd);
+            appendVectorscopeRendererPhases(
+                timings,
+                vectorscopeScreenStart,
+                false);
         }
         else
         {
@@ -4474,8 +5480,11 @@ void VideoEngine::vectorscopeWorkerLoop()
             QElapsedTimer videoTimer;
             videoTimer.start();
 
+            const auto vectorscopeSpoutStart =
+                std::chrono::steady_clock::now();
+
             vectorscopeVideoRenderer_.analyze(
-                captureSlots_[slotIndex].frame);
+                captureSlots_[slotIndex].vectorscopeFrame);
 
             performanceStats_.vectorscopeVideo.update(
                 static_cast<std::uint64_t>(
@@ -4506,6 +5515,18 @@ void VideoEngine::vectorscopeWorkerLoop()
 
             emit vectorscopeVideoChanged(
                 vectorscopeVideoRenderer_.image());
+
+            const auto vectorscopeSpoutEnd =
+                std::chrono::steady_clock::now();
+
+            vectorscopeWorkerPhaseAppend(
+                'V',
+                vectorscopeSpoutStart,
+                vectorscopeSpoutEnd);
+            appendVectorscopeRendererPhases(
+                timings,
+                vectorscopeSpoutStart,
+                true);
          }
         else
         {
@@ -4518,10 +5539,22 @@ void VideoEngine::vectorscopeWorkerLoop()
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
+        const auto vectorscopePriorityEnd =
+            std::chrono::steady_clock::now();
+        appendPriorityOwnershipIntervals(
+            performanceStats_.vectorscopeWorkerPhaseTimeline,
+            vectorscopeDiagnosticOriginNs,
+            vectorscopePriorityStart,
+            vectorscopePriorityEnd,
+            kPriorityVectorscope);
+
+        performanceStats_.publishVectorscopeDiagnosticTimeline();
+
         const bool stillValid =
-            isCaptureSlotValid(
-                slotIndex,
-                generation);
+            captureSlots_[slotIndex]
+                .vectorscopeGeneration.load(
+                    std::memory_order_acquire) ==
+            generation;
 
         if (!stillValid)
         {
@@ -4665,6 +5698,17 @@ void VideoEngine::setWaveformScreenRenderEnabled(
     waveformScreenRenderEnabled_.store(
         enabled,
         std::memory_order_release);
+
+    if (!enabled)
+    {
+        performanceStats_.waveformScreen.update(0);
+        performanceStats_.waveformScreenPhaseTimeline.reset(0);
+        if (!waveformVideoEnabled_.load(std::memory_order_acquire))
+        {
+            performanceStats_.waveformWorkerPhaseTimeline.reset(0);
+            performanceStats_.clearPublishedWaveformDiagnosticTimelines();
+        }
+    }
 }
 
 void VideoEngine::setVectorscopeScreenRenderEnabled(
@@ -4673,6 +5717,16 @@ void VideoEngine::setVectorscopeScreenRenderEnabled(
     vectorscopeScreenRenderEnabled_.store(
         enabled,
         std::memory_order_release);
+
+    if (!enabled)
+    {
+        performanceStats_.vectorscopeScreen.update(0);
+        if (!vectorscopeVideoEnabled_.load(std::memory_order_acquire))
+        {
+            performanceStats_.vectorscopeWorkerPhaseTimeline.reset(0);
+            performanceStats_.clearPublishedVectorscopeDiagnosticTimeline();
+        }
+    }
 }
 
 
@@ -4928,7 +5982,135 @@ QImage VideoEngine::captureHighResolutionSnapshot()
 
 PerformanceSnapshot VideoEngine::performanceSnapshot() const
 {
-    return performanceStats_.snapshot();
+    PerformanceSnapshot snapshot = performanceStats_.snapshot();
+    const auto now = std::chrono::steady_clock::now();
+
+    // Delta 48: priority ownership must use the SAME capture generation /
+    // diagnostic origin as the worker row it is drawn underneath.  Delta 47
+    // used one waveform generation for all four rows, which shifted the red
+    // underlines whenever video / waveform / vectorscope snapshots were from
+    // different capture generations.
+    const auto makePriorityTimeline =
+        [this, now](std::uint64_t generation, unsigned ownerBit)
+        {
+            WorkerPhaseTimelineSnapshot result{};
+            result.generation = generation;
+
+            if (generation == 0u)
+            {
+                return result;
+            }
+
+            // Timeline generations are not all encoded the same way.
+            // Display/assist rows use captureTickNs while the own WF/VS
+            // worker rows use the capture generation counter. Resolve both
+            // identities to the SAME physical capture slot before deriving
+            // the red HIGH-priority underline.
+            int slotIndex = kInvalidSlotIndex;
+            for (std::size_t i = 0; i < captureSlots_.size(); ++i)
+            {
+                const auto& candidate = captureSlots_[i];
+                if (candidate.writing.load(std::memory_order_acquire))
+                {
+                    continue;
+                }
+
+                const std::uint64_t captureGeneration =
+                    candidate.generation.load(std::memory_order_acquire);
+                const std::uint64_t waveformGeneration =
+                    candidate.waveformGeneration.load(std::memory_order_acquire);
+                const std::uint64_t vectorscopeGeneration =
+                    candidate.vectorscopeGeneration.load(std::memory_order_acquire);
+                const std::int64_t captureTickNs =
+                    candidate.captureTickNs.load(std::memory_order_acquire);
+
+                if (captureGeneration == generation ||
+                    waveformGeneration == generation ||
+                    vectorscopeGeneration == generation ||
+                    (captureTickNs > 0 &&
+                     static_cast<std::uint64_t>(captureTickNs) == generation))
+                {
+                    slotIndex = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            if (slotIndex < 0)
+            {
+                return result;
+            }
+
+            const std::int64_t diagnosticOriginNs =
+                captureSlots_[static_cast<std::size_t>(slotIndex)]
+                    .diagnosticOriginNs.load(std::memory_order_acquire);
+
+            // Priority ownership is frame-local. Find the NEXT timeline
+            // origin by time, not by generation number: captureTickNs based
+            // identities are nanosecond timestamps and cannot be compared
+            // numerically with the small capture generation counter.
+            auto intervalEnd = now;
+            std::int64_t nextOriginNs = 0;
+
+            for (const auto& candidate : captureSlots_)
+            {
+                const std::int64_t candidateOriginNs =
+                    candidate.diagnosticOriginNs.load(
+                        std::memory_order_acquire);
+
+                if (candidateOriginNs > diagnosticOriginNs &&
+                    (nextOriginNs == 0 ||
+                     candidateOriginNs < nextOriginNs))
+                {
+                    nextOriginNs = candidateOriginNs;
+                }
+            }
+
+            if (nextOriginNs > diagnosticOriginNs)
+            {
+                intervalEnd =
+                    std::chrono::steady_clock::time_point(
+                        std::chrono::nanoseconds(nextOriginNs));
+            }
+
+            return priorityOwnershipSnapshot(
+                diagnosticOriginNs,
+                intervalEnd,
+                ownerBit,
+                generation);
+        };
+
+    const std::uint64_t video1Generation =
+        snapshot.displayWorker0Phases.generation != 0u
+            ? snapshot.displayWorker0Phases.generation
+            : snapshot.displayFieldPhases.generation;
+
+    const std::uint64_t video2Generation =
+        snapshot.displayWorker1Phases.generation != 0u
+            ? snapshot.displayWorker1Phases.generation
+            : snapshot.displayFieldPhases.generation;
+
+    const std::uint64_t waveformGeneration =
+        snapshot.waveformWorkerPhases.generation != 0u
+            ? snapshot.waveformWorkerPhases.generation
+            : snapshot.waveformScreenPhases.generation;
+
+    const std::uint64_t vectorscopeGeneration =
+        snapshot.vectorscopeWorkerPhases.generation != 0u
+            ? snapshot.vectorscopeWorkerPhases.generation
+            : (snapshot.vectorscopeWorkerAssist.generation != 0u
+                ? snapshot.vectorscopeWorkerAssist.generation
+                : waveformGeneration);
+
+    snapshot.priorityVideo1 = makePriorityTimeline(
+        video1Generation, kPriorityVideo1);
+    snapshot.priorityVideo2 = makePriorityTimeline(
+        video2Generation, kPriorityVideo2);
+    snapshot.priorityWaveform = makePriorityTimeline(
+        waveformGeneration, kPriorityWaveform);
+    snapshot.priorityVectorscope = makePriorityTimeline(
+        vectorscopeGeneration, kPriorityVectorscope);
+
+    return snapshot;
 }
 
 void VideoEngine::setWaveformAspectRatio(

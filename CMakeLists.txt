@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.25)
+﻿cmake_minimum_required(VERSION 3.25)
 
 project(OpenScope
-    VERSION 0.8.3
+    VERSION 0.8.4
     LANGUAGES C CXX
 )
 
@@ -54,6 +54,8 @@ set(OPENSCOPE_GENERATED_DIR
 file(MAKE_DIRECTORY
     "${OPENSCOPE_GENERATED_DIR}"
 )
+
+set(OPENSCOPE_DELTA 50)
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Version.h.in"

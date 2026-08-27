@@ -99,7 +99,6 @@ namespace
     {
         std::uint16_t u = 32768u;
         std::uint16_t v = 32768u;
-        std::size_t sampleIndex = 0u;
     };
 
     struct GamutAnalysis
@@ -232,8 +231,7 @@ namespace
                 result.offenders.push_back(
                     GamutOffender{
                         frame.u[index],
-                        frame.v[index],
-                        index});
+                        frame.v[index]});
             };
 
         for (std::size_t i = firstSample;
@@ -425,22 +423,6 @@ namespace
         pen.setWidthF(2.0);
         pen.setCapStyle(Qt::RoundCap);
         painter.setPen(pen);
-        // Draw the complete confirmed illegal run, not just isolated dots.
-        // Only connect samples that were adjacent in the source frame so
-        // separate offender runs (or separate lines) never get bridged.
-        for (qsizetype i = 1; i < points.size(); ++i)
-        {
-            const GamutOffender& previous =
-                gamutAnalysis.offenders.at(i - 1);
-            const GamutOffender& current =
-                gamutAnalysis.offenders.at(i);
-
-            if (current.sampleIndex == previous.sampleIndex + 1u)
-            {
-                painter.drawLine(points.at(i - 1), points.at(i));
-            }
-        }
-
         painter.drawPoints(
             points.constData(),
             static_cast<int>(points.size()));
@@ -551,6 +533,7 @@ VectorscopeRenderer::VectorscopeRenderer(Profile profile)
     : profile_(profile)
 {
     image_.fill(Qt::black);
+    publishedImage_.fill(Qt::black);
 
     graticule_.setScale(
         VectorscopeSettings::scale);
@@ -583,7 +566,9 @@ void VectorscopeRenderer::setOutputSize(int width, int height)
     outputHeight_ = std::max(height, 1);
 
     if (image_.width() == outputWidth_ &&
-        image_.height() == outputHeight_)
+        image_.height() == outputHeight_ &&
+        publishedImage_.width() == outputWidth_ &&
+        publishedImage_.height() == outputHeight_)
     {
         return;
     }
@@ -593,7 +578,13 @@ void VectorscopeRenderer::setOutputSize(int width, int height)
         outputHeight_,
         QImage::Format_RGB32);
 
+    publishedImage_ = QImage(
+        outputWidth_,
+        outputHeight_,
+        QImage::Format_RGB32);
+
     image_.fill(Qt::black);
+    publishedImage_.fill(Qt::black);
 }
 
 void VectorscopeRenderer::setContentScale(
@@ -623,9 +614,7 @@ void VectorscopeRenderer::setGlow(int glow)
 void VectorscopeRenderer::setColorizeGamutErrors(
     bool enabled) noexcept
 {
-    colorizeGamutErrors_.store(
-        enabled,
-        std::memory_order_release);
+    colorizeGamutErrors_ = enabled;
 }
 
 void VectorscopeRenderer::setHorizontalWindow(
@@ -664,7 +653,7 @@ void VectorscopeRenderer::moveAnalyzerToThread(QThread* thread)
 
 const QImage& VectorscopeRenderer::image() const
 {
-    return image_;
+    return publishedImage_;
 }
 
 const VectorscopeRenderTimings& VectorscopeRenderer::renderTimings() const noexcept
@@ -753,50 +742,11 @@ double VectorscopeRenderer::screenOwnerWidth(const QRectF& bounds) const
 
 QRectF VectorscopeRenderer::screenScopeRect(const QRectF& bounds) const
 {
-    constexpr double kScreenMargin = 8.0;
-    constexpr double kScreenGap = 8.0;
-
-    const double ownerWidth =
-        screenOwnerWidth(bounds);
-
-    const double availableLeft =
-        bounds.left() +
-        kScreenMargin +
-        ownerWidth +
-        kScreenGap;
-
-    const double availableRight =
-        bounds.right() -
-        kScreenMargin;
-
-    const double availableTop =
-        bounds.top() +
-        kScreenMargin;
-
-    const double availableBottom =
-        bounds.bottom() -
-        kScreenMargin;
-
-    const QRectF available(
-        availableLeft,
-        availableTop,
-        std::max(1.0, availableRight - availableLeft),
-        std::max(1.0, availableBottom - availableTop));
-
-    const double size =
-        std::min(
-            available.width(),
-            available.height());
-
-    // Screen profile: centre the largest possible square in the space
-    // between the left information cards and the right edge.  Previously
-    // the same square was pinned to the right edge.
     return snapSquare(
-        QRectF(
-            available.center().x() - size * 0.5,
-            available.center().y() - size * 0.5,
-            size,
-            size));
+        ViewportOverlay::vectorscopeScopeRect(
+            bounds,
+            false,
+            screenOwnerWidth(bounds)));
 }
 
 QRectF VectorscopeRenderer::videoScopeRect(
@@ -949,6 +899,9 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
 {
     renderTimings_ = {};
 
+    QElapsedTimer totalTimer;
+    totalTimer.start();
+
     QElapsedTimer phaseTimer;
     phaseTimer.start();
 
@@ -1044,6 +997,10 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
     graticule_.setChromaMagnitude(
         maximumChroma);
 
+    renderTimings_.analyzerStartUs =
+        static_cast<std::uint64_t>(
+            totalTimer.nsecsElapsed() / 1000);
+
     analyzer_.analyze(frame);
 
     const auto& analyzerTimings =
@@ -1057,6 +1014,20 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
     renderTimings_.glowPersistenceUs =
         analyzerTimings.glowUs +
         analyzerTimings.persistenceUs;
+
+    const std::uint64_t analyzerEndUs =
+        static_cast<std::uint64_t>(
+            totalTimer.nsecsElapsed() / 1000);
+
+    renderTimings_.glowPersistenceStartUs =
+        analyzerEndUs >= renderTimings_.glowPersistenceUs
+        ? analyzerEndUs - renderTimings_.glowPersistenceUs
+        : renderTimings_.analyzerStartUs +
+            renderTimings_.analyzerUs;
+
+    renderTimings_.composeStartUs =
+        static_cast<std::uint64_t>(
+            totalTimer.nsecsElapsed() / 1000);
 
     phaseTimer.restart();
     image_.fill(Qt::black);
@@ -1111,27 +1082,29 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
         painter.restore();
     }
 
-    if (colorizeGamutErrors_.load(std::memory_order_acquire))
+    if (colorizeGamutErrors_)
     {
-        // Draw every confirmed illegal sample. There is deliberately no
-        // top-N cap: every point that contributed to GAMUT ERROR is red.
         drawGamutOffenders(
             painter,
             scopeRect,
             gamutAnalysis,
             profile_ == Profile::Video);
-    }
 
-    drawGamutStatus(
-        painter,
-        scopeRect,
-        gamutError,
-        profile_ == Profile::Video,
-        bottomRightCard);
+        drawGamutStatus(
+            painter,
+            scopeRect,
+            gamutError,
+            profile_ == Profile::Video,
+            bottomRightCard);
+    }
 
     renderTimings_.composeUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
+
+    renderTimings_.overlayStartUs =
+        static_cast<std::uint64_t>(
+            totalTimer.nsecsElapsed() / 1000);
 
     phaseTimer.restart();
 
@@ -1154,6 +1127,14 @@ void VectorscopeRenderer::analyze(const Yuv444Frame& frame)
     renderTimings_.overlayUs =
         static_cast<std::uint64_t>(
             phaseTimer.nsecsElapsed() / 1000);
+
+    // QPainter must no longer reference the render target when buffers swap.
+    painter.end();
+
+    // Publish the fully completed frame. The next generation renders into
+    // the alternate QImage instead of modifying the image just handed to Qt.
+    image_.swap(
+        publishedImage_);
 }
 
 void VectorscopeRenderer::composeScreen(

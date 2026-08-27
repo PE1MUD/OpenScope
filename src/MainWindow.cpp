@@ -130,7 +130,7 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V" OPENSCOPE_VERSION);
+    setWindowTitle("OpenScope V" OPENSCOPE_VERSION " - Delta " OPENSCOPE_DELTA);
 
     // Catch plain F at the QApplication level so the spectrum shortcut
     // also works while focus is inside separate Qt instrument/tool windows.
@@ -2428,6 +2428,53 @@ void MainWindow::applyDisplayAspectRatio(
         OpenScopeSettings::aspectRatioValue(
             aspectRatio);
 
+    // F11 is a true monitor-sized fullscreen state.  Do not apply the normal
+    // top-level aspect-ratio resize while fullscreen: that leaves Qt/Windows
+    // with stale fullscreen geometry.  Update the geometry we will restore to,
+    // then re-assert fullscreen on the next event turn so every child layout
+    // is recomputed for the new display aspect ratio.
+    if (f11FullScreen_)
+    {
+        if (f11RestoreWindowGeometry_.isValid())
+        {
+            const int restoredHeight =
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(
+                            f11RestoreWindowGeometry_.width()) /
+                        aspect));
+
+            f11RestoreWindowGeometry_.setHeight(restoredHeight);
+        }
+
+        QTimer::singleShot(
+            0,
+            this,
+            [this]()
+            {
+                if (!f11FullScreen_)
+                {
+                    return;
+                }
+
+                showFullScreen();
+
+                if (workspace_ != nullptr)
+                {
+                    workspace_->updateGeometry();
+                    workspace_->update();
+                }
+
+                if (centralWidget() != nullptr)
+                {
+                    centralWidget()->updateGeometry();
+                    centralWidget()->update();
+                }
+            });
+
+        return;
+    }
+
     // If the OpenScope window is in our aspect-ratio-constrained
     // custom maximized state, two geometries must be updated:
     //
@@ -2617,14 +2664,14 @@ void MainWindow::updateRenderResolutionTitle()
     {
         setWindowTitle(
             QString(
-                "OpenScope V" OPENSCOPE_VERSION " - %1x%2")
+                "OpenScope V" OPENSCOPE_VERSION " - %1x%2 - Delta " OPENSCOPE_DELTA)
             .arg(renderSize.width())
             .arg(renderSize.height()));
     }
     else
     {
         setWindowTitle(
-            "OpenScope V" OPENSCOPE_VERSION);
+            "OpenScope V" OPENSCOPE_VERSION " - Delta " OPENSCOPE_DELTA);
     }
 }
 

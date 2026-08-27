@@ -9,15 +9,18 @@
 #include <QString>
 #include <cstdint>
 #include <QThread>
-#include <atomic>
 
 class QPainter;
 
 struct VectorscopeRenderTimings
 {
+    std::uint64_t analyzerStartUs = 0;
     std::uint64_t analyzerUs = 0;
+    std::uint64_t glowPersistenceStartUs = 0;
     std::uint64_t glowPersistenceUs = 0;
+    std::uint64_t composeStartUs = 0;
     std::uint64_t composeUs = 0;
+    std::uint64_t overlayStartUs = 0;
     std::uint64_t overlayUs = 0;
 
     // Glow workload instrumentation consumed by VideoEngine.
@@ -96,7 +99,12 @@ private:
         const QRectF& bottomRightCard);
 
     Profile profile_ = Profile::Screen;
+
+    // Double-buffered Qt transport surfaces. Render into image_ while
+    // publishedImage_ remains stable for the GUI/Spout consumer.
     QImage image_{1, 1, QImage::Format_RGB32};
+    QImage publishedImage_{1, 1, QImage::Format_RGB32};
+
     VectorscopeAnalyzer analyzer_;
     VectorscopeGraticule graticule_;
     VectorscopePresentationInfo presentation_;
@@ -106,8 +114,8 @@ private:
     double contentScaleX_ = 1.0;
     double contentScaleY_ = 1.0;
     int selectedLine_ = -1;
+    bool colorizeGamutErrors_ = true;
     int horizontalZoomFactor_ = 1;
     double horizontalScrollPosition_ = 0.0;
-    std::atomic_bool colorizeGamutErrors_{true};
     VectorscopeRenderTimings renderTimings_;
 };

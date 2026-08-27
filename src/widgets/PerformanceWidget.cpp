@@ -3,65 +3,87 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstddef>
 
 #include <QCloseEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
-#include <QPolygonF>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QScrollBar>
+#include <QSlider>
+#include <QStringList>
 #include <QToolTip>
 
 namespace
 {
-    constexpr double kMaximumUs =
-        80000.0;
+    constexpr double kMaximumUs = 80000.0;
+    constexpr double kMinimumTimelineSpanUs = 5000.0;
+    constexpr int kToolbarHeight = 28;
+    constexpr int kTimelineScrollHeight = 18;
 
-    constexpr double kField1DeadlineUs =
-        40000.0;
+    double gTimelineStartUs = 0.0;
+    double gTimelineSpanUs = kMaximumUs;
+    constexpr double kField1DeadlineUs = 40000.0;
+    constexpr double kField2DeadlineUs = 60000.0;
+    constexpr double kTimingToleranceUs = 2000.0;
 
-    constexpr double kField2DeadlineUs =
-        60000.0;
+    constexpr int kBarHeight = 20;
+    constexpr int kRowSpacing = 8;
+    constexpr int kMargin = 12;
+    constexpr int kScaleHeight = 26;
 
-    constexpr double kTimingToleranceUs =
-        2000.0;
-
-    enum class BarType
+    enum class RowKind
     {
         FieldTiming,
+        TimingDiagnostics,
         Field1Ready,
         Field2Ready,
+        DisplayWorker0,
+        DisplayWorker1,
+        ScreenVideo,
         WaveformWorker,
-        Worker0,
-        Worker1,
-        Normal
-    };
-
-    enum class DetailKind
-    {
-        None,
         WaveformScreen,
+        WaveformSpout,
+        VectorscopeWorker,
         VectorscopeScreen,
-        WaveformVideo,
-        VectorscopeVideo
+        VectorscopeSpout,
+        DisplayCompose
     };
 
-    struct Bar
+    struct Row
     {
         const char* label;
-        const PerformanceMetricSnapshot* metric;
-        BarType type;
-        DetailKind detail = DetailKind::None;
+        RowKind kind;
     };
+
+    constexpr std::array<Row, 14> kRows =
+    {{
+        { "Field timing", RowKind::FieldTiming },
+        { "Timing diagnostics [events]", RowKind::TimingDiagnostics },
+        { "Field 1 ready @ 40 ms", RowKind::Field1Ready },
+        { "Field 2 ready @ 60 ms", RowKind::Field2Ready },
+        { "Video worker 1 [timeline]", RowKind::DisplayWorker0 },
+        { "Video worker 2 [timeline]", RowKind::DisplayWorker1 },
+        { "Screen Frame Cost [wallclock]", RowKind::ScreenVideo },
+        { "Waveform worker (Screen + Spout) [timeline]", RowKind::WaveformWorker },
+        { "  -> Screen waveform [timeline]", RowKind::WaveformScreen },
+        { "  -> Spout waveform [timeline]", RowKind::WaveformSpout },
+        { "Vectorscope worker (Screen + Spout) [timeline]", RowKind::VectorscopeWorker },
+        { "  -> Screen vectorscope [cost]", RowKind::VectorscopeScreen },
+        { "  -> Spout vectorscope [cost]", RowKind::VectorscopeSpout },
+        { "Display compose CPU sum [work]", RowKind::DisplayCompose }
+    }};
 
     int xForUs(
         const QRect& barRect,
         double us)
     {
         const double normalized =
-            std::clamp(
-                us / kMaximumUs,
-                0.0,
-                1.0);
+            (us - gTimelineStartUs) /
+            std::max(gTimelineSpanUs, 1.0);
 
         return
             barRect.left() +
@@ -72,83 +94,38 @@ namespace
                         barRect.width())));
     }
 
-    void drawAssistChunkMarkers(
-        QPainter& painter,
-        const QRect& barRect,
-        const WaveformAssistTimelineSnapshot& timeline,
-        std::uint64_t expectedGeneration)
+    bool isUsVisible(double us)
     {
-        if (expectedGeneration == 0 ||
-            timeline.generation != expectedGeneration)
+        return
+            us >= gTimelineStartUs &&
+            us <= gTimelineStartUs + gTimelineSpanUs;
+    }
+
+    void drawDeadlineGuides(
+        QPainter& painter,
+        const QRect& barRect)
+    {
+        QPen pen(QColor(75, 75, 75));
+        pen.setStyle(Qt::DashLine);
+        painter.setPen(pen);
+
+        for (const double us :
+            { kField1DeadlineUs, kField2DeadlineUs })
         {
-            return;
-        }
-
-        painter.save();
-
-        for (std::uint32_t i = 0;
-            i < timeline.count &&
-            i < WaveformAssistTimelineSnapshot::kCapacity;
-            ++i)
-        {
-            const auto& event = timeline.events[i];
-            const char phase = static_cast<char>(event.phase);
-            const int x0 = xForUs(
-                barRect,
-                static_cast<double>(event.startUs));
-            const int x1 = xForUs(
-                barRect,
-                static_cast<double>(event.startUs) +
-                    static_cast<double>(event.durationUs));
-
-            const int left =
-                std::clamp(x0, barRect.left(), barRect.right());
-            const int right =
-                std::clamp(std::max(x1, x0 + 1),
-                    barRect.left(), barRect.right());
-
-            const QRect chunkRect(
-                left,
-                barRect.top() + 2,
-                std::max(right - left, 1),
-                std::max(barRect.height() - 4, 1));
-
-            const QColor fill =
-                phase == 'R'
-                ? QColor(220, 220, 220)
-                : phase == 'X'
-                    ? QColor(205, 190, 230)
-                    : QColor(235, 235, 235);
-
-            painter.fillRect(chunkRect, fill);
-            painter.setPen(QColor(45, 45, 45));
-            painter.drawRect(chunkRect.adjusted(0, 0, -1, -1));
-
-            if (chunkRect.width() >= 15)
+            if (!isUsVisible(us))
             {
-                painter.setPen(Qt::black);
-                painter.drawText(
-                    chunkRect,
-                    Qt::AlignCenter,
-                    QStringLiteral("%1 %2")
-                        .arg(QChar::fromLatin1(phase))
-                        .arg(
-                            static_cast<double>(event.durationUs) / 1000.0,
-                            0,
-                            'f',
-                            1));
+                continue;
             }
-            else if (chunkRect.width() >= 7)
-            {
-                painter.setPen(Qt::black);
-                painter.drawText(
-                    chunkRect,
-                    Qt::AlignCenter,
-                    QString(QChar::fromLatin1(phase)));
-            }
-        }
 
-        painter.restore();
+            const int x =
+                xForUs(barRect, us);
+
+            painter.drawLine(
+                x,
+                barRect.top(),
+                x,
+                barRect.bottom());
+        }
     }
 
     void fillTimingBackground(
@@ -158,23 +135,22 @@ namespace
         double yellowEndUs)
     {
         const int greenEnd =
-            xForUs(
-                barRect,
-                greenEndUs);
+            std::clamp(
+                xForUs(barRect, greenEndUs),
+                barRect.left(),
+                barRect.right() + 1);
 
         const int yellowEnd =
-            xForUs(
-                barRect,
-                yellowEndUs);
+            std::clamp(
+                xForUs(barRect, yellowEndUs),
+                barRect.left(),
+                barRect.right() + 1);
 
         painter.fillRect(
             QRect(
                 barRect.left(),
                 barRect.top(),
-                std::max(
-                    greenEnd -
-                    barRect.left(),
-                    0),
+                std::max(greenEnd - barRect.left(), 0),
                 barRect.height()),
             QColor(30, 125, 48));
 
@@ -182,10 +158,7 @@ namespace
             QRect(
                 greenEnd,
                 barRect.top(),
-                std::max(
-                    yellowEnd -
-                    greenEnd,
-                    0),
+                std::max(yellowEnd - greenEnd, 0),
                 barRect.height()),
             QColor(155, 132, 35));
 
@@ -193,10 +166,7 @@ namespace
             QRect(
                 yellowEnd,
                 barRect.top(),
-                std::max(
-                    barRect.right() + 1 -
-                    yellowEnd,
-                    0),
+                std::max(barRect.right() + 1 - yellowEnd, 0),
                 barRect.height()),
             QColor(145, 38, 38));
     }
@@ -209,51 +179,56 @@ namespace
             barRect,
             QColor(28, 28, 28));
 
-        const auto fillToleranceBand =
-            [&](double targetUs)
+        for (const double targetUs :
+            { kField1DeadlineUs, kField2DeadlineUs })
+        {
+            const double bandStartUs =
+                targetUs - kTimingToleranceUs;
+            const double bandEndUs =
+                targetUs + kTimingToleranceUs;
+
+            if (bandEndUs < gTimelineStartUs ||
+                bandStartUs >
+                    gTimelineStartUs + gTimelineSpanUs)
             {
-                const int left =
-                    xForUs(
-                        barRect,
-                        targetUs -
-                            kTimingToleranceUs);
+                continue;
+            }
 
-                const int right =
-                    xForUs(
-                        barRect,
-                        targetUs +
-                            kTimingToleranceUs);
+            const int left =
+                std::clamp(
+                    xForUs(barRect, bandStartUs),
+                    barRect.left(),
+                    barRect.right() + 1);
 
-                painter.fillRect(
-                    QRect(
-                        left,
-                        barRect.top(),
-                        std::max(
-                            right - left,
-                            1),
-                        barRect.height()),
-                    QColor(30, 125, 48));
+            const int right =
+                std::clamp(
+                    xForUs(barRect, bandEndUs),
+                    barRect.left(),
+                    barRect.right() + 1);
 
-                const int targetX =
-                    xForUs(
-                        barRect,
-                        targetUs);
+            painter.fillRect(
+                QRect(
+                    left,
+                    barRect.top(),
+                    std::max(right - left, 1),
+                    barRect.height()),
+                QColor(30, 125, 48));
 
+            if (isUsVisible(targetUs))
+            {
                 painter.setPen(
                     QColor(150, 150, 150));
 
+                const int x =
+                    xForUs(barRect, targetUs);
+
                 painter.drawLine(
-                    targetX,
-                    barRect.top() + 1,
-                    targetX,
-                    barRect.bottom() - 1);
-            };
-
-        fillToleranceBand(
-            kField1DeadlineUs);
-
-        fillToleranceBand(
-            kField2DeadlineUs);
+                    x,
+                    barRect.top(),
+                    x,
+                    barRect.bottom());
+            }
+        }
     }
 
     void drawFieldStatusMarker(
@@ -263,36 +238,31 @@ namespace
         double targetUs)
     {
         const bool inRange =
-            std::abs(
-                valueUs - targetUs) <=
+            std::abs(valueUs - targetUs) <=
             kTimingToleranceUs;
 
-        const int x =
-            xForUs(
-                barRect,
-                targetUs);
+        if (!isUsVisible(targetUs))
+        {
+            return;
+        }
 
-        constexpr int markerSize = 14;
+        const int x =
+            xForUs(barRect, targetUs);
 
         const QRect markerRect(
-            x - markerSize / 2,
-            barRect.center().y() - markerSize / 2,
-            markerSize,
-            markerSize);
+            x - 7,
+            barRect.center().y() - 7,
+            14,
+            14);
 
         QPen pen(
             inRange
-            ? QColor(95, 215, 120)
-            : QColor(235, 95, 95));
+                ? QColor(95, 215, 120)
+                : QColor(235, 95, 95));
 
         pen.setWidth(2);
-        pen.setCapStyle(
-            Qt::RoundCap);
-        pen.setJoinStyle(
-            Qt::RoundJoin);
-
-        painter.setPen(
-            pen);
+        pen.setCapStyle(Qt::RoundCap);
+        painter.setPen(pen);
 
         if (inRange)
         {
@@ -311,16 +281,12 @@ namespace
         else
         {
             painter.drawLine(
-                markerRect.left() + 2,
-                markerRect.top() + 2,
-                markerRect.right() - 2,
-                markerRect.bottom() - 2);
+                markerRect.topLeft() + QPoint(2, 2),
+                markerRect.bottomRight() - QPoint(2, 2));
 
             painter.drawLine(
-                markerRect.right() - 2,
-                markerRect.top() + 2,
-                markerRect.left() + 2,
-                markerRect.bottom() - 2);
+                markerRect.topRight() + QPoint(-2, 2),
+                markerRect.bottomLeft() + QPoint(2, -2));
         }
     }
 
@@ -330,58 +296,107 @@ namespace
         double startUs,
         double durationUs,
         const QColor& color,
-        const char* shortLabel)
+        const QString& label,
+        bool outlineOnly = false)
     {
         if (durationUs <= 0.0)
         {
             return;
         }
 
+        const double endUs =
+            startUs + durationUs;
+
+        if (endUs < gTimelineStartUs ||
+            startUs >
+                gTimelineStartUs + gTimelineSpanUs)
+        {
+            return;
+        }
+
         const int left =
-            xForUs(
-                barRect,
-                startUs);
+            std::clamp(
+                xForUs(barRect, startUs),
+                barRect.left(),
+                barRect.right());
 
         const int right =
-            xForUs(
-                barRect,
-                startUs + durationUs);
-
-        const int width =
-            std::max(
-                right - left,
-                1);
+            std::clamp(
+                xForUs(barRect, endUs),
+                barRect.left(),
+                barRect.right() + 1);
 
         const QRect segmentRect(
             left,
             barRect.top() + 1,
-            width,
-            barRect.height() - 1);
+            std::max(right - left, 1),
+            std::max(barRect.height() - 2, 1));
 
-        painter.fillRect(
-            segmentRect,
-            color);
-
-        painter.setPen(
-            QColor(35, 35, 35));
-
-        painter.drawLine(
-            segmentRect.topRight(),
-            segmentRect.bottomRight());
-
-        if (segmentRect.width() >= 11)
+        if (!outlineOnly)
         {
-            painter.setPen(
-                Qt::black);
+            painter.fillRect(
+                segmentRect,
+                color);
+        }
 
+        QPen pen(
+            outlineOnly
+                ? QColor(175, 175, 175)
+                : QColor(35, 35, 35));
+
+        if (outlineOnly)
+        {
+            pen.setStyle(Qt::DashLine);
+        }
+
+        painter.setPen(pen);
+        painter.drawRect(
+            segmentRect.adjusted(0, 0, -1, -1));
+
+        if (!outlineOnly &&
+            segmentRect.width() >= 10)
+        {
+            painter.setPen(Qt::black);
             painter.drawText(
                 segmentRect,
                 Qt::AlignCenter,
-                QString::fromLatin1(
-                    shortLabel));
+                label);
         }
     }
 
+    void drawPriorityUnderline(
+        QPainter& painter,
+        const QRect& barRect,
+        double startUs,
+        double durationUs)
+    {
+        if (durationUs <= 0.0)
+        {
+            return;
+        }
+
+        const double endUs = startUs + durationUs;
+        if (endUs < gTimelineStartUs ||
+            startUs > gTimelineStartUs + gTimelineSpanUs)
+        {
+            return;
+        }
+
+        const int left = std::clamp(
+            xForUs(barRect, startUs),
+            barRect.left(),
+            barRect.right());
+        const int right = std::clamp(
+            xForUs(barRect, endUs),
+            barRect.left(),
+            barRect.right() + 1);
+
+        QPen pen(QColor(235, 45, 45));
+        pen.setWidth(2);
+        painter.setPen(pen);
+        const int y = barRect.bottom() - 2;
+        painter.drawLine(left, y, std::max(right - 1, left), y);
+    }
 
     const char* displayPhaseText(char phase)
     {
@@ -394,7 +409,22 @@ namespace
         case 'A': return "S1";
         case '2': return "C2";
         case 'B': return "S2";
-        default: return "?";
+        default:  return "?";
+        }
+    }
+
+    const char* displayPhaseName(char phase)
+    {
+        switch (phase)
+        {
+        case 'F': return "Frequency compensation";
+        case 'N': return "Noise reduction";
+        case 'D': return "Deinterlace";
+        case '1': return "RGB convert field 1";
+        case 'A': return "Spout buffer field 1";
+        case '2': return "RGB convert field 2";
+        case 'B': return "Spout buffer field 2";
+        default:  return "Unknown display phase";
         }
     }
 
@@ -409,7 +439,176 @@ namespace
         case 'A': return QColor(205, 225, 185);
         case '2': return QColor(205, 190, 230);
         case 'B': return QColor(190, 215, 170);
-        default: return QColor(205, 205, 205);
+        default:  return QColor(205, 205, 205);
+        }
+    }
+
+    const char* waveformPhaseText(char phase)
+    {
+        switch (phase)
+        {
+        case 'F': return "F";
+        case 'U': return "U";
+        case 'T': return "T";
+        case 'K': return "K";
+        case 'E': return "E";
+        case 'e': return "e";
+        case 'H': return "H";
+        case 'A': return "A";
+        case 'L': return "L";
+        case 'J': return "J";
+        case 'R': return "R";
+        case 'Z': return "Z";
+        case 'P': return "P";
+        case 'B': return "B";
+        case 'G': return "G";
+        case 'Q': return "Q";
+        case 'C': return "C";
+        case 'O': return "O";
+        case 'X': return "X";
+        case 'W': return "W";
+        default:  return "?";
+        }
+    }
+
+    const char* waveformPhaseName(char phase)
+    {
+        switch (phase)
+        {
+        case 'F': return "Frequency compensation";
+        case 'U': return "Luma upsample";
+        case 'T': return "Trace preparation";
+        case 'K': return "Packet classify / MUD sieve";
+        case 'E': return "Energy target allocate / resize";
+        case 'e': return "Energy target clear / reset";
+        case 'H': return "Glow kernel preparation";
+        case 'A': return "AA / stitch setup";
+        case 'L': return "Raster load / cost analysis";
+        case 'J': return "Chunk partition / job dispatch";
+        case 'R': return "Trace raster";
+        case 'Z': return "Raster zipper";
+        case 'P': return "ScopePhor feedback / history";
+        case 'B': return "Base image clear";
+        case 'G': return "Graticule draw";
+        case 'Q': return "Phosphor energy -> output image";
+        case 'C': return "Chroma compose";
+        case 'O': return "Line-info / overlay";
+        case 'X': return "Resolve/output chunk";
+        case 'W': return "Assist rejoin wait";
+        default:  return "Unknown waveform phase";
+        }
+    }
+
+    QString waveformAssistDescription(
+        char phase,
+        std::uint32_t chunkIndex)
+    {
+        const char* base = waveformPhaseName(phase);
+        if (phase == 'R' || phase == 'X')
+        {
+            return QStringLiteral("%1 chunk %2")
+                .arg(QString::fromLatin1(base))
+                .arg(chunkIndex);
+        }
+
+        return QString::fromLatin1(base);
+    }
+
+    QColor waveformPhaseColor(char phase)
+    {
+        switch (phase)
+        {
+        case 'F': return QColor(235, 215, 180);
+        case 'U': return QColor(185, 215, 235);
+        case 'T': return QColor(205, 215, 235);
+        case 'K': return QColor(170, 205, 230);
+        case 'E': return QColor(190, 210, 230);
+        case 'e': return QColor(175, 205, 225);
+        case 'H': return QColor(205, 220, 235);
+        case 'A': return QColor(195, 215, 230);
+        case 'L': return QColor(185, 210, 225);
+        case 'J': return QColor(175, 205, 220);
+        case 'R': return QColor(238, 210, 165);
+        case 'Z': return QColor(205, 190, 230);
+        case 'P': return QColor(185, 225, 205);
+        case 'B': return QColor(215, 205, 230);
+        case 'G': return QColor(205, 215, 235);
+        case 'Q': return QColor(160, 215, 195);
+        case 'C': return QColor(205, 225, 185);
+        case 'O': return QColor(225, 205, 205);
+        case 'X': return QColor(190, 200, 235);
+        case 'W': return QColor(235, 205, 150);
+        default:  return QColor(195, 195, 195);
+        }
+    }
+
+    const char* workerPhaseText(char phase)
+    {
+        switch (phase)
+        {
+        case 'S': return "S";
+        case 'V': return "V";
+        case 'M': return "M";
+        case 'E': return "E";
+        case 'A':
+        case 'a': return "A";
+        case 'P':
+        case 'p': return "P";
+        case 'C':
+        case 'c': return "C";
+        case 'O':
+        case 'o': return "O";
+        default:  return "?";
+        }
+    }
+
+    const char* waveformWorkerPhaseName(char phase)
+    {
+        switch (phase)
+        {
+        case 'S': return "Screen waveform render";
+        case 'V': return "Spout waveform render";
+        case 'M': return "Waveform measurement / spectrum publish prep";
+        case 'E': return "Qt image publish / emit";
+        default:  return "Unknown waveform-worker phase";
+        }
+    }
+
+    const char* vectorscopeWorkerPhaseName(char phase)
+    {
+        switch (phase)
+        {
+        case 'S': return "Screen vectorscope render + emit envelope";
+        case 'V': return "Spout vectorscope render + emit envelope";
+        case 'A': return "Screen analyzer / density";
+        case 'P': return "Screen persistence / glow";
+        case 'C': return "Screen compose";
+        case 'O': return "Screen targets / overlay";
+        case 'a': return "Spout analyzer / density";
+        case 'p': return "Spout persistence / glow";
+        case 'c': return "Spout compose";
+        case 'o': return "Spout targets / overlay";
+        default:  return "Unknown vectorscope-worker phase";
+        }
+    }
+
+    QColor workerPhaseColor(char phase)
+    {
+        switch (phase)
+        {
+        case 'S': return QColor(205, 225, 235);
+        case 'V': return QColor(225, 205, 235);
+        case 'M': return QColor(235, 225, 185);
+        case 'E': return QColor(205, 235, 225);
+        case 'A':
+        case 'a': return QColor(205, 225, 235);
+        case 'P':
+        case 'p': return QColor(185, 225, 205);
+        case 'C':
+        case 'c': return QColor(205, 225, 185);
+        case 'O':
+        case 'o': return QColor(225, 205, 205);
+        default:  return QColor(195, 195, 195);
         }
     }
 
@@ -425,8 +624,16 @@ namespace
             ++i)
         {
             const auto& event = timeline.events[i];
-            const char phase = static_cast<char>(event.phase);
-            if (!includeSecondField && (phase == '2' || phase == 'B'))
+            const char phase =
+                static_cast<char>(event.phase);
+
+            if (phase == '^')
+            {
+                continue;
+            }
+
+            if (!includeSecondField &&
+                (phase == '2' || phase == 'B'))
             {
                 continue;
             }
@@ -437,396 +644,1663 @@ namespace
                 static_cast<double>(event.startUs),
                 static_cast<double>(event.durationUs),
                 displayPhaseColor(phase),
-                displayPhaseText(phase));
+                QString::fromLatin1(displayPhaseText(phase)));
         }
     }
 
-    double nonNegativeRemainder(
-        double readyUs,
-        double knownUs)
+    void drawAssistTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const WaveformAssistTimelineSnapshot& timeline)
     {
-        return
-            std::max(
-                readyUs - knownUs,
-                0.0);
-    }
-}
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase =
+                static_cast<char>(event.phase);
 
-auto makeBars(
-    const PerformanceSnapshot& snapshot)
-{
-    return std::array
-    {
-        Bar{
-            "Field timing",
-            nullptr,
-            BarType::FieldTiming },
-
-        Bar{
-            "Field 1 ready @ 40ms",
-            &snapshot.field1Ready,
-            BarType::Field1Ready },
-
-        Bar{
-            "Field 2 ready @ 60ms",
-            &snapshot.field2Ready,
-            BarType::Field2Ready },
-
-        Bar{
-            "Display worker 1",
-            nullptr,
-            BarType::Worker0 },
-
-        Bar{
-            "Display worker 2",
-            nullptr,
-            BarType::Worker1 },
-
-        Bar{
-            "Waveform worker W0",
-            nullptr,
-            BarType::WaveformWorker },
-
-        Bar{
-            "PC video",
-            &snapshot.videoScreen,
-            BarType::Normal },
-
-        Bar{
-            "PC waveform",
-            &snapshot.waveformScreen,
-            BarType::Normal,
-            DetailKind::WaveformScreen },
-
-        Bar{
-            "PC vectorscope",
-            &snapshot.vectorscopeScreen,
-            BarType::Normal,
-            DetailKind::VectorscopeScreen },
-
-        Bar{
-            "Waveform video",
-            &snapshot.waveformVideo,
-            BarType::Normal,
-            DetailKind::WaveformVideo },
-
-        Bar{
-            "Vectorscope video",
-            &snapshot.vectorscopeVideo,
-            BarType::Normal,
-            DetailKind::VectorscopeVideo },
-
-        Bar{
-            "Display compose",
-            &snapshot.displayCompose,
-            BarType::Normal },
-    };
-}
-
-
-QString makePinnedDetailText(
-    const PerformanceSnapshot& snapshot,
-    int barIndex)
-{
-    const auto bars = makeBars(snapshot);
-
-    if (barIndex < 0 ||
-        barIndex >= static_cast<int>(bars.size()))
-    {
-        return {};
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                waveformPhaseColor(phase),
+                QString::fromLatin1(waveformPhaseText(phase)));
+        }
     }
 
-    const Bar& bar = bars[barIndex];
-    const QString label = QString::fromLatin1(bar.label);
-
-    const auto makeWaveformDetails =
-        [&snapshot, &bar, &label](
-            const PerformanceMetricSnapshot& persistence,
-            const PerformanceMetricSnapshot& trace,
-            const PerformanceMetricSnapshot& compose,
-            const PerformanceMetricSnapshot& glow,
-            const PerformanceMetricSnapshot& overlay,
-            const GlowWorkloadSnapshot& workload,
-            bool traceParallel)
-        {
-            const double measuredMs =
-                persistence.latestMs() +
-                trace.latestMs() +
-                compose.latestMs() +
-                glow.latestMs() +
-                overlay.latestMs();
-
-            const double otherMs =
-                std::max(
-                    bar.metric->latestMs() - measuredMs,
-                    0.0);
-
-            const double coverage =
-                workload.totalTiles > 0
-                ? 100.0 *
-                    static_cast<double>(workload.dirtyTiles) /
-                    static_cast<double>(workload.totalTiles)
-                : 0.0;
-
-            const std::uint32_t processedVisits =
-                workload.horizontalPass1Tiles +
-                workload.verticalPass1Tiles +
-                workload.horizontalPass2Tiles +
-                workload.verticalPass2Tiles;
-
-            const std::uint32_t totalVisits =
-                workload.totalTiles * 4u;
-
-            const double processedPercent =
-                totalVisits > 0
-                ? 100.0 * static_cast<double>(processedVisits) /
-                    static_cast<double>(totalVisits)
-                : 0.0;
-
-            return QString(
-                "%1: %2 ms\n"
-                "Clear / persistence: %3 ms\n"
-                "Trace / preparation: %4 ms (%5)\n"
-                "Compose: %6 ms\n"
-                "Glow: %7 ms\n"
-                "Graticule / overlay: %8 ms\n"
-                "Other: %9 ms\n"
-                "Source dirty: %10 / %11 (%12%)\n"
-                "Blur H1/V1/H2/V2: %13 / %14 / %15 / %16\n"
-                "Processed visits: %17 / %18 (%19%)\n"
-                "Active bbox: %20,%21  %22x%23 px")
-                .arg(label)
-                .arg(bar.metric->latestMs(), 0, 'f', 2)
-                .arg(persistence.latestMs(), 0, 'f', 2)
-                .arg(trace.latestMs(), 0, 'f', 2)
-                .arg(traceParallel ? "parallel" : "scalar")
-                .arg(compose.latestMs(), 0, 'f', 2)
-                .arg(glow.latestMs(), 0, 'f', 2)
-                .arg(overlay.latestMs(), 0, 'f', 2)
-                .arg(otherMs, 0, 'f', 2)
-                .arg(workload.dirtyTiles)
-                .arg(workload.totalTiles)
-                .arg(coverage, 0, 'f', 1)
-                .arg(workload.horizontalPass1Tiles)
-                .arg(workload.verticalPass1Tiles)
-                .arg(workload.horizontalPass2Tiles)
-                .arg(workload.verticalPass2Tiles)
-                .arg(processedVisits)
-                .arg(totalVisits)
-                .arg(processedPercent, 0, 'f', 1)
-                .arg(workload.activeX)
-                .arg(workload.activeY)
-                .arg(workload.activeWidth)
-                .arg(workload.activeHeight);
-        };
-
-    const auto makeVectorscopeDetails =
-        [&bar, &label](
-            const PerformanceMetricSnapshot& analyzer,
-            const PerformanceMetricSnapshot& glowPersistence,
-            const PerformanceMetricSnapshot& compose,
-            const PerformanceMetricSnapshot& overlay,
-            const GlowWorkloadSnapshot& workload)
-        {
-            const double measuredMs =
-                analyzer.latestMs() +
-                glowPersistence.latestMs() +
-                compose.latestMs() +
-                overlay.latestMs();
-
-            const double otherMs =
-                std::max(
-                    bar.metric->latestMs() - measuredMs,
-                    0.0);
-
-            const double coverage =
-                workload.totalTiles > 0
-                ? 100.0 *
-                    static_cast<double>(workload.dirtyTiles) /
-                    static_cast<double>(workload.totalTiles)
-                : 0.0;
-
-            const std::uint32_t processedVisits =
-                workload.horizontalPass1Tiles +
-                workload.verticalPass1Tiles +
-                workload.horizontalPass2Tiles +
-                workload.verticalPass2Tiles;
-
-            const std::uint32_t totalVisits =
-                workload.totalTiles * 4u;
-
-            const double processedPercent =
-                totalVisits > 0
-                ? 100.0 * static_cast<double>(processedVisits) /
-                    static_cast<double>(totalVisits)
-                : 0.0;
-
-            return QString(
-                "%1: %2 ms\n"
-                "Density / trace: %3 ms\n"
-                "Glow / persistence: %4 ms\n"
-                "Compose: %5 ms\n"
-                "Graticule / overlay: %6 ms\n"
-                "Other: %7 ms\n"
-                "Source dirty: %8 / %9 (%10%)\n"
-                "Blur H1/V1/H2/V2: %11 / %12 / %13 / %14\n"
-                "Processed visits: %15 / %16 (%17%)\n"
-                "Active bbox: %18,%19  %20x%21 px")
-                .arg(label)
-                .arg(bar.metric->latestMs(), 0, 'f', 2)
-                .arg(analyzer.latestMs(), 0, 'f', 2)
-                .arg(glowPersistence.latestMs(), 0, 'f', 2)
-                .arg(compose.latestMs(), 0, 'f', 2)
-                .arg(overlay.latestMs(), 0, 'f', 2)
-                .arg(otherMs, 0, 'f', 2)
-                .arg(workload.dirtyTiles)
-                .arg(workload.totalTiles)
-                .arg(coverage, 0, 'f', 1)
-                .arg(workload.horizontalPass1Tiles)
-                .arg(workload.verticalPass1Tiles)
-                .arg(workload.horizontalPass2Tiles)
-                .arg(workload.verticalPass2Tiles)
-                .arg(processedVisits)
-                .arg(totalVisits)
-                .arg(processedPercent, 0, 'f', 1)
-                .arg(workload.activeX)
-                .arg(workload.activeY)
-                .arg(workload.activeWidth)
-                .arg(workload.activeHeight);
-        };
-
-    switch (bar.detail)
+    void drawWorkerTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const WorkerPhaseTimelineSnapshot& timeline,
+        bool outlineScreenEnvelope = false)
     {
-    case DetailKind::WaveformScreen:
-    {
-        std::array<std::uint32_t, 3> publishedRasterJobs{};
-        std::array<double, 3> publishedRasterMs{};
-
-        const std::array<const WaveformAssistTimelineSnapshot*, 3> assistTimelines =
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity;
+            ++i)
         {
-            &snapshot.waveformWorkerAssist,
-            &snapshot.displayWorker0Assist,
-            &snapshot.displayWorker1Assist
-        };
+            const auto& event = timeline.events[i];
+            const char phase =
+                static_cast<char>(event.phase);
 
-        for (std::size_t workerId = 0; workerId < assistTimelines.size(); ++workerId)
-        {
-            const auto& timeline = *assistTimelines[workerId];
-            for (std::uint32_t i = 0;
-                i < timeline.count && i < WaveformAssistTimelineSnapshot::kCapacity;
-                ++i)
+            if (phase == '^')
             {
-                const auto& event = timeline.events[i];
-                if (static_cast<char>(event.phase) != 'R')
-                {
-                    continue;
-                }
-
-                ++publishedRasterJobs[workerId];
-                publishedRasterMs[workerId] +=
-                    static_cast<double>(event.durationUs) / 1000.0;
+                continue;
             }
+
+            // S is a parent wallclock envelope, not measured work of its own.
+            // On the waveform worker row keep it as context only: an unfilled
+            // dashed outline. Any time not covered by a real child phase must
+            // remain visibly empty so instrumentation gaps stand out.
+            const bool outlineOnly =
+                outlineScreenEnvelope && phase == 'S';
+
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                workerPhaseColor(phase),
+                QString::fromLatin1(workerPhaseText(phase)),
+                outlineOnly);
+        }
+    }
+
+    void drawPriorityStateTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const WorkerPhaseTimelineSnapshot& timeline)
+    {
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            if (static_cast<char>(event.phase) != '^')
+            {
+                continue;
+            }
+
+            drawPriorityUnderline(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs));
+        }
+    }
+
+    void drawFrequencyPriorityTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const WaveformAssistTimelineSnapshot& timeline)
+    {
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            if (static_cast<char>(event.phase) != 'F')
+            {
+                continue;
+            }
+
+            drawPriorityUnderline(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs));
+        }
+    }
+
+    void drawWaveformScreenTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const PerformanceSnapshot& snapshot)
+    {
+        // Screen waveform is a real capture-relative timeline.  Renderer R/X
+        // entries are aggregate envelopes, so do not draw them here.  The
+        // actual parallel R/X chunks are published by the assist timelines and
+        // carry the worker that really executed each chunk.
+        const auto& phases = snapshot.waveformScreenPhases;
+        for (std::uint32_t i = 0;
+            i < phases.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = phases.events[i];
+            const char phase = static_cast<char>(event.label);
+
+            if (phase == 'F' || phase == 'R' || phase == 'X')
+            {
+                continue;
+            }
+
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                waveformPhaseColor(phase),
+                QString::fromLatin1(waveformPhaseText(phase)));
         }
 
-        return makeWaveformDetails(
-            snapshot.waveformScreenPersistence,
-            snapshot.waveformScreenTrace,
-            snapshot.waveformScreenCompose,
-            snapshot.waveformScreenGlow,
-            snapshot.waveformScreenOverlay,
-            snapshot.waveformScreenGlowWorkload,
-            snapshot.waveformScreenTraceParallel) +
-            QString(
-                "\nTrace prep/raster: %1 / %2 ms"
-                "\nOutput resize %3   buf grow %4   cache %5   jobs %6"
-                "\nBeam %7 px   margin %8 px"
-                "\nCatWuzle %9  inv %10  zip %11 ms  W0/W1/W2 %16/%17/%18"
-                "\nW ms %19/%20/%21   chunk %12/%13/%14 ms   qwait %15 ms"
-                "\nassist %22 ms   final W %23 ms")
-                .arg(snapshot.waveformScreenTracePrep.latestMs(), 0, 'f', 2)
-                .arg(snapshot.waveformScreenTraceRaster.latestMs(), 0, 'f', 2)
-                .arg(snapshot.waveformScreenOutputSizeChanged
-                    ? QStringLiteral("YES")
-                    : QStringLiteral("no"))
-                .arg(snapshot.waveformScreenOutputBufferCapacityGrew
-                    ? QStringLiteral("YES")
-                    : QStringLiteral("no"))
-                .arg(snapshot.waveformScreenResamplerCacheRebuilt
-                    ? QStringLiteral("REBUILD")
-                    : QStringLiteral("HIT"))
-                .arg(snapshot.waveformScreenTraceJobCount)
-                .arg(snapshot.waveformScreenBeamCoreRadiusPx, 0, 'f', 2)
-                .arg(snapshot.waveformScreenBeamCoreMarginPx)
-                .arg(snapshot.waveformScreenCatWuzleChunkCount)
-                .arg(snapshot.waveformScreenCatWuzleInvalidChunkCount)
+        // The Screen waveform row is a COMPOSITE timeline. Parallel assist
+        // chunks must not be drawn individually here: that falsely suggests
+        // serial execution. Draw one wallclock envelope per parallel phase.
+        // The worker rows/details retain the individual chunks and ownership.
+        const auto drawParallelEnvelope =
+            [&](char wantedPhase)
+            {
+                bool found = false;
+                std::uint64_t firstUs = 0;
+                std::uint64_t lastUs = 0;
+                int workerCount = 0;
+
+                const std::uint64_t currentAssistGeneration =
+                    snapshot.waveformWorkerAssist.generation;
+
+                const auto include =
+                    [&](const WaveformAssistTimelineSnapshot& assist)
+                    {
+                        if (currentAssistGeneration != 0u &&
+                            assist.generation != currentAssistGeneration)
+                        {
+                            return;
+                        }
+
+                        bool workerUsed = false;
+                        for (std::uint32_t i = 0;
+                            i < assist.count &&
+                            i < WaveformAssistTimelineSnapshot::kCapacity;
+                            ++i)
+                        {
+                            const auto& event = assist.events[i];
+                            if (static_cast<char>(event.phase) != wantedPhase)
+                            {
+                                continue;
+                            }
+
+                            workerUsed = true;
+                            const std::uint64_t startUs = event.startUs;
+                            const std::uint64_t endUs =
+                                startUs + event.durationUs;
+                            if (!found)
+                            {
+                                firstUs = startUs;
+                                lastUs = endUs;
+                                found = true;
+                            }
+                            else
+                            {
+                                firstUs = std::min(firstUs, startUs);
+                                lastUs = std::max(lastUs, endUs);
+                            }
+                        }
+                        if (workerUsed)
+                        {
+                            ++workerCount;
+                        }
+                    };
+
+                include(snapshot.waveformWorkerAssist);
+                include(snapshot.displayWorker0Assist);
+                include(snapshot.displayWorker1Assist);
+                include(snapshot.vectorscopeWorkerAssist);
+
+                if (found && lastUs >= firstUs)
+                {
+                    const QString label(
+                        std::max(1, workerCount),
+                        QChar::fromLatin1(wantedPhase));
+                    drawSegment(
+                        painter,
+                        barRect,
+                        static_cast<double>(firstUs),
+                        static_cast<double>(lastUs - firstUs),
+                        waveformPhaseColor(wantedPhase),
+                        label);
+                }
+            };
+
+        drawParallelEnvelope('R');
+        drawParallelEnvelope('X');
+    }
+
+    void drawWaveformSpoutTimeline(
+        QPainter& painter,
+        const QRect& barRect,
+        const WorkerPhaseTimelineSnapshot& timeline)
+    {
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase = static_cast<char>(event.phase);
+            if (phase != 'V')
+            {
+                continue;
+            }
+
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                workerPhaseColor('V'),
+                QStringLiteral("V"));
+        }
+    }
+
+    void drawWaveformWorkerScreenPhases(
+        QPainter& painter,
+        const QRect& barRect,
+        const WaveformPhaseTimelineSnapshot& timeline)
+    {
+        // These are the exact Screen-render sub-phases. They belong on the
+        // Waveform worker chronology, not on a separate child timeline.
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase =
+                static_cast<char>(event.label);
+
+            // X is only a render envelope. F here is the Waveform
+            // worker's own one-line frequency compensation.
+            if (phase == 'X' || phase == 'R')
+            {
+                continue;
+            }
+
+            drawSegment(
+                painter,
+                barRect,
+                static_cast<double>(event.startUs),
+                static_cast<double>(event.durationUs),
+                waveformPhaseColor(phase),
+                QString::fromLatin1(waveformPhaseText(phase)));
+        }
+    }
+
+    void drawPrerequisiteWait(
+        QPainter& painter,
+        const QRect& barRect,
+        double endUs,
+        const QString& label)
+    {
+        if (endUs <= 0.0 ||
+            gTimelineStartUs >= endUs)
+        {
+            return;
+        }
+
+        if (gTimelineStartUs + gTimelineSpanUs <= 0.0)
+        {
+            return;
+        }
+
+        const int left =
+            std::clamp(
+                xForUs(barRect, 0.0),
+                barRect.left(),
+                barRect.right());
+
+        const int right =
+            std::clamp(
+                xForUs(barRect, endUs),
+                barRect.left(),
+                barRect.right() + 1);
+
+        if (right <= left)
+        {
+            return;
+        }
+
+        QRect waitRect(
+            left,
+            barRect.top() + 2,
+            std::max(right - left, 1),
+            std::max(barRect.height() - 4, 1));
+
+        QPen waitPen(QColor(210, 190, 120));
+        waitPen.setStyle(Qt::DashLine);
+        waitPen.setWidth(1);
+
+        painter.setPen(waitPen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(
+            waitRect.adjusted(0, 0, -1, -1));
+
+        painter.setPen(QColor(220, 205, 155));
+        painter.drawText(
+            waitRect,
+            Qt::AlignCenter,
+            label);
+    }
+
+    void drawCostSegment(
+        QPainter& painter,
+        const QRect& barRect,
+        double& cursorUs,
+        const PerformanceMetricSnapshot& metric,
+        const QColor& color,
+        const QString& label)
+    {
+        const double durationUs =
+            static_cast<double>(metric.latestUs);
+
+        drawSegment(
+            painter,
+            barRect,
+            cursorUs,
+            durationUs,
+            color,
+            label);
+
+        cursorUs += durationUs;
+    }
+
+    void drawWaveformCostBreakdown(
+        QPainter& painter,
+        const QRect& barRect,
+        const PerformanceSnapshot& snapshot)
+    {
+        double cursorUs = 0.0;
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            snapshot.waveformVideoTrace,
+            waveformPhaseColor('R'),
+            QStringLiteral("R"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            snapshot.waveformVideoPersistence,
+            waveformPhaseColor('P'),
+            QStringLiteral("P*"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            snapshot.waveformVideoCompose,
+            waveformPhaseColor('C'),
+            QStringLiteral("C"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            snapshot.waveformVideoGlow,
+            QColor(205, 205, 235),
+            QStringLiteral("G"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            snapshot.waveformVideoOverlay,
+            waveformPhaseColor('O'),
+            QStringLiteral("O"));
+
+        const double remainderUs =
+            std::max(
+                static_cast<double>(snapshot.waveformVideo.latestUs) -
+                    cursorUs,
+                0.0);
+
+        if (remainderUs > 0.0)
+        {
+            drawSegment(
+                painter,
+                barRect,
+                cursorUs,
+                remainderUs,
+                QColor(130, 130, 130),
+                QStringLiteral("?"));
+        }
+    }
+
+    void drawVectorscopeCostBreakdown(
+        QPainter& painter,
+        const QRect& barRect,
+        const PerformanceMetricSnapshot& total,
+        const PerformanceMetricSnapshot& analyzer,
+        const PerformanceMetricSnapshot& persistence,
+        const PerformanceMetricSnapshot& compose,
+        const PerformanceMetricSnapshot& overlay)
+    {
+        double cursorUs = 0.0;
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            analyzer,
+            QColor(205, 225, 235),
+            QStringLiteral("A"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            persistence,
+            QColor(185, 225, 205),
+            QStringLiteral("P"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            compose,
+            QColor(205, 225, 185),
+            QStringLiteral("C"));
+
+        drawCostSegment(
+            painter, barRect, cursorUs,
+            overlay,
+            QColor(225, 205, 205),
+            QStringLiteral("O"));
+
+        const double remainderUs =
+            std::max(
+                static_cast<double>(total.latestUs) -
+                    cursorUs,
+                0.0);
+
+        if (remainderUs > 0.0)
+        {
+            drawSegment(
+                painter,
+                barRect,
+                cursorUs,
+                remainderUs,
+                QColor(130, 130, 130),
+                QStringLiteral("?"));
+        }
+    }
+
+    QString metricSummary(
+        const QString& name,
+        const PerformanceMetricSnapshot& metric)
+    {
+        return QStringLiteral(
+            "%1\nlatest %2 ms   avg %3 ms   min %4 ms   max %5 ms")
+            .arg(name)
+            .arg(metric.latestMs(), 0, 'f', 2)
+            .arg(metric.averageMs(), 0, 'f', 2)
+            .arg(metric.minMs(), 0, 'f', 2)
+            .arg(metric.maxMs(), 0, 'f', 2);
+    }
+
+    QString displayTimelineDetails(
+        const QString& title,
+        const DisplayPhaseTimelineSnapshot& timeline)
+    {
+        QStringList lines;
+        lines << title;
+        lines << QStringLiteral(
+            "video critical path + opportunistic instrument work");
+
+        lines << QStringLiteral(
+            "generation %1   capture-relative timeline")
+            .arg(timeline.generation);
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < DisplayPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            const char phase =
+                static_cast<char>(event.phase);
+
+            lines << QStringLiteral(
+                "%1  %2   start %3 ms   duration %4 ms")
+                .arg(QString::fromLatin1(displayPhaseText(phase)))
+                .arg(QString::fromLatin1(displayPhaseName(phase)))
                 .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleZipperUs) / 1000.0,
-                    0,
-                    'f',
-                    2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkRenderMinUs) / 1000.0,
-                    0,
-                    'f',
-                    2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkRenderAvgUs) / 1000.0,
-                    0,
-                    'f',
-                    2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkRenderMaxUs) / 1000.0,
-                    0,
-                    'f',
-                    2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenCatWuzleChunkQueueWaitMaxUs) / 1000.0,
-                    0,
-                    'f',
-                    2)
-                .arg(publishedRasterJobs[0])
-                .arg(publishedRasterJobs[1])
-                .arg(publishedRasterJobs[2])
-                .arg(publishedRasterMs[0], 0, 'f', 2)
-                .arg(publishedRasterMs[1], 0, 'f', 2)
-                .arg(publishedRasterMs[2], 0, 'f', 2)
-                .arg(
-                    static_cast<double>(snapshot.waveformScreenAssistTotalUs) / 1000.0,
+                    static_cast<double>(event.startUs) / 1000.0,
                     0, 'f', 2)
                 .arg(
-                    static_cast<double>(snapshot.waveformScreenAssistFinalWaitUs) / 1000.0,
+                    static_cast<double>(event.durationUs) / 1000.0,
                     0, 'f', 2);
+        }
+
+        if (timeline.count == 0)
+        {
+            lines << QStringLiteral("inactive / no published phases");
+        }
+
+        return lines.join(QLatin1Char('\n'));
     }
 
-    case DetailKind::WaveformVideo:
-        return makeWaveformDetails(
-            snapshot.waveformVideoPersistence,
-            snapshot.waveformVideoTrace,
-            snapshot.waveformVideoCompose,
-            snapshot.waveformVideoGlow,
-            snapshot.waveformVideoOverlay,
-            snapshot.waveformVideoGlowWorkload,
-            false);
+    QString frequencyStateLine(
+        const PerformanceSnapshot& snapshot)
+    {
+        switch (snapshot.frequencyCompensationState)
+        {
+        case FrequencyCompensationState::NoConsumer:
+            return QStringLiteral(
+                "F: No consumer; not running");
 
-    case DetailKind::VectorscopeScreen:
-        return makeVectorscopeDetails(
-            snapshot.vectorscopeScreenAnalyzer,
-            snapshot.vectorscopeScreenGlowPersistence,
-            snapshot.vectorscopeScreenCompose,
-            snapshot.vectorscopeScreenOverlay,
-            snapshot.vectorscopeScreenGlowWorkload);
+        case FrequencyCompensationState::Disabled:
+            return QStringLiteral(
+                "F: Disabled; not running");
 
-    case DetailKind::VectorscopeVideo:
-        return makeVectorscopeDetails(
-            snapshot.vectorscopeVideoAnalyzer,
-            snapshot.vectorscopeVideoGlowPersistence,
-            snapshot.vectorscopeVideoCompose,
-            snapshot.vectorscopeVideoOverlay,
-            snapshot.vectorscopeVideoGlowWorkload);
+        case FrequencyCompensationState::Completed:
+            return QStringLiteral(
+                "F complete @ %1 ms")
+                .arg(
+                    static_cast<double>(
+                        snapshot.frequencyCompensationCompleteUs) / 1000.0,
+                    0, 'f', 2);
+        }
 
-    case DetailKind::None:
-    default:
+        return QStringLiteral("F: unknown state");
+    }
+
+    QString frequencyWorkerDetails(
+        const PerformanceSnapshot& snapshot,
+        std::size_t workerIndex)
+    {
+        QStringList lines;
+        lines << frequencyStateLine(snapshot);
+
+        if (workerIndex >=
+            snapshot.frequencyWorkerPhases.size())
+        {
+            return lines.join(QLatin1Char('\n'));
+        }
+
+        const auto& timeline =
+            snapshot.frequencyWorkerPhases[workerIndex];
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+
+            lines << QStringLiteral(
+                "F  Frequency compensation   start %1 ms   duration %2 ms")
+                .arg(
+                    static_cast<double>(event.startUs) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(event.durationUs) / 1000.0,
+                    0, 'f', 2);
+        }
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString displayWorkerDetails(
+        const PerformanceSnapshot& snapshot,
+        std::size_t workerIndex)
+    {
+        QStringList lines;
+
+        const auto& displayTimeline =
+            workerIndex == 0u
+            ? snapshot.displayWorker0Phases
+            : snapshot.displayWorker1Phases;
+
+        const auto& assistTimeline =
+            workerIndex == 0u
+            ? snapshot.displayWorker0Assist
+            : snapshot.displayWorker1Assist;
+
+        const auto& frequencyTimeline =
+            snapshot.frequencyWorkerPhases[
+                std::min<std::size_t>(
+                    workerIndex,
+                    snapshot.frequencyWorkerPhases.size() - 1u)];
+
+        lines << (
+            workerIndex == 0u
+            ? QStringLiteral("Video worker 1")
+            : QStringLiteral("Video worker 2"));
+
+        lines << QStringLiteral(
+            "generation %1   capture-relative timeline")
+            .arg(
+                displayTimeline.generation != 0u
+                ? displayTimeline.generation
+                : assistTimeline.generation);
+
+        struct DetailEvent
+        {
+            char phase = '?';
+            std::uint32_t startUs = 0;
+            std::uint32_t durationUs = 0;
+            bool waveformPhase = false;
+            bool frequencyPhase = false;
+            std::uint32_t chunkIndex = 0;
+        };
+
+        constexpr std::size_t kDetailCapacity =
+            DisplayPhaseTimelineSnapshot::kCapacity +
+            2u * WaveformAssistTimelineSnapshot::kCapacity;
+
+        std::array<DetailEvent, kDetailCapacity> events{};
+        std::size_t count = 0;
+
+        for (std::uint32_t i = 0;
+            i < displayTimeline.count &&
+            i < DisplayPhaseTimelineSnapshot::kCapacity &&
+            count < events.size();
+            ++i)
+        {
+            const auto& event = displayTimeline.events[i];
+            events[count++] =
+                {
+                    static_cast<char>(event.phase),
+                    event.startUs,
+                    event.durationUs,
+                    false,
+                    false,
+                    0u
+                };
+        }
+
+        for (std::uint32_t i = 0;
+            i < assistTimeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity &&
+            count < events.size();
+            ++i)
+        {
+            const auto& event = assistTimeline.events[i];
+            events[count++] =
+                {
+                    static_cast<char>(event.phase),
+                    event.startUs,
+                    event.durationUs,
+                    true,
+                    false,
+                    event.jobIndex
+                };
+        }
+
+        for (std::uint32_t i = 0;
+            i < frequencyTimeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity &&
+            count < events.size();
+            ++i)
+        {
+            const auto& event = frequencyTimeline.events[i];
+            events[count++] =
+                {
+                    static_cast<char>(event.phase),
+                    event.startUs,
+                    event.durationUs,
+                    true,
+                    true,
+                    event.jobIndex
+                };
+        }
+
+        std::stable_sort(
+            events.begin(),
+            events.begin() + static_cast<std::ptrdiff_t>(count),
+            [](const DetailEvent& a, const DetailEvent& b)
+            {
+                if (a.startUs != b.startUs)
+                {
+                    return a.startUs < b.startUs;
+                }
+                return a.durationUs > b.durationUs;
+            });
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const auto& event = events[i];
+            const char* text =
+                event.waveformPhase
+                ? waveformPhaseText(event.phase)
+                : displayPhaseText(event.phase);
+            const QString name =
+                event.frequencyPhase
+                ? QStringLiteral("Frequency compensation chunk %1")
+                    .arg(event.chunkIndex)
+                : event.waveformPhase
+                    ? waveformAssistDescription(
+                        event.phase,
+                        event.chunkIndex)
+                    : QString::fromLatin1(
+                        displayPhaseName(event.phase));
+
+            lines << QStringLiteral(
+                "%1  %2   start %3 ms   duration %4 ms")
+                .arg(QString::fromLatin1(text))
+                .arg(name)
+                .arg(
+                    static_cast<double>(event.startUs) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(event.durationUs) / 1000.0,
+                    0, 'f', 2);
+        }
+
+        if (count == 0u)
+        {
+            lines << QStringLiteral(
+                "inactive / no published worker tasks");
+        }
+
+        lines << QStringLiteral("");
+        lines << frequencyStateLine(snapshot);
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString workerTimelineDetails(
+        const QString& title,
+        const WorkerPhaseTimelineSnapshot& timeline,
+        bool waveform)
+    {
+        QStringList lines;
+        lines << title;
+        lines << QStringLiteral(
+            "ONE worker/thread - phases below execute serially");
+        lines << QStringLiteral(
+            "generation %1   capture-relative timeline")
+            .arg(timeline.generation);
+
+        std::array<DisplayPhaseEventSnapshot,
+            WorkerPhaseTimelineSnapshot::kCapacity> events{};
+        const std::size_t eventCount =
+            std::min<std::size_t>(
+                timeline.count,
+                WorkerPhaseTimelineSnapshot::kCapacity);
+
+        for (std::size_t i = 0; i < eventCount; ++i)
+        {
+            events[i] = timeline.events[i];
+        }
+
+        std::stable_sort(
+            events.begin(),
+            events.begin() + static_cast<std::ptrdiff_t>(eventCount),
+            [](const DisplayPhaseEventSnapshot& a,
+                const DisplayPhaseEventSnapshot& b)
+            {
+                if (a.startUs != b.startUs)
+                {
+                    return a.startUs < b.startUs;
+                }
+                return a.durationUs > b.durationUs;
+            });
+
+        for (std::size_t i = 0; i < eventCount; ++i)
+        {
+            const auto& event = events[i];
+            const char phase = static_cast<char>(event.phase);
+
+            if (phase == '^')
+            {
+                continue;
+            }
+
+            const char* name =
+                waveform
+                    ? waveformWorkerPhaseName(phase)
+                    : vectorscopeWorkerPhaseName(phase);
+
+            lines << QStringLiteral(
+                "%1  %2   start %3 ms   duration %4 ms")
+                .arg(QString::fromLatin1(workerPhaseText(phase)))
+                .arg(QString::fromLatin1(name))
+                .arg(
+                    static_cast<double>(event.startUs) / 1000.0,
+                    0, 'f', 2)
+                .arg(
+                    static_cast<double>(event.durationUs) / 1000.0,
+                    0, 'f', 2);
+        }
+
+        if (timeline.count == 0)
+        {
+            lines << QStringLiteral("inactive / no published worker phases");
+        }
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString vectorscopeWorkerDetails(
+        const PerformanceSnapshot& snapshot)
+    {
+        QStringList lines;
+        lines << QStringLiteral(
+            "Vectorscope worker: authoritative wallclock chronology");
+        lines << QStringLiteral(
+            "start-end | worker | phase | duration | description");
+
+        struct Event
+        {
+            char phase = '?';
+            std::uint32_t startUs = 0;
+            std::uint32_t durationUs = 0;
+            bool assist = false;
+            std::uint32_t chunkIndex = 0;
+            std::uint32_t sequence = 0;
+        };
+
+        constexpr std::size_t kCapacity =
+            WorkerPhaseTimelineSnapshot::kCapacity +
+            WaveformAssistTimelineSnapshot::kCapacity;
+        std::array<Event, kCapacity> events{};
+        std::size_t count = 0;
+        std::uint32_t sequence = 0;
+
+        for (std::uint32_t i = 0;
+            i < snapshot.vectorscopeWorkerPhases.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity &&
+            count < events.size(); ++i)
+        {
+            const auto& event = snapshot.vectorscopeWorkerPhases.events[i];
+            const char phase = static_cast<char>(event.phase);
+            if (phase == '^')
+            {
+                continue;
+            }
+            events[count++] = {
+                phase, event.startUs, event.durationUs,
+                false, 0u, sequence++ };
+        }
+
+        const bool vectorscopeAssistIsCurrent =
+            snapshot.waveformWorkerAssist.generation == 0u ||
+            snapshot.vectorscopeWorkerAssist.generation ==
+                snapshot.waveformWorkerAssist.generation;
+
+        for (std::uint32_t i = 0;
+            vectorscopeAssistIsCurrent &&
+            i < snapshot.vectorscopeWorkerAssist.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity &&
+            count < events.size(); ++i)
+        {
+            const auto& event = snapshot.vectorscopeWorkerAssist.events[i];
+            events[count++] = {
+                static_cast<char>(event.phase),
+                event.startUs, event.durationUs,
+                true, event.jobIndex, sequence++ };
+        }
+
+        std::stable_sort(
+            events.begin(),
+            events.begin() + static_cast<std::ptrdiff_t>(count),
+            [](const Event& a, const Event& b)
+            {
+                if (a.startUs != b.startUs)
+                {
+                    return a.startUs < b.startUs;
+                }
+                return a.sequence < b.sequence;
+            });
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const auto& event = events[i];
+            const double startMs =
+                static_cast<double>(event.startUs) / 1000.0;
+            const double endMs =
+                static_cast<double>(event.startUs + event.durationUs) / 1000.0;
+            const double durationMs =
+                static_cast<double>(event.durationUs) / 1000.0;
+            const QString description =
+                event.assist
+                ? waveformAssistDescription(event.phase, event.chunkIndex)
+                : QString::fromLatin1(vectorscopeWorkerPhaseName(event.phase));
+
+            lines << QStringLiteral(
+                "%1-%2 | VS | %3 | %4 ms | %5")
+                .arg(startMs, 0, 'f', 2)
+                .arg(endMs, 0, 'f', 2)
+                .arg(QString::fromLatin1(workerPhaseText(event.phase)))
+                .arg(durationMs, 0, 'f', 2)
+                .arg(description);
+        }
+
+        if (count == 0u)
+        {
+            lines << QStringLiteral(
+                "inactive / no published worker phases");
+        }
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+
+    QString timingDiagnosticDetails(
+        const PerformanceSnapshot& snapshot)
+    {
+        const auto formatEvent =
+            [](const QString& name,
+                const TimingDiagnosticEventSnapshot& event,
+                const QString& valueName)
+            {
+                const QString interval =
+                    event.intervalUs != 0u
+                    ? QStringLiteral("%1 ms")
+                        .arg(
+                            static_cast<double>(event.intervalUs) / 1000.0,
+                            0, 'f', 2)
+                    : QStringLiteral("-");
+
+                return QStringLiteral(
+                    "%1: count %2   last interval %3   %4 %5")
+                    .arg(name)
+                    .arg(event.count)
+                    .arg(interval)
+                    .arg(valueName)
+                    .arg(event.value);
+            };
+
+        QStringList lines;
+        lines << QStringLiteral(
+            "Timing diagnostics - rare events only; a ~1000 ms interval is the heartbeat smoking gun.");
+        lines << formatEvent(
+            QStringLiteral("RA  presenter re-anchor"),
+            snapshot.presenterReanchor,
+            QStringLiteral("late-us"));
+        lines << formatEvent(
+            QStringLiteral("PS  presenter generation skip"),
+            snapshot.presenterGenerationSkip,
+            QStringLiteral("frames"));
+        lines << formatEvent(
+            QStringLiteral("WS  waveform generation skip"),
+            snapshot.waveformGenerationSkip,
+            QStringLiteral("frames"));
+        lines << formatEvent(
+            QStringLiteral("VS  vectorscope generation skip"),
+            snapshot.vectorscopeGenerationSkip,
+            QStringLiteral("frames"));
+        lines << QStringLiteral(
+            "Trace sentinels: A001=RA, A002=PS, A003=WS, A004=VS.");
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString waveformWorkerDetails(
+        const PerformanceSnapshot& snapshot)
+    {
+        QStringList lines;
+        lines << QStringLiteral("Waveform worker: authoritative wallclock chronology");
+        lines << QStringLiteral("start-end | worker | phase | duration | description");
+        lines << QStringLiteral("generation %1   capture-relative timeline")
+            .arg(snapshot.waveformWorkerPhases.generation);
+
+        struct DetailEvent
+        {
+            char phase = '?';
+            std::uint32_t startUs = 0;
+            std::uint32_t durationUs = 0;
+            const char* worker = "?";
+            const char* description = "Unknown";
+            bool assist = false;
+            std::uint32_t chunkIndex = 0;
+            std::uint32_t sequence = 0;
+        };
+
+        constexpr std::size_t kDetailCapacity =
+            WorkerPhaseTimelineSnapshot::kCapacity +
+            WaveformPhaseTimelineSnapshot::kCapacity +
+            4u * WaveformAssistTimelineSnapshot::kCapacity;
+
+        std::array<DetailEvent, kDetailCapacity> events{};
+        std::size_t count = 0;
+        std::uint32_t sequence = 0;
+
+        // S is only the complete screen-render envelope.  Keep the real V/M/E
+        // serial work, but do not mix wrapper envelopes into the event stream.
+        const auto& workerTimeline = snapshot.waveformWorkerPhases;
+        for (std::uint32_t i = 0;
+            i < workerTimeline.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity &&
+            count < events.size(); ++i)
+        {
+            const auto& event = workerTimeline.events[i];
+            const char phase = static_cast<char>(event.phase);
+            if (phase == '^' || phase == 'S')
+            {
+                continue;
+            }
+
+            events[count++] = {
+                phase,
+                event.startUs,
+                event.durationUs,
+                "WF",
+                waveformWorkerPhaseName(phase),
+                false,
+                0u,
+                sequence++ };
+        }
+
+        // R and X in waveformScreenPhases are wallclock envelopes around
+        // parallel work.  The actual jobs, their worker and chunk index come
+        // from the three assist timelines below, so suppress the aggregates.
+        const auto& phases = snapshot.waveformScreenPhases;
+        for (std::uint32_t i = 0;
+            i < phases.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity &&
+            count < events.size(); ++i)
+        {
+            const auto& event = phases.events[i];
+            const char phase = static_cast<char>(event.label);
+            if (phase == 'R' || phase == 'X')
+            {
+                continue;
+            }
+
+            events[count++] = {
+                phase,
+                event.startUs,
+                event.durationUs,
+                "WF",
+                waveformPhaseName(phase),
+                false,
+                0u,
+                sequence++ };
+        }
+
+        const std::uint64_t currentAssistGeneration =
+            snapshot.waveformWorkerAssist.generation;
+
+        const auto appendAssist =
+            [&](const WaveformAssistTimelineSnapshot& assist,
+                const char* workerName)
+            {
+                if (currentAssistGeneration != 0u &&
+                    assist.generation != currentAssistGeneration)
+                {
+                    return;
+                }
+
+                for (std::uint32_t i = 0;
+                    i < assist.count &&
+                    i < WaveformAssistTimelineSnapshot::kCapacity &&
+                    count < events.size(); ++i)
+                {
+                    const auto& event = assist.events[i];
+                    const char phase = static_cast<char>(event.phase);
+                    events[count++] = {
+                        phase,
+                        event.startUs,
+                        event.durationUs,
+                        workerName,
+                        waveformPhaseName(phase),
+                        true,
+                        event.jobIndex,
+                        sequence++ };
+                }
+            };
+
+        appendAssist(snapshot.waveformWorkerAssist, "WF");
+        appendAssist(snapshot.displayWorker0Assist, "V1");
+        appendAssist(snapshot.displayWorker1Assist, "V2");
+        appendAssist(snapshot.vectorscopeWorkerAssist, "VS");
+
+        std::stable_sort(
+            events.begin(),
+            events.begin() + static_cast<std::ptrdiff_t>(count),
+            [](const DetailEvent& a, const DetailEvent& b)
+            {
+                if (a.startUs != b.startUs)
+                {
+                    return a.startUs < b.startUs;
+                }
+                if (a.durationUs != b.durationUs)
+                {
+                    return a.durationUs > b.durationUs;
+                }
+                return a.sequence < b.sequence;
+            });
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const auto& event = events[i];
+            const double startMs =
+                static_cast<double>(event.startUs) / 1000.0;
+            const double endMs =
+                static_cast<double>(event.startUs + event.durationUs) / 1000.0;
+            const double durationMs =
+                static_cast<double>(event.durationUs) / 1000.0;
+            const QString description =
+                event.assist
+                ? waveformAssistDescription(
+                    event.phase,
+                    event.chunkIndex)
+                : QString::fromLatin1(event.description);
+
+            lines << QStringLiteral("%1-%2 ms | %3 | %4 | %5 ms | %6")
+                .arg(startMs, 0, 'f', 2)
+                .arg(endMs, 0, 'f', 2)
+                .arg(QString::fromLatin1(event.worker))
+                .arg(QChar::fromLatin1(event.phase))
+                .arg(durationMs, 0, 'f', 2)
+                .arg(description);
+        }
+
+        if (count == 0u)
+        {
+            lines << QStringLiteral("inactive / no published waveform-worker events");
+        }
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString waveformScreenDetails(
+        const PerformanceSnapshot& snapshot)
+    {
+        QStringList lines;
+        lines << metricSummary(
+            QStringLiteral("Screen waveform [timeline]"),
+            snapshot.waveformScreen);
+        lines << QStringLiteral(
+            "start-end | worker | phase | duration | description");
+
+        struct DetailEvent
+        {
+            char phase = '?';
+            std::uint32_t startUs = 0;
+            std::uint32_t durationUs = 0;
+            const char* worker = "WF";
+            bool assist = false;
+            std::uint32_t chunkIndex = 0;
+            std::uint32_t sequence = 0;
+        };
+
+        constexpr std::size_t kDetailCapacity =
+            WaveformPhaseTimelineSnapshot::kCapacity +
+            4u * WaveformAssistTimelineSnapshot::kCapacity;
+        std::array<DetailEvent, kDetailCapacity> events{};
+        std::size_t count = 0;
+        std::uint32_t sequence = 0;
+
+        const auto& phases = snapshot.waveformScreenPhases;
+        for (std::uint32_t i = 0;
+            i < phases.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity &&
+            count < events.size(); ++i)
+        {
+            const auto& event = phases.events[i];
+            const char phase = static_cast<char>(event.label);
+            if (phase == 'F' || phase == 'R' || phase == 'X')
+            {
+                continue;
+            }
+
+            events[count++] = {
+                phase,
+                event.startUs,
+                event.durationUs,
+                "WF",
+                false,
+                0u,
+                sequence++ };
+        }
+
+        const std::uint64_t detailAssistGeneration =
+            snapshot.waveformWorkerAssist.generation;
+
+        const auto appendAssist =
+            [&](const WaveformAssistTimelineSnapshot& assist,
+                const char* workerName)
+            {
+                if (detailAssistGeneration != 0u &&
+                    assist.generation != detailAssistGeneration)
+                {
+                    return;
+                }
+
+                for (std::uint32_t i = 0;
+                    i < assist.count &&
+                    i < WaveformAssistTimelineSnapshot::kCapacity &&
+                    count < events.size(); ++i)
+                {
+                    const auto& event = assist.events[i];
+                    const char phase = static_cast<char>(event.phase);
+                    if (phase != 'R' && phase != 'X')
+                    {
+                        continue;
+                    }
+
+                    events[count++] = {
+                        phase,
+                        event.startUs,
+                        event.durationUs,
+                        workerName,
+                        true,
+                        event.jobIndex,
+                        sequence++ };
+                }
+            };
+
+        appendAssist(snapshot.waveformWorkerAssist, "WF");
+        appendAssist(snapshot.displayWorker0Assist, "V1");
+        appendAssist(snapshot.displayWorker1Assist, "V2");
+        appendAssist(snapshot.vectorscopeWorkerAssist, "VS");
+
+        std::stable_sort(
+            events.begin(),
+            events.begin() + static_cast<std::ptrdiff_t>(count),
+            [](const DetailEvent& a, const DetailEvent& b)
+            {
+                if (a.startUs != b.startUs)
+                {
+                    return a.startUs < b.startUs;
+                }
+                if (a.durationUs != b.durationUs)
+                {
+                    return a.durationUs > b.durationUs;
+                }
+                return a.sequence < b.sequence;
+            });
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const auto& event = events[i];
+            const double startMs =
+                static_cast<double>(event.startUs) / 1000.0;
+            const double endMs =
+                static_cast<double>(event.startUs + event.durationUs) / 1000.0;
+            const double durationMs =
+                static_cast<double>(event.durationUs) / 1000.0;
+            const QString description =
+                event.assist
+                ? waveformAssistDescription(
+                    event.phase,
+                    event.chunkIndex)
+                : QString::fromLatin1(
+                    waveformPhaseName(event.phase));
+
+            lines << QStringLiteral("%1-%2 ms | %3 | %4 | %5 ms | %6")
+                .arg(startMs, 0, 'f', 2)
+                .arg(endMs, 0, 'f', 2)
+                .arg(QString::fromLatin1(event.worker))
+                .arg(QChar::fromLatin1(event.phase))
+                .arg(durationMs, 0, 'f', 2)
+                .arg(description);
+        }
+
+        if (count == 0u)
+        {
+            lines << QStringLiteral("inactive / no published Screen-waveform events");
+        }
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString waveformSpoutDetails(
+        const PerformanceSnapshot& snapshot)
+    {
+        QStringList lines;
+        lines << metricSummary(
+            QStringLiteral("Spout waveform [timeline]"),
+            snapshot.waveformVideo);
+
+        bool found = false;
+        const auto& timeline = snapshot.waveformWorkerPhases;
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            const auto& event = timeline.events[i];
+            if (static_cast<char>(event.phase) != 'V')
+            {
+                continue;
+            }
+
+            const double startMs =
+                static_cast<double>(event.startUs) / 1000.0;
+            const double endMs =
+                static_cast<double>(event.startUs + event.durationUs) / 1000.0;
+            const double durationMs =
+                static_cast<double>(event.durationUs) / 1000.0;
+            lines << QStringLiteral(
+                "%1-%2 ms | WF | V | %3 ms | Spout waveform render")
+                .arg(startMs, 0, 'f', 2)
+                .arg(endMs, 0, 'f', 2)
+                .arg(durationMs, 0, 'f', 2);
+            found = true;
+        }
+
+        if (!found)
+        {
+            lines << QStringLiteral("inactive / no published Spout-waveform timeline phase");
+        }
+
+        lines << QStringLiteral("");
+        lines << QStringLiteral(
+            "Internal cost counters (not capture-positioned):");
+        lines << QStringLiteral("R trace: %1 ms")
+            .arg(snapshot.waveformVideoTrace.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("P* persistence total: %1 ms")
+            .arg(snapshot.waveformVideoPersistence.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("C compose: %1 ms")
+            .arg(snapshot.waveformVideoCompose.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("G glow: %1 ms")
+            .arg(snapshot.waveformVideoGlow.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("O overlay: %1 ms")
+            .arg(snapshot.waveformVideoOverlay.latestMs(), 0, 'f', 2);
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString vectorscopeDetails(
+        const QString& title,
+        const PerformanceMetricSnapshot& total,
+        const PerformanceMetricSnapshot& analyzer,
+        const PerformanceMetricSnapshot& persistence,
+        const PerformanceMetricSnapshot& compose,
+        const PerformanceMetricSnapshot& overlay)
+    {
+        const double knownMs =
+            analyzer.latestMs() +
+            persistence.latestMs() +
+            compose.latestMs() +
+            overlay.latestMs();
+
+        const double otherMs =
+            std::max(
+                total.latestMs() - knownMs,
+                0.0);
+
+        QStringList lines;
+        lines << metricSummary(title, total);
+        lines << QStringLiteral(
+            "COST BREAKDOWN - not a capture-relative sub-phase timeline");
+        lines << QStringLiteral("A analyzer/density: %1 ms")
+            .arg(analyzer.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("P persistence/glow: %1 ms")
+            .arg(persistence.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("C compose: %1 ms")
+            .arg(compose.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("O targets/overlay: %1 ms")
+            .arg(overlay.latestMs(), 0, 'f', 2);
+        lines << QStringLiteral("? unclassified: %1 ms")
+            .arg(otherMs, 0, 'f', 2);
+
+        return lines.join(QLatin1Char('\n'));
+    }
+
+    QString rowDetails(
+        const PerformanceSnapshot& snapshot,
+        int rowIndex)
+    {
+        if (rowIndex < 0 ||
+            rowIndex >= static_cast<int>(kRows.size()))
+        {
+            return {};
+        }
+
+        switch (kRows[static_cast<std::size_t>(rowIndex)].kind)
+        {
+        case RowKind::FieldTiming:
+            if (snapshot.field1Ready.latestUs == 0u &&
+                snapshot.field2Ready.latestUs == 0u)
+            {
+                return QStringLiteral(
+                    "Field timing\ninactive / no video consumer");
+            }
+
+            return QStringLiteral(
+                "Field timing\n"
+                "F1 present %1 ms (target 40 ms)\n"
+                "F2 present %2 ms (target 60 ms)\n"
+                "F1 -> F2 interval %3 ms\n"
+                "deadline misses F1 %4   F2 %5")
+                .arg(snapshot.field1Present.latestMs(), 0, 'f', 2)
+                .arg(snapshot.field2Present.latestMs(), 0, 'f', 2)
+                .arg(snapshot.presentInterval.latestMs(), 0, 'f', 2)
+                .arg(snapshot.field1DeadlineMisses)
+                .arg(snapshot.field2DeadlineMisses);
+
+        case RowKind::TimingDiagnostics:
+            return timingDiagnosticDetails(snapshot);
+
+        case RowKind::Field1Ready:
+            if (snapshot.field1Ready.latestUs == 0u &&
+                snapshot.field2Ready.latestUs == 0u)
+            {
+                return QStringLiteral(
+                    "Field 1 ready\ninactive / no video consumer");
+            }
+
+            return displayTimelineDetails(
+                QStringLiteral("Field 1 ready - actual display pipeline phases"),
+                snapshot.displayFieldPhases);
+
+        case RowKind::Field2Ready:
+            if (snapshot.field1Ready.latestUs == 0u &&
+                snapshot.field2Ready.latestUs == 0u)
+            {
+                return QStringLiteral(
+                    "Field 2 ready\ninactive / no video consumer");
+            }
+
+            return displayTimelineDetails(
+                QStringLiteral("Field 2 ready - actual display pipeline phases"),
+                snapshot.displayFieldPhases);
+
+        case RowKind::DisplayWorker0:
+            return displayWorkerDetails(
+                snapshot,
+                0u);
+
+        case RowKind::DisplayWorker1:
+            return displayWorkerDetails(
+                snapshot,
+                1u);
+
+        case RowKind::ScreenVideo:
+        {
+            if (snapshot.field1Ready.latestUs == 0u &&
+                snapshot.field2Ready.latestUs == 0u)
+            {
+                return QStringLiteral(
+                    "Screen Frame Cost [wallclock]\n"
+                    "inactive / no video consumer\n"
+                    "wallclock cost 0.00 ms");
+            }
+
+            QStringList lines;
+            lines << metricSummary(
+                QStringLiteral(
+                    "Screen Frame Cost [wallclock]"),
+                snapshot.field2Ready);
+
+            lines << QStringLiteral(
+                "Definition: capture/timeline origin -> Field 2 ready.");
+            lines << QStringLiteral(
+                "This is the critical-path wallclock cost of completing the screen frame.");
+            lines << QStringLiteral(
+                "Video workers execute in parallel, so their CPU work is NOT summed here.");
+
+            return lines.join(QLatin1Char('\n'));
+        }
+
+        case RowKind::WaveformWorker:
+            return waveformWorkerDetails(snapshot);
+
+        case RowKind::WaveformScreen:
+            return waveformScreenDetails(snapshot);
+
+        case RowKind::WaveformSpout:
+            return waveformSpoutDetails(snapshot);
+
+        case RowKind::VectorscopeWorker:
+            return vectorscopeWorkerDetails(snapshot);
+
+        case RowKind::VectorscopeScreen:
+            return vectorscopeDetails(
+                QStringLiteral("Screen vectorscope"),
+                snapshot.vectorscopeScreen,
+                snapshot.vectorscopeScreenAnalyzer,
+                snapshot.vectorscopeScreenGlowPersistence,
+                snapshot.vectorscopeScreenCompose,
+                snapshot.vectorscopeScreenOverlay);
+
+        case RowKind::VectorscopeSpout:
+            return vectorscopeDetails(
+                QStringLiteral("Spout vectorscope"),
+                snapshot.vectorscopeVideo,
+                snapshot.vectorscopeVideoAnalyzer,
+                snapshot.vectorscopeVideoGlowPersistence,
+                snapshot.vectorscopeVideoCompose,
+                snapshot.vectorscopeVideoOverlay);
+
+        case RowKind::DisplayCompose:
+        {
+            QStringList lines;
+            lines << metricSummary(
+                QStringLiteral(
+                    "Display compose CPU sum [work]"),
+                snapshot.displayCompose);
+
+            lines << QStringLiteral(
+                "Definition: sum of composeUs over both fields and all display workers.");
+            lines << QStringLiteral(
+                "This is accumulated CPU work, NOT wallclock and NOT a worker completion time.");
+
+            return lines.join(QLatin1Char('\n'));
+        }
+        }
+
         return {};
+    }
+
+    double displayTimelineEndUs(
+        const DisplayPhaseTimelineSnapshot& timeline)
+    {
+        double endUs = 0.0;
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < DisplayPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            endUs = std::max(
+                endUs,
+                static_cast<double>(timeline.events[i].startUs) +
+                static_cast<double>(timeline.events[i].durationUs));
+        }
+
+        return endUs;
+    }
+
+    double assistTimelineEndUs(
+        const WaveformAssistTimelineSnapshot& timeline)
+    {
+        double endUs = 0.0;
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformAssistTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            endUs = std::max(
+                endUs,
+                static_cast<double>(timeline.events[i].startUs) +
+                static_cast<double>(timeline.events[i].durationUs));
+        }
+
+        return endUs;
+    }
+
+    double workerTimelineEndUs(
+        const WorkerPhaseTimelineSnapshot& timeline)
+    {
+        double endUs = 0.0;
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WorkerPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            endUs = std::max(
+                endUs,
+                static_cast<double>(timeline.events[i].startUs) +
+                static_cast<double>(timeline.events[i].durationUs));
+        }
+
+        return endUs;
+    }
+
+    double waveformTimelineEndUs(
+        const WaveformPhaseTimelineSnapshot& timeline)
+    {
+        double endUs = 0.0;
+
+        for (std::uint32_t i = 0;
+            i < timeline.count &&
+            i < WaveformPhaseTimelineSnapshot::kCapacity;
+            ++i)
+        {
+            endUs = std::max(
+                endUs,
+                static_cast<double>(timeline.events[i].startUs) +
+                static_cast<double>(timeline.events[i].durationUs));
+        }
+
+        return endUs;
+    }
+
+    double maximumWorkerEndUs(
+        const PerformanceSnapshot& snapshot)
+    {
+        return std::max(
+        {
+            displayTimelineEndUs(snapshot.displayWorker0Phases),
+            assistTimelineEndUs(snapshot.displayWorker0Assist),
+            displayTimelineEndUs(snapshot.displayWorker1Phases),
+            assistTimelineEndUs(snapshot.displayWorker1Assist),
+            workerTimelineEndUs(snapshot.waveformWorkerPhases),
+            waveformTimelineEndUs(snapshot.waveformScreenPhases),
+            assistTimelineEndUs(snapshot.waveformWorkerAssist),
+            workerTimelineEndUs(snapshot.vectorscopeWorkerPhases),
+            (snapshot.waveformWorkerAssist.generation == 0u ||
+             snapshot.vectorscopeWorkerAssist.generation ==
+                 snapshot.waveformWorkerAssist.generation)
+                ? assistTimelineEndUs(snapshot.vectorscopeWorkerAssist)
+                : 0.0
+        });
+    }
+
+    int rowAtPosition(
+        const QPoint& position)
+    {
+        const int firstRowY =
+            kMargin +
+            kToolbarHeight +
+            kScaleHeight +
+            kTimelineScrollHeight +
+            4;
+
+        const int relativeY =
+            position.y() - firstRowY;
+
+        if (relativeY < 0)
+        {
+            return -1;
+        }
+
+        const int rowHeight =
+            kBarHeight + kRowSpacing;
+
+        const int index =
+            relativeY / rowHeight;
+
+        if (index < 0 ||
+            index >= static_cast<int>(kRows.size()) ||
+            (relativeY % rowHeight) >= kBarHeight)
+        {
+            return -1;
+        }
+
+        return index;
     }
 }
 
@@ -835,233 +2309,458 @@ PerformanceWidget::PerformanceWidget(
     : QWidget(parent)
 {
     setMinimumSize(
-        980,
-        760);
+        1050,
+        690);
 
-    setMouseTracking(
-        true);
+    setMouseTracking(true);
+
+    pauseButton_ =
+        new QPushButton(
+            QStringLiteral("Pause"),
+            this);
+
+    pauseButton_->setCheckable(true);
+
+    connect(
+        pauseButton_,
+        &QPushButton::toggled,
+        this,
+        [this](bool paused)
+        {
+            paused_ = paused;
+
+            pauseButton_->setText(
+                paused_
+                    ? QStringLiteral("Resume")
+                    : QStringLiteral("Pause"));
+
+            update();
+        });
+
+    timelineZoomSlider_ =
+        new QSlider(
+            Qt::Horizontal,
+            this);
+
+    timelineZoomSlider_->setRange(1, 16);
+    timelineZoomSlider_->setValue(1);
+    timelineZoomSlider_->setSingleStep(1);
+    timelineZoomSlider_->setPageStep(1);
+
+    connect(
+        timelineZoomSlider_,
+        &QSlider::valueChanged,
+        this,
+        [this](int zoom)
+        {
+            const double centerUs =
+                timelineStartUs_ +
+                timelineSpanUs_ * 0.5;
+
+            timelineSpanUs_ =
+                std::max(
+                    kMaximumUs /
+                        static_cast<double>(
+                            std::max(zoom, 1)),
+                    kMinimumTimelineSpanUs);
+
+            timelineStartUs_ =
+                std::clamp(
+                    centerUs -
+                        timelineSpanUs_ * 0.5,
+                    0.0,
+                    std::max(
+                        kMaximumUs -
+                            timelineSpanUs_,
+                        0.0));
+
+            updateTimelineControls();
+            update();
+        });
+
+    timelineScrollBar_ =
+        new QScrollBar(
+            Qt::Horizontal,
+            this);
+
+    connect(
+        timelineScrollBar_,
+        &QScrollBar::valueChanged,
+        this,
+        [this](int value)
+        {
+            timelineStartUs_ =
+                static_cast<double>(value);
+            update();
+        });
+
+    updateTimelineControls();
+    layoutTimelineControls();
 }
 
 void PerformanceWidget::setPerformanceSnapshot(
     const PerformanceSnapshot& snapshot)
 {
+    if (paused_)
+    {
+        return;
+    }
+
     snapshot_ = snapshot;
 
-    if (snapshot.waveformScreenTrace.latestUs > 0 &&
-        snapshot.waveformScreenWidth > 0 &&
-        snapshot.waveformScreenHeight > 0)
+    if (autoPauseArmed_ &&
+        maximumWorkerEndUs(snapshot_) >
+            autoPauseThresholdUs_)
     {
-        const double megaPixels =
-            (static_cast<double>(snapshot.waveformScreenWidth) *
-                static_cast<double>(snapshot.waveformScreenHeight)) /
-            1'000'000.0;
+        autoPauseArmed_ = false;
+        paused_ = true;
 
-        traceHistory_.push_back(
-            {
-                snapshot.waveformScreenTrace.latestMs(),
-                megaPixels,
-                snapshot.waveformScreenTraceParallel
-            });
-
-        constexpr std::size_t kMaximumTraceHistorySamples = 240;
-
-        while (traceHistory_.size() > kMaximumTraceHistorySamples)
+        if (pauseButton_ != nullptr)
         {
-            traceHistory_.pop_front();
+            pauseButton_->setChecked(true);
+            pauseButton_->setText(
+                QStringLiteral("Resume"));
         }
     }
 
     update();
 }
 
+void PerformanceWidget::updateTimelineControls()
+{
+    if (timelineScrollBar_ == nullptr)
+    {
+        return;
+    }
+
+    const int maximumStartUs =
+        static_cast<int>(
+            std::max(
+                kMaximumUs -
+                    timelineSpanUs_,
+                0.0));
+
+    timelineScrollBar_->setRange(
+        0,
+        maximumStartUs);
+
+    timelineScrollBar_->setPageStep(
+        std::max(
+            static_cast<int>(timelineSpanUs_),
+            1));
+
+    timelineScrollBar_->setSingleStep(
+        std::max(
+            static_cast<int>(timelineSpanUs_ / 20.0),
+            100));
+
+    timelineScrollBar_->setValue(
+        std::clamp(
+            static_cast<int>(
+                std::lround(timelineStartUs_)),
+            0,
+            maximumStartUs));
+}
+
+void PerformanceWidget::layoutTimelineControls()
+{
+    if (pauseButton_ == nullptr ||
+        timelineZoomSlider_ == nullptr ||
+        timelineScrollBar_ == nullptr)
+    {
+        return;
+    }
+
+    const int top =
+        kMargin;
+
+    pauseButton_->setGeometry(
+        kMargin,
+        top,
+        82,
+        24);
+
+    timelineZoomSlider_->setGeometry(
+        kMargin + 160,
+        top + 2,
+        180,
+        20);
+
+    timelineScrollBar_->setGeometry(
+        kMargin + 350,
+        top + 3,
+        std::max(
+            width() -
+                (kMargin + 350) -
+                kMargin,
+            120),
+        kTimelineScrollHeight);
+}
+
 void PerformanceWidget::paintEvent(
     QPaintEvent* /*event*/)
 {
     QPainter painter(this);
+    painter.fillRect(rect(), Qt::black);
 
-    painter.fillRect(
-        rect(),
-        Qt::black);
-
-    constexpr int barHeight =
-        18;
-
-    constexpr int spacing =
-        12;
-
-    const auto bars =
-        makeBars(
-            snapshot_);
+    gTimelineStartUs = timelineStartUs_;
+    gTimelineSpanUs = timelineSpanUs_;
 
     const QFontMetrics fontMetrics(
         painter.font());
 
     int labelWidth = 0;
-
-    for (const Bar& bar : bars)
+    for (const Row& row : kRows)
     {
         labelWidth =
             std::max(
                 labelWidth,
                 fontMetrics.horizontalAdvance(
-                    bar.label));
+                    QString::fromLatin1(row.label)));
     }
 
-    labelWidth +=
-        12;
-
-    constexpr int margin =
-        12;
-
-    int y = margin;
+    labelWidth += 18;
 
     const int barLeft =
-        margin + labelWidth;
+        kMargin + labelWidth;
 
     const int barWidth =
-        width() -
-        labelWidth -
-        margin * 2;
+        std::max(
+            width() - barLeft - kMargin,
+            1);
 
-    const int scaleY =
-        y;
+    painter.setPen(Qt::lightGray);
 
-    painter.setPen(
-        Qt::lightGray);
+    painter.drawText(
+        QRect(
+            kMargin + 92,
+            kMargin,
+            64,
+            24),
+        Qt::AlignLeft | Qt::AlignVCenter,
+        paused_
+            ? QStringLiteral("PAUSED")
+            : QStringLiteral("LIVE"));
 
-    const auto drawScaleLabel =
+    painter.drawText(
+        QRect(
+            kMargin + 350 - 92,
+            kMargin,
+            88,
+            24),
+        Qt::AlignRight | Qt::AlignVCenter,
+        QStringLiteral("Zoom x%1")
+            .arg(
+                timelineZoomSlider_ != nullptr
+                    ? timelineZoomSlider_->value()
+                    : 1));
+
+    if (autoPauseArmed_)
+    {
+        painter.setPen(
+            QColor(238, 210, 165));
+
+        painter.drawText(
+            QRect(
+                kMargin + 350,
+                kMargin,
+                260,
+                24),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QStringLiteral(
+                "AUTO-PAUSE > %1 ms")
+                .arg(
+                    autoPauseThresholdUs_ / 1000.0,
+                    0, 'f', 2));
+    }
+
+    const int scaleTop =
+        kMargin +
+        kToolbarHeight;
+
+    const auto drawScale =
         [&](double us,
             const QString& text,
             Qt::Alignment alignment)
         {
-            const int x =
-                barLeft +
-                static_cast<int>(
-                    std::lround(
-                        (us / kMaximumUs) *
-                        static_cast<double>(
-                            barWidth)));
+            if (!isUsVisible(us))
+            {
+                return;
+            }
 
-            QRect textRect(
-                x - 30,
-                scaleY,
-                60,
-                barHeight);
+            const int x =
+                xForUs(
+                    QRect(
+                        barLeft,
+                        scaleTop,
+                        barWidth,
+                        kBarHeight),
+                    us);
+
+            QRect scaleRect(
+                x - 42,
+                scaleTop,
+                84,
+                kBarHeight);
 
             if (alignment & Qt::AlignLeft)
             {
-                textRect.moveLeft(
-                    x);
+                scaleRect.moveLeft(x);
             }
             else if (alignment & Qt::AlignRight)
             {
-                textRect.moveRight(
-                    x);
+                scaleRect.moveRight(x);
             }
 
             painter.drawText(
-                textRect,
-                alignment |
-                Qt::AlignVCenter,
+                scaleRect,
+                alignment | Qt::AlignVCenter,
                 text);
         };
 
-    drawScaleLabel(
-        0.0,
-        "0",
-        Qt::AlignLeft);
+    const double viewEndUs =
+        timelineStartUs_ +
+        timelineSpanUs_;
 
-    drawScaleLabel(
-        20000.0,
-        "20",
-        Qt::AlignHCenter);
+    // Adaptive time ruler. At high zoom Grobbeoog gets a real millisecond
+    // ruler instead of having to infer time from sparse 5 ms labels.
+    double majorTickUs = 20000.0;
+    double minorTickUs = 5000.0;
 
-    drawScaleLabel(
-        40000.0,
-        "40",
-        Qt::AlignHCenter);
-
-    drawScaleLabel(
-        60000.0,
-        "60",
-        Qt::AlignHCenter);
-
-    drawScaleLabel(
-        80000.0,
-        "80 ms",
-        Qt::AlignRight);
-
-    y +=
-        barHeight +
-        6;
-
-    for (const Bar& bar : bars)
+    if (timelineSpanUs_ <= 12000.0)
     {
-        painter.setPen(
-            Qt::white);
+        majorTickUs = 1000.0;
+        minorTickUs = 1000.0;
+    }
+    else if (timelineSpanUs_ <= 24000.0)
+    {
+        majorTickUs = 2000.0;
+        minorTickUs = 1000.0;
+    }
+    else if (timelineSpanUs_ <= 45000.0)
+    {
+        majorTickUs = 5000.0;
+        minorTickUs = 1000.0;
+    }
+    else
+    {
+        majorTickUs = 10000.0;
+        minorTickUs = 5000.0;
+    }
+
+    const QRect rulerBarRect(
+        barLeft,
+        scaleTop,
+        barWidth,
+        kBarHeight);
+
+    // Minor ticks: unobtrusive 1 ms marks when zoomed in.
+    painter.setPen(QColor(105, 105, 105));
+    const double firstMinorUs =
+        std::ceil(timelineStartUs_ / minorTickUs) * minorTickUs;
+    for (double us = firstMinorUs;
+        us <= viewEndUs + 0.5;
+        us += minorTickUs)
+    {
+        if (!isUsVisible(us))
+        {
+            continue;
+        }
+
+        const int x = xForUs(rulerBarRect, us);
+        painter.drawLine(
+            x,
+            scaleTop + kBarHeight - 5,
+            x,
+            scaleTop + kBarHeight - 1);
+    }
+
+    painter.setPen(Qt::white);
+    const double firstMajorUs =
+        std::ceil(timelineStartUs_ / majorTickUs) * majorTickUs;
+    bool firstVisibleTick = true;
+
+    for (double us = firstMajorUs;
+        us <= viewEndUs + 0.5;
+        us += majorTickUs)
+    {
+        if (!isUsVisible(us))
+        {
+            continue;
+        }
+
+        const bool atRightEdge =
+            std::abs(us - viewEndUs) < majorTickUs * 0.25;
+
+        drawScale(
+            us,
+            QStringLiteral("%1 ms")
+                .arg(us / 1000.0, 0, 'g', 5),
+            firstVisibleTick
+                ? Qt::AlignLeft
+                : (atRightEdge
+                    ? Qt::AlignRight
+                    : Qt::AlignHCenter));
+
+        firstVisibleTick = false;
+    }
+
+    int y =
+        kMargin +
+        kToolbarHeight +
+        kScaleHeight +
+        kTimelineScrollHeight +
+        4;
+
+    for (const Row& row : kRows)
+    {
+        painter.setPen(Qt::white);
 
         painter.drawText(
             QRect(
-                margin,
+                kMargin,
                 y,
                 labelWidth,
-                barHeight),
-            Qt::AlignVCenter |
-            Qt::AlignLeft,
-            bar.label);
+                kBarHeight),
+            Qt::AlignLeft | Qt::AlignVCenter,
+            QString::fromLatin1(row.label));
 
         const QRect barRect(
-            margin + labelWidth,
+            barLeft,
             y,
-            width() -
-            labelWidth -
-            margin * 2,
-            barHeight);
+            barWidth,
+            kBarHeight);
 
-        switch (bar.type)
+        painter.fillRect(
+            barRect,
+            QColor(24, 24, 24));
+
+        switch (row.kind)
         {
-        case BarType::FieldTiming:
+        case RowKind::FieldTiming:
+            if (snapshot_.field1Ready.latestUs == 0u &&
+                snapshot_.field2Ready.latestUs == 0u)
+            {
+                painter.fillRect(
+                    barRect,
+                    QColor(55, 55, 55));
+
+                painter.setPen(
+                    QColor(170, 170, 170));
+
+                painter.drawText(
+                    barRect,
+                    Qt::AlignCenter,
+                    QStringLiteral(
+                        "inactive / no video consumer"));
+
+                break;
+            }
+
             fillFieldTimingBackground(
                 painter,
                 barRect);
-            break;
 
-        case BarType::Field1Ready:
-            fillTimingBackground(
-                painter,
-                barRect,
-                35000.0,
-                kField1DeadlineUs);
-            break;
-
-        case BarType::Field2Ready:
-            fillTimingBackground(
-                painter,
-                barRect,
-                55000.0,
-                kField2DeadlineUs);
-            break;
-
-        case BarType::WaveformWorker:
-        case BarType::Worker0:
-        case BarType::Worker1:
-            painter.fillRect(
-                barRect,
-                QColor(25, 25, 25));
-            break;
-
-        case BarType::Normal:
-        default:
-            fillTimingBackground(
-                painter,
-                barRect,
-                40000.0,
-                60000.0);
-            break;
-        }
-
-        if (bar.type == BarType::FieldTiming)
-        {
             drawFieldStatusMarker(
                 painter,
                 barRect,
@@ -1075,1220 +2774,588 @@ void PerformanceWidget::paintEvent(
                 static_cast<double>(
                     snapshot_.field2Present.latestUs),
                 kField2DeadlineUs);
-        }
-        else if (bar.type == BarType::Field1Ready ||
-            bar.type == BarType::Field2Ready)
+            break;
+
+        case RowKind::TimingDiagnostics:
         {
-            // Draw the actual wall-clock display pipeline phases at their real
-            // capture-relative timestamps. Do not reconstruct N/D/C/S by
-            // stacking aggregate durations: assist/pre-emption can insert real
-            // gaps and used to make this bar diverge from the worker rows.
+            drawDeadlineGuides(painter, barRect);
+
+            const struct
+            {
+                const char* label;
+                const TimingDiagnosticEventSnapshot* event;
+                QColor color;
+            } diagnostics[] =
+            {
+                { "RA", &snapshot_.presenterReanchor, QColor(235, 150, 150) },
+                { "PS", &snapshot_.presenterGenerationSkip, QColor(235, 205, 150) },
+                { "WS", &snapshot_.waveformGenerationSkip, QColor(180, 215, 235) },
+                { "VS", &snapshot_.vectorscopeGenerationSkip, QColor(205, 185, 235) }
+            };
+
+            int left = barRect.left() + 4;
+
+            for (const auto& diagnostic : diagnostics)
+            {
+                if (diagnostic.event->count == 0u)
+                {
+                    continue;
+                }
+
+                const QString text =
+                    QStringLiteral("%1:%2")
+                        .arg(QString::fromLatin1(diagnostic.label))
+                        .arg(diagnostic.event->count);
+
+                const int markerWidth =
+                    std::max(
+                        painter.fontMetrics().horizontalAdvance(text) + 10,
+                        42);
+
+                const QRect marker(
+                    left,
+                    barRect.top() + 2,
+                    markerWidth,
+                    barRect.height() - 4);
+
+                painter.fillRect(marker, diagnostic.color);
+                painter.setPen(Qt::black);
+                painter.drawText(marker, Qt::AlignCenter, text);
+
+                left += markerWidth + 4;
+            }
+
+            break;
+        }
+
+        case RowKind::Field1Ready:
+            if (snapshot_.field1Ready.latestUs == 0u &&
+                snapshot_.field2Ready.latestUs == 0u)
+            {
+                painter.fillRect(
+                    barRect,
+                    QColor(55, 55, 55));
+
+                painter.setPen(
+                    QColor(170, 170, 170));
+
+                painter.drawText(
+                    barRect,
+                    Qt::AlignCenter,
+                    QStringLiteral("inactive"));
+
+                break;
+            }
+
+            fillTimingBackground(
+                painter,
+                barRect,
+                35000.0,
+                40000.0);
+
             drawDisplayTimeline(
                 painter,
                 barRect,
                 snapshot_.displayFieldPhases,
-                bar.type == BarType::Field2Ready);
-        }
-        else if (bar.type == BarType::WaveformWorker)
-        {
-            drawAssistChunkMarkers(
+                false);
+            break;
+
+        case RowKind::Field2Ready:
+            if (snapshot_.field1Ready.latestUs == 0u &&
+                snapshot_.field2Ready.latestUs == 0u)
+            {
+                painter.fillRect(
+                    barRect,
+                    QColor(55, 55, 55));
+
+                painter.setPen(
+                    QColor(170, 170, 170));
+
+                painter.drawText(
+                    barRect,
+                    Qt::AlignCenter,
+                    QStringLiteral("inactive"));
+
+                break;
+            }
+
+            fillTimingBackground(
                 painter,
                 barRect,
-                snapshot_.waveformWorkerAssist,
-                snapshot_.waveformScreenPhases.generation);
-        }
-        else if (bar.type == BarType::Worker0 ||
-            bar.type == BarType::Worker1)
-        {
-            const bool firstWorker =
-                bar.type == BarType::Worker0;
+                55000.0,
+                60000.0);
 
-            // Same capture-relative timestamps as the Field 1/2 rows above.
-            // This restores the original 1:1 vertical correspondence between
-            // field phases and the workers that actually executed them.
             drawDisplayTimeline(
                 painter,
                 barRect,
-                firstWorker
-                    ? snapshot_.displayWorker0Phases
-                    : snapshot_.displayWorker1Phases,
+                snapshot_.displayFieldPhases,
+                true);
+            break;
+
+        case RowKind::DisplayWorker0:
+            drawDeadlineGuides(painter, barRect);
+            drawDisplayTimeline(
+                painter,
+                barRect,
+                snapshot_.displayWorker0Phases,
+                true);
+            drawAssistTimeline(
+                painter,
+                barRect,
+                snapshot_.frequencyWorkerPhases[0]);
+            drawAssistTimeline(
+                painter,
+                barRect,
+                snapshot_.displayWorker0Assist);
+            drawPriorityStateTimeline(
+                painter,
+                barRect,
+                snapshot_.priorityVideo1);
+            drawFrequencyPriorityTimeline(
+                painter,
+                barRect,
+                snapshot_.frequencyWorkerPhases[0]);
+            break;
+
+        case RowKind::DisplayWorker1:
+            drawDeadlineGuides(painter, barRect);
+            drawDisplayTimeline(
+                painter,
+                barRect,
+                snapshot_.displayWorker1Phases,
+                true);
+            drawAssistTimeline(
+                painter,
+                barRect,
+                snapshot_.frequencyWorkerPhases[1]);
+            drawAssistTimeline(
+                painter,
+                barRect,
+                snapshot_.displayWorker1Assist);
+            drawPriorityStateTimeline(
+                painter,
+                barRect,
+                snapshot_.priorityVideo2);
+            drawFrequencyPriorityTimeline(
+                painter,
+                barRect,
+                snapshot_.frequencyWorkerPhases[1]);
+            break;
+
+        case RowKind::ScreenVideo:
+            if (snapshot_.field1Ready.latestUs == 0u &&
+                snapshot_.field2Ready.latestUs == 0u)
+            {
+                painter.fillRect(
+                    barRect,
+                    QColor(55, 55, 55));
+
+                painter.setPen(
+                    QColor(170, 170, 170));
+
+                painter.drawText(
+                    barRect,
+                    Qt::AlignCenter,
+                    QStringLiteral("inactive / 0.00 ms"));
+
+                break;
+            }
+
+            drawDeadlineGuides(painter, barRect);
+            drawSegment(
+                painter,
+                barRect,
+                0.0,
+                static_cast<double>(
+                    snapshot_.field2Ready.latestUs),
+                QColor(220, 220, 220),
+                QStringLiteral("F2 ready"));
+            break;
+
+        case RowKind::WaveformWorker:
+            drawDeadlineGuides(painter, barRect);
+
+            // Top-level Screen / Spout / measurement / publish envelope.
+            drawWorkerTimeline(
+                painter,
+                barRect,
+                snapshot_.waveformWorkerPhases,
                 true);
 
-            // Only overlay R/X assist chunks when they belong to the exact
-            // same captured frame as this worker's N/D/C/S timeline.  Mixing
-            // independently published generations makes impossible overlaps
-            // (e.g. R apparently running through C1 on one physical thread).
-            const auto& displayTimeline =
-                firstWorker
-                    ? snapshot_.displayWorker0Phases
-                    : snapshot_.displayWorker1Phases;
-            const bool sameCapturedFrame =
-                displayTimeline.generation != 0 &&
-                snapshot_.waveformScreenPhases.generation ==
-                    displayTimeline.generation;
+            // Exact Screen-render sub-phases belong on this worker chronology.
+            drawWaveformWorkerScreenPhases(
+                painter,
+                barRect,
+                snapshot_.waveformScreenPhases);
 
-            if (sameCapturedFrame)
+            drawAssistTimeline(
+                painter,
+                barRect,
+                snapshot_.waveformWorkerAssist);
+            drawPriorityStateTimeline(
+                painter,
+                barRect,
+                snapshot_.priorityWaveform);
+            break;
+
+        case RowKind::WaveformScreen:
+            // Exact renderer chronology.  Do not synthesize an additive
+            // remainder here: every published phase, including X, is drawn at
+            // its real capture-relative position.
+            drawWaveformScreenTimeline(
+                painter,
+                barRect,
+                snapshot_);
+            break;
+
+        case RowKind::WaveformSpout:
+            drawDeadlineGuides(painter, barRect);
+            drawWaveformSpoutTimeline(
+                painter,
+                barRect,
+                snapshot_.waveformWorkerPhases);
+            break;
+
+        case RowKind::VectorscopeWorker:
+            drawDeadlineGuides(painter, barRect);
+            drawWorkerTimeline(
+                painter,
+                barRect,
+                snapshot_.vectorscopeWorkerPhases);
+            if (snapshot_.waveformWorkerAssist.generation == 0u ||
+                snapshot_.vectorscopeWorkerAssist.generation ==
+                    snapshot_.waveformWorkerAssist.generation)
             {
-                drawAssistChunkMarkers(
+                drawAssistTimeline(
                     painter,
                     barRect,
-                    firstWorker
-                        ? snapshot_.displayWorker0Assist
-                        : snapshot_.displayWorker1Assist,
-                    displayTimeline.generation);
+                    snapshot_.vectorscopeWorkerAssist);
             }
-        }
-        else if (bar.detail == DetailKind::WaveformScreen)
-        {
-            // Real chronology on the same capture-relative 0..80 ms axis as
-            // the display-worker chunk markers.  X is laid down first as the
-            // full waveform wall-time envelope; measured phases then replace
-            // it at their actual start/end timestamps.
-            const auto phaseColor =
-                [](char label) -> QColor
-                {
-                    switch (label)
-                    {
-                    case 'F': return QColor(235, 215, 180);
-                    case 'U': return QColor(185, 215, 235);
-                    case 'V': return QColor(225, 205, 235);
-                    case 'M': return QColor(235, 225, 185);
-                    case 'E': return QColor(205, 235, 225);
-                    case 'T': return QColor(205, 215, 235);
-                    case 'R': return QColor(220, 220, 220);
-                    case 'Z': return QColor(205, 190, 230);
-                    case 'P': return QColor(185, 225, 205);
-                    case 'C': return QColor(205, 225, 185);
-                    case 'O': return QColor(225, 205, 205);
-                    default:  return QColor(195, 195, 195);
-                    }
-                };
+            drawPriorityStateTimeline(
+                painter,
+                barRect,
+                snapshot_.priorityVectorscope);
+            break;
 
-            for (std::uint32_t i = 0;
-                i < snapshot_.waveformScreenPhases.count &&
-                i < WaveformPhaseTimelineSnapshot::kCapacity;
-                ++i)
-            {
-                const auto& event =
-                    snapshot_.waveformScreenPhases.events[i];
-                const char label =
-                    static_cast<char>(event.label);
-                const char labelText[2] = { label, '\0' };
+        case RowKind::VectorscopeScreen:
+            drawDeadlineGuides(painter, barRect);
+            drawVectorscopeCostBreakdown(
+                painter,
+                barRect,
+                snapshot_.vectorscopeScreen,
+                snapshot_.vectorscopeScreenAnalyzer,
+                snapshot_.vectorscopeScreenGlowPersistence,
+                snapshot_.vectorscopeScreenCompose,
+                snapshot_.vectorscopeScreenOverlay);
+            break;
 
-                drawSegment(
-                    painter,
-                    barRect,
-                    static_cast<double>(event.startUs),
-                    static_cast<double>(event.durationUs),
-                    phaseColor(label),
-                    labelText);
-            }
+        case RowKind::VectorscopeSpout:
+            drawDeadlineGuides(painter, barRect);
+            drawVectorscopeCostBreakdown(
+                painter,
+                barRect,
+                snapshot_.vectorscopeVideo,
+                snapshot_.vectorscopeVideoAnalyzer,
+                snapshot_.vectorscopeVideoGlowPersistence,
+                snapshot_.vectorscopeVideoCompose,
+                snapshot_.vectorscopeVideoOverlay);
+            break;
 
-            // W is the actual final wait after W0 has no local chunk left and
-            // outstanding helper chunks still have to return.  Its timestamp
-            // is capture-relative too, so it can be compared vertically with
-            // W1/W2 without any synthetic stacking.
-            const double finalWaitStartUs =
+        case RowKind::DisplayCompose:
+            // CPU-work sum: deliberately starts at zero.  This is not a
+            // capture-relative chronology; the row name says so explicitly.
+            drawSegment(
+                painter,
+                barRect,
+                0.0,
                 static_cast<double>(
-                    snapshot_.waveformScreenAssistFinalWaitStartUs);
-            const double finalWaitUs =
-                static_cast<double>(
-                    snapshot_.waveformScreenAssistFinalWaitUs);
-            const bool assistGenerationMatches =
-                snapshot_.waveformScreenPhases.generation != 0 &&
-                snapshot_.displayWorker0Assist.generation ==
-                    snapshot_.waveformScreenPhases.generation &&
-                snapshot_.displayWorker1Assist.generation ==
-                    snapshot_.waveformScreenPhases.generation;
-
-            if (finalWaitUs > 0.0 && assistGenerationMatches)
-            {
-                drawSegment(
-                    painter,
-                    barRect,
-                    finalWaitStartUs,
-                    finalWaitUs,
-                    QColor(235, 205, 150),
-                    "W");
-            }
-        }
-        else
-        {
-            const int valueX =
-                xForUs(
-                    barRect,
-                    static_cast<double>(
-                        bar.metric->latestUs));
-
-            const int valueWidth =
-                std::max(
-                    valueX -
-                    barRect.left(),
-                    0);
-
-            painter.fillRect(
-                QRect(
-                    barRect.left(),
-                    barRect.top(),
-                    valueWidth,
-                    barRect.height()),
-                QColor(220, 220, 220));
+                    snapshot_.displayCompose.latestUs),
+                QColor(220, 220, 220),
+                QStringLiteral("CPU"));
+            break;
         }
 
-        painter.setPen(
-            Qt::gray);
-
-        painter.drawRect(
-            barRect);
+        painter.setPen(Qt::gray);
+        painter.drawRect(barRect);
 
         y +=
-            barHeight +
-            spacing;
+            kBarHeight +
+            kRowSpacing;
     }
+
+    if (autoPauseArmed_ &&
+        autoPauseThresholdUs_ >= timelineStartUs_ &&
+        autoPauseThresholdUs_ <=
+            timelineStartUs_ + timelineSpanUs_)
+    {
+        const int triggerX =
+            xForUs(
+                QRect(
+                    barLeft,
+                    0,
+                    barWidth,
+                    kBarHeight),
+                autoPauseThresholdUs_);
+
+        QPen triggerPen(
+            QColor(238, 210, 165));
+        triggerPen.setWidth(2);
+        triggerPen.setStyle(Qt::DashLine);
+        painter.setPen(triggerPen);
+
+        const int rowsTop =
+            kMargin +
+            kToolbarHeight +
+            kScaleHeight +
+            kTimelineScrollHeight +
+            4;
+
+        painter.drawLine(
+            triggerX,
+            rowsTop,
+            triggerX,
+            y - kRowSpacing);
+    }
+
+    painter.setPen(Qt::lightGray);
+
+    painter.drawText(
+        QRect(
+            kMargin,
+            y,
+            width() - kMargin * 2,
+            kBarHeight),
+        Qt::AlignLeft | Qt::AlignVCenter,
+        QStringLiteral(
+            "Deadline misses: F1 %1   F2 %2")
+            .arg(snapshot_.field1DeadlineMisses)
+            .arg(snapshot_.field2DeadlineMisses));
+
+    y += kBarHeight;
+
+    painter.drawText(
+        QRect(
+            kMargin,
+            y,
+            width() - kMargin * 2,
+            kBarHeight),
+        Qt::AlignLeft | Qt::AlignVCenter,
+        QStringLiteral(
+            "Spout transport: queue %1 ms   send %2 ms   cadence %3 ms")
+            .arg(snapshot_.spoutQueueDelay.latestMs(), 0, 'f', 2)
+            .arg(snapshot_.spoutSend.latestMs(), 0, 'f', 2)
+            .arg(snapshot_.spoutInterval.latestMs(), 0, 'f', 2));
+
+    y +=
+        kBarHeight +
+        8;
+
+    const QRect detailRect(
+        kMargin,
+        y,
+        std::max(width() - kMargin * 2, 1),
+        std::max(height() - y - kMargin, 120));
+
+    painter.fillRect(
+        detailRect,
+        QColor(30, 30, 30));
 
     painter.setPen(
-        Qt::lightGray);
+        QColor(95, 95, 95));
 
-    painter.drawText(
-        QRect(
-            margin,
-            y,
-            width() - margin * 2,
-            barHeight),
-        Qt::AlignLeft |
-        Qt::AlignVCenter,
-        QString(
-            "Deadline misses: F1 %1   F2 %2")
-        .arg(
-            snapshot_.field1DeadlineMisses)
-        .arg(
-            snapshot_.field2DeadlineMisses));
+    painter.drawRect(
+        detailRect.adjusted(0, 0, -1, -1));
 
-    y += barHeight;
+    painter.setPen(
+        QColor(220, 220, 220));
 
-    painter.drawText(
-        QRect(
-            margin,
-            y,
-            width() - margin * 2,
-            barHeight),
-        Qt::AlignLeft |
-        Qt::AlignVCenter,
-        QString(
-            "Spout actual: queue %1 ms   send %2 ms   cadence %3 ms")
-        .arg(
-            snapshot_.spoutQueueDelay.latestMs(),
-            0,
-            'f',
-            2)
-        .arg(
-            snapshot_.spoutSend.latestMs(),
-            0,
-            'f',
-            2)
-        .arg(
-            snapshot_.spoutInterval.latestMs(),
-            0,
-            'f',
-            2));
+    QString detailText =
+        QStringLiteral(
+            "Left-click any bar to PIN that exact snapshot.\n"
+            "Right-click a timing position to AUTO-PAUSE when any worker crosses it.\n"
+            "Mouse-over uses the same reporting function as the pinned view.\n"
+            "Pause freezes incoming snapshots; Zoom + scrollbar inspect the 0..80 ms timeline.");
 
-    y += barHeight + 8;
-
-    const QString liveDetails =
-        makePinnedDetailText(
-            snapshot_,
-            pinnedDetailBarIndex_);
-
-    if (!liveDetails.isEmpty())
+    if (hasPinnedSnapshot_ &&
+        pinnedRowIndex_ >= 0)
     {
-        const auto detailBars =
-            makeBars(snapshot_);
-
-        const bool waveformScreenPinned =
-            pinnedDetailBarIndex_ >= 0 &&
-            pinnedDetailBarIndex_ < static_cast<int>(detailBars.size()) &&
-            detailBars[pinnedDetailBarIndex_].detail == DetailKind::WaveformScreen;
-
-        constexpr int detailTextHeight = 285;
-        constexpr int detailGap = 8;
-
-        const bool showTraceGraph = false;
-
-        const int availableWidth =
-            width() - margin * 2;
-
-        const int detailWidth =
-            showTraceGraph
-                ? std::max(420, availableWidth * 45 / 100)
-                : availableWidth;
-
-        const QRect detailRect(
-            margin,
-            y,
-            detailWidth,
-            detailTextHeight);
-
-        painter.fillRect(
-            detailRect,
-            QColor(30, 30, 30));
-
-        painter.setPen(
-            QColor(95, 95, 95));
-        painter.drawRect(
-            detailRect.adjusted(0, 0, -1, -1));
-
-        painter.setPen(
-            QColor(220, 220, 220));
-
-        painter.drawText(
-            detailRect.adjusted(8, 6, -8, -6),
-            Qt::AlignLeft | Qt::AlignTop,
-            QStringLiteral("LIVE - click a scope bar to pin\n") +
-                liveDetails);
-
-        if (showTraceGraph)
-        {
-            const int graphLeft =
-                detailRect.right() + 1 + detailGap;
-
-            const QRect graphRect(
-                graphLeft,
-                y,
-                std::max(availableWidth - detailWidth - detailGap, 320),
-                detailTextHeight);
-
-            painter.fillRect(
-                graphRect,
-                QColor(22, 22, 22));
-
-            painter.setPen(
-                QColor(80, 80, 80));
-            painter.drawRect(
-                graphRect.adjusted(0, 0, -1, -1));
-
-            const int graphMarginLeft = 48;
-            const int graphMarginRight = 58;
-            const int graphMarginTop = 62;
-            const int graphMarginBottom = 24;
-
-            const QRect plotRect =
-                graphRect.adjusted(
-                    graphMarginLeft,
-                    graphMarginTop,
-                    -graphMarginRight,
-                    -graphMarginBottom);
-
-            double maximumTraceMs = 20.0;
-            double maximumMegaPixels = 1.0;
-
-            for (const TraceHistorySample& sample : traceHistory_)
-            {
-                maximumTraceMs =
-                    std::max(maximumTraceMs, sample.traceMs);
-                maximumMegaPixels =
-                    std::max(maximumMegaPixels, sample.megaPixels);
-            }
-
-            maximumTraceMs =
-                std::ceil(maximumTraceMs / 10.0) * 10.0;
-            maximumMegaPixels =
-                std::ceil(maximumMegaPixels * 2.0) / 2.0;
-
-            const TraceHistorySample& latest =
-                traceHistory_.back();
-
-            const QFont savedGraphFont = painter.font();
-
-            QFont traceStatusFont = savedGraphFont;
-            traceStatusFont.setPointSizeF(
-                std::max(
-                    savedGraphFont.pointSizeF() * 1.55,
-                    14.0));
-            traceStatusFont.setBold(true);
-            painter.setFont(traceStatusFont);
-
-            painter.setPen(QColor(235, 235, 235));
-            painter.drawText(
-                QRect(
-                    graphRect.left() + 8,
-                    graphRect.top() + 2,
-                    graphRect.width() - 16,
-                    28),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                QString(
-                    "%1x%2   %3 MP   TRACE %4 ms   RASTER %5 ms   %6")
-                    .arg(snapshot_.waveformScreenWidth)
-                    .arg(snapshot_.waveformScreenHeight)
-                    .arg(latest.megaPixels, 0, 'f', 3)
-                    .arg(latest.traceMs, 0, 'f', 2)
-                    .arg(snapshot_.waveformScreenTraceRaster.latestMs(), 0, 'f', 2)
-                    .arg(latest.parallel
-                        ? QStringLiteral("PARALLEL")
-                        : QStringLiteral("SCALAR")));
-
-            QFont traceDiagnosticFont = savedGraphFont;
-            traceDiagnosticFont.setPointSizeF(
-                std::max(
-                    savedGraphFont.pointSizeF() * 1.30,
-                    12.0));
-            painter.setFont(traceDiagnosticFont);
-
-            painter.setPen(QColor(190, 190, 190));
-            painter.drawText(
-                QRect(
-                    graphRect.left() + 8,
-                    graphRect.top() + 31,
-                    graphRect.width() - 16,
-                    24),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                QString(
-                    "prep %1 ms   resize %2   buf+ %3   cache %4   jobs %5   beam %6 / margin %7")
-                    .arg(snapshot_.waveformScreenTracePrep.latestMs(), 0, 'f', 2)
-                    .arg(snapshot_.waveformScreenOutputSizeChanged
-                        ? QStringLiteral("YES")
-                        : QStringLiteral("no"))
-                    .arg(snapshot_.waveformScreenOutputBufferCapacityGrew
-                        ? QStringLiteral("YES")
-                        : QStringLiteral("no"))
-                    .arg(snapshot_.waveformScreenResamplerCacheRebuilt
-                        ? QStringLiteral("REBUILD")
-                        : QStringLiteral("HIT"))
-                    .arg(snapshot_.waveformScreenTraceJobCount)
-                    .arg(snapshot_.waveformScreenBeamCoreRadiusPx, 0, 'f', 2)
-                    .arg(snapshot_.waveformScreenBeamCoreMarginPx));
-
-            painter.setFont(savedGraphFont);
-
-            painter.setPen(QColor(55, 55, 55));
-
-            for (int grid = 0; grid <= 4; ++grid)
-            {
-                const int gridY =
-                    plotRect.bottom() -
-                    (plotRect.height() * grid) / 4;
-
-                painter.drawLine(
-                    plotRect.left(),
-                    gridY,
-                    plotRect.right(),
-                    gridY);
-            }
-
-            painter.setPen(QColor(170, 170, 170));
-            painter.drawText(
-                QRect(
-                    graphRect.left() + 4,
-                    plotRect.top() - 8,
-                    graphMarginLeft - 8,
-                    18),
-                Qt::AlignRight | Qt::AlignVCenter,
-                QString("%1 ms").arg(maximumTraceMs, 0, 'f', 0));
-            painter.drawText(
-                QRect(
-                    graphRect.left() + 4,
-                    plotRect.bottom() - 9,
-                    graphMarginLeft - 8,
-                    18),
-                Qt::AlignRight | Qt::AlignVCenter,
-                QStringLiteral("0"));
-
-            painter.drawText(
-                QRect(
-                    plotRect.right() + 6,
-                    plotRect.top() - 8,
-                    graphMarginRight - 10,
-                    18),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                QString("%1 MP").arg(maximumMegaPixels, 0, 'f', 1));
-            painter.drawText(
-                QRect(
-                    plotRect.right() + 6,
-                    plotRect.bottom() - 9,
-                    graphMarginRight - 10,
-                    18),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                QStringLiteral("0"));
-
-            painter.setPen(QColor(95, 95, 95));
-            painter.drawRect(plotRect);
-
-            if (traceHistory_.size() >= 2 &&
-                plotRect.width() > 1 &&
-                plotRect.height() > 1)
-            {
-                QPolygonF tracePolyline;
-                QPolygonF megaPixelPolyline;
-
-                tracePolyline.reserve(
-                    static_cast<int>(traceHistory_.size()));
-                megaPixelPolyline.reserve(
-                    static_cast<int>(traceHistory_.size()));
-
-                const double divisor =
-                    static_cast<double>(traceHistory_.size() - 1);
-
-                for (std::size_t index = 0;
-                    index < traceHistory_.size();
-                    ++index)
-                {
-                    const TraceHistorySample& sample =
-                        traceHistory_[index];
-
-                    const double normalizedX =
-                        static_cast<double>(index) / divisor;
-
-                    const double x =
-                        static_cast<double>(plotRect.left()) +
-                        normalizedX *
-                            static_cast<double>(plotRect.width());
-
-                    const double traceY =
-                        static_cast<double>(plotRect.bottom()) -
-                        std::clamp(
-                            sample.traceMs / maximumTraceMs,
-                            0.0,
-                            1.0) *
-                            static_cast<double>(plotRect.height());
-
-                    const double megaPixelY =
-                        static_cast<double>(plotRect.bottom()) -
-                        std::clamp(
-                            sample.megaPixels / maximumMegaPixels,
-                            0.0,
-                            1.0) *
-                            static_cast<double>(plotRect.height());
-
-                    tracePolyline.append(QPointF(x, traceY));
-                    megaPixelPolyline.append(QPointF(x, megaPixelY));
-                }
-
-                QPen tracePen(QColor(245, 245, 245));
-                tracePen.setWidth(2);
-                painter.setPen(tracePen);
-                painter.drawPolyline(tracePolyline);
-
-                QPen megaPixelPen(QColor(75, 190, 220));
-                megaPixelPen.setWidth(1);
-                painter.setPen(megaPixelPen);
-                painter.drawPolyline(megaPixelPolyline);
-            }
-
-            painter.setPen(QColor(210, 210, 210));
-            painter.drawText(
-                QRect(
-                    plotRect.left(),
-                    plotRect.bottom() + 3,
-                    plotRect.width(),
-                    graphMarginBottom - 3),
-                Qt::AlignLeft | Qt::AlignVCenter,
-                QStringLiteral("white = Trace ms"));
-            painter.setPen(QColor(75, 190, 220));
-            painter.drawText(
-                QRect(
-                    plotRect.left(),
-                    plotRect.bottom() + 3,
-                    plotRect.width(),
-                    graphMarginBottom - 3),
-                Qt::AlignRight | Qt::AlignVCenter,
-                QStringLiteral("cyan = MPixels"));
-        }
-
-        y += detailTextHeight + 8;
+        detailText =
+            QStringLiteral("PINNED SNAPSHOT - click another bar to replace\n\n") +
+            rowDetails(
+                pinnedSnapshot_,
+                pinnedRowIndex_);
     }
 
+    painter.drawText(
+        detailRect.adjusted(10, 8, -10, -8),
+        Qt::AlignLeft | Qt::AlignTop,
+        detailText);
 }
 
 void PerformanceWidget::mouseMoveEvent(
     QMouseEvent* event)
 {
-    constexpr int barHeight = 18;
-    constexpr int spacing = 12;
-    constexpr int margin = 12;
+    const int rowIndex =
+        rowAtPosition(
+            event->position().toPoint());
 
-    constexpr int scaleHeight =
-        barHeight + 6;
-
-    const int firstBarY =
-        margin +
-        scaleHeight;
-
-    const int relativeY =
-        event->position().toPoint().y() -
-        firstBarY;
-
-    if (relativeY < 0)
+    if (rowIndex < 0)
     {
         QToolTip::hideText();
         return;
     }
 
-    const int rowHeight =
-        barHeight +
-        spacing;
+    const QString detail =
+        rowDetails(
+            snapshot_,
+            rowIndex);
 
-    const int index =
-        relativeY /
-        rowHeight;
-
-    const auto bars =
-        makeBars(
-            snapshot_);
-
-    if (index < 0 ||
-        index >= static_cast<int>(
-            bars.size()) ||
-        (relativeY % rowHeight) >=
-            barHeight)
+    if (detail.isEmpty())
     {
         QToolTip::hideText();
         return;
-    }
-
-    const Bar& bar =
-        bars[index];
-
-    QString valueText;
-
-    if (bar.type == BarType::FieldTiming)
-    {
-        const double field1PresentMs =
-            snapshot_.field1Present.latestMs();
-
-        const double field2PresentMs =
-            snapshot_.field2Present.latestMs();
-
-        const double presentIntervalMs =
-            snapshot_.presentInterval.latestMs();
-
-        const double field1DeltaMs =
-            field1PresentMs - 40.0;
-
-        const double field2DeltaMs =
-            field2PresentMs - 60.0;
-
-        const bool field1InRange =
-            std::abs(field1DeltaMs) <= 2.0;
-
-        const bool field2InRange =
-            std::abs(field2DeltaMs) <= 2.0;
-
-        valueText =
-            QString(
-                "Field 1 present: %1ms\n"
-                "Target: 40ms   Delta: %2%3ms   %4\n\n"
-                "Field 2 present: %5ms\n"
-                "Target: 60ms   Delta: %6%7ms   %8\n\n"
-                "F1 -> F2 interval: %9ms")
-            .arg(
-                field1PresentMs,
-                0,
-                'f',
-                2)
-            .arg(
-                field1DeltaMs >= 0.0
-                ? "+"
-                : "")
-            .arg(
-                field1DeltaMs,
-                0,
-                'f',
-                2)
-            .arg(
-                field1InRange
-                ? "OK"
-                : "OUT")
-            .arg(
-                field2PresentMs,
-                0,
-                'f',
-                2)
-            .arg(
-                field2DeltaMs >= 0.0
-                ? "+"
-                : "")
-            .arg(
-                field2DeltaMs,
-                0,
-                'f',
-                2)
-            .arg(
-                field2InRange
-                ? "OK"
-                : "OUT")
-            .arg(
-                presentIntervalMs,
-                0,
-                'f',
-                2);
-    }
-    else if (bar.type == BarType::Field1Ready ||
-        bar.type == BarType::Field2Ready)
-    {
-        const double readyMs =
-            bar.metric->latestMs();
-
-        const double noiseMs =
-            snapshot_.noiseReduction.latestMs();
-
-        const double deinterlaceMs =
-            snapshot_.deinterlace.latestMs();
-
-        const double firstConvertMs =
-            snapshot_.displayFirst.latestMs();
-
-        const double secondConvertMs =
-            bar.type == BarType::Field2Ready
-            ? snapshot_.displaySecond.latestMs()
-            : 0.0;
-
-        const double convertMs =
-            firstConvertMs +
-            secondConvertMs;
-
-        const double firstSpoutMs =
-            snapshot_.spoutConvertFirst.latestMs();
-
-        const double secondSpoutMs =
-            bar.type == BarType::Field2Ready
-            ? snapshot_.spoutConvertSecond.latestMs()
-            : 0.0;
-
-        const double spoutMs =
-            firstSpoutMs +
-            secondSpoutMs;
-
-        const double overheadMs =
-            std::max(
-                readyMs -
-                noiseMs -
-                deinterlaceMs -
-                convertMs -
-                spoutMs,
-                0.0);
-
-        const double deadlineMs =
-            bar.type == BarType::Field1Ready
-            ? 40.0
-            : 60.0;
-
-        const double marginMs =
-            deadlineMs -
-            readyMs;
-
-        valueText =
-            QString(
-                "%1: %2ms\n"
-                "N  Noise reduction: %3ms\n"
-                "D  Deinterlace: %4ms\n"
-                "%7  Convert: %5ms\n"
-                "%8  Spout RGB: %9ms\n"
-                "O  Other / overhead: %6ms")
-            .arg(
-                bar.type == BarType::Field1Ready
-                ? "Field 1 ready"
-                : "Field 2 ready")
-            .arg(
-                readyMs,
-                0,
-                'f',
-                2)
-            .arg(
-                noiseMs,
-                0,
-                'f',
-                2)
-            .arg(
-                deinterlaceMs,
-                0,
-                'f',
-                2)
-            .arg(
-                convertMs,
-                0,
-                'f',
-                2)
-            .arg(
-                overheadMs,
-                0,
-                'f',
-                2)
-            .arg(
-                bar.type == BarType::Field1Ready
-                    ? "C1"
-                    : "C1+C2")
-            .arg(
-                bar.type == BarType::Field1Ready
-                    ? "S1"
-                    : "S1+S2")
-            .arg(
-                spoutMs,
-                0,
-                'f',
-                2);
-
-        if (bar.type == BarType::Field2Ready)
-        {
-            valueText +=
-                QString(
-                    "\n   Field 1 convert: %1ms"
-                    "\n   Field 2 convert: %2ms")
-                .arg(
-                    firstConvertMs,
-                    0,
-                    'f',
-                    2)
-                .arg(
-                    secondConvertMs,
-                    0,
-                    'f',
-                    2);
-        }
-
-        valueText +=
-            QString(
-                "\n\nDeadline: %1ms"
-                "\nMargin: %2%3ms")
-            .arg(
-                deadlineMs,
-                0,
-                'f',
-                0)
-            .arg(
-                marginMs >= 0.0
-                ? "+"
-                : "")
-            .arg(
-                marginMs,
-                0,
-                'f',
-                2);
-    }
-    else if (bar.type == BarType::WaveformWorker)
-    {
-        const auto& timeline = snapshot_.waveformWorkerAssist;
-        double frequencyMs = 0.0;
-        double rasterMs = 0.0;
-        double resolveMs = 0.0;
-        std::uint32_t frequencyJobs = 0;
-        std::uint32_t rasterJobs = 0;
-        std::uint32_t resolveJobs = 0;
-
-        for (std::uint32_t i = 0;
-            i < timeline.count &&
-            i < WaveformAssistTimelineSnapshot::kCapacity;
-            ++i)
-        {
-            const auto& event = timeline.events[i];
-            const char phase = static_cast<char>(event.phase);
-            if (phase == 'F')
-            {
-                frequencyMs += static_cast<double>(event.durationUs) / 1000.0;
-                ++frequencyJobs;
-            }
-            else if (phase == 'R')
-            {
-                rasterMs += static_cast<double>(event.durationUs) / 1000.0;
-                ++rasterJobs;
-            }
-            else if (phase == 'X')
-            {
-                resolveMs += static_cast<double>(event.durationUs) / 1000.0;
-                ++resolveJobs;
-            }
-        }
-
-        valueText =
-            QString(
-                "Waveform worker W0\n"
-                "F frequency comp: %1 ms  (%2 jobs)\n"
-                "R raster: %3 ms  (%4 jobs)\n"
-                "X resolve: %5 ms  (%6 jobs)\n"
-                "Total assist work: %7 ms")
-            .arg(frequencyMs, 0, 'f', 2)
-            .arg(frequencyJobs)
-            .arg(rasterMs, 0, 'f', 2)
-            .arg(rasterJobs)
-            .arg(resolveMs, 0, 'f', 2)
-            .arg(resolveJobs)
-            .arg(frequencyMs + rasterMs + resolveMs, 0, 'f', 2);
-    }
-    else if (bar.type == BarType::Worker0 ||
-        bar.type == BarType::Worker1)
-    {
-        const bool firstWorker =
-            bar.type == BarType::Worker0;
-
-        const auto& n = firstWorker ? snapshot_.displayWorker0Noise : snapshot_.displayWorker1Noise;
-        const auto& d = firstWorker ? snapshot_.displayWorker0Deinterlace : snapshot_.displayWorker1Deinterlace;
-        const auto& c1 = firstWorker ? snapshot_.displayWorker0Convert1 : snapshot_.displayWorker1Convert1;
-        const auto& s1 = firstWorker ? snapshot_.displayWorker0Spout1 : snapshot_.displayWorker1Spout1;
-        const auto& c2 = firstWorker ? snapshot_.displayWorker0Convert2 : snapshot_.displayWorker1Convert2;
-        const auto& s2 = firstWorker ? snapshot_.displayWorker0Spout2 : snapshot_.displayWorker1Spout2;
-
-        const double totalMs =
-            n.latestMs() + d.latestMs() + c1.latestMs() +
-            s1.latestMs() + c2.latestMs() + s2.latestMs();
-
-        const auto& assistTimeline =
-            firstWorker
-                ? snapshot_.displayWorker0Assist
-                : snapshot_.displayWorker1Assist;
-
-        double frequencyAssistMs = 0.0;
-        double rasterAssistMs = 0.0;
-        double resolveAssistMs = 0.0;
-        std::uint32_t frequencyAssistJobs = 0;
-        std::uint32_t rasterAssistJobs = 0;
-        std::uint32_t resolveAssistJobs = 0;
-        for (std::uint32_t i = 0;
-            i < assistTimeline.count &&
-            i < WaveformAssistTimelineSnapshot::kCapacity;
-            ++i)
-        {
-            const auto& event = assistTimeline.events[i];
-            const char phase = static_cast<char>(event.phase);
-            if (phase == 'F')
-            {
-                frequencyAssistMs += static_cast<double>(event.durationUs) / 1000.0;
-                ++frequencyAssistJobs;
-            }
-            else if (phase == 'R')
-            {
-                rasterAssistMs += static_cast<double>(event.durationUs) / 1000.0;
-                ++rasterAssistJobs;
-            }
-            else if (phase == 'X')
-            {
-                resolveAssistMs += static_cast<double>(event.durationUs) / 1000.0;
-                ++resolveAssistJobs;
-            }
-        }
-
-        valueText =
-            QString(
-                "Display worker %1: %2ms\n"
-                "N   Noise: %3ms\n"
-                "D   Deinterlace: %4ms\n"
-                "C1  Field 1 RGB: %5ms\n"
-                "S1  Field 1 Spout RGB: %6ms\n"
-                "C2  Field 2 RGB: %7ms\n"
-                "S2  Field 2 Spout RGB: %8ms\n"
-                "Assist F: %9 ms (%10 jobs)\n"
-                "Assist R: %11 ms (%12 jobs)\n"
-                "Assist X: %13 ms (%14 jobs)\n"
-                "Assist total: %15 ms")
-            .arg(firstWorker ? 1 : 2)
-            .arg(totalMs, 0, 'f', 2)
-            .arg(n.latestMs(), 0, 'f', 2)
-            .arg(d.latestMs(), 0, 'f', 2)
-            .arg(c1.latestMs(), 0, 'f', 2)
-            .arg(s1.latestMs(), 0, 'f', 2)
-            .arg(c2.latestMs(), 0, 'f', 2)
-            .arg(s2.latestMs(), 0, 'f', 2)
-            .arg(frequencyAssistMs, 0, 'f', 2)
-            .arg(frequencyAssistJobs)
-            .arg(rasterAssistMs, 0, 'f', 2)
-            .arg(rasterAssistJobs)
-            .arg(resolveAssistMs, 0, 'f', 2)
-            .arg(resolveAssistJobs)
-            .arg(frequencyAssistMs + rasterAssistMs + resolveAssistMs, 0, 'f', 2);
-    }
-    else
-    {
-        const QString label =
-            QString::fromLatin1(
-                bar.label);
-
-        const auto makeWaveformDetails =
-            [&](
-                const PerformanceMetricSnapshot& persistence,
-                const PerformanceMetricSnapshot& trace,
-                const PerformanceMetricSnapshot& compose,
-                const PerformanceMetricSnapshot& glow,
-                const PerformanceMetricSnapshot& overlay,
-                const GlowWorkloadSnapshot& workload,
-                bool traceParallel)
-            {
-                const double measuredMs =
-                    persistence.latestMs() +
-                    trace.latestMs() +
-                    compose.latestMs() +
-                    glow.latestMs() +
-                    overlay.latestMs();
-
-                const double otherMs =
-                    std::max(
-                        bar.metric->latestMs() - measuredMs,
-                        0.0);
-
-                const double coverage =
-                    workload.totalTiles > 0
-                    ? 100.0 *
-                        static_cast<double>(workload.dirtyTiles) /
-                        static_cast<double>(workload.totalTiles)
-                    : 0.0;
-
-                return QString(
-                    "%1: %2ms\n"
-                    "Clear / persistence: %3ms\n"
-                    "Trace / preparation: %4ms (%23)\n"
-                    "Compose: %5ms\n"
-                    "Glow: %6ms\n"
-                    "Graticule / overlay: %7ms\n"
-                    "Other / timing overhead: %8ms\n"
-                    "Source dirty: %9 / %10 (%11%)\n"
-                    "Blur tiles H1/V1/H2/V2: %12 / %13 / %14 / %15\n"
-                    "Processed visits: %16 / %17 (%18%)\n"
-                    "Active bbox: %19,%20  %21x%22 px")
-                    .arg(label)
-                    .arg(bar.metric->latestMs(), 0, 'f', 2)
-                    .arg(persistence.latestMs(), 0, 'f', 2)
-                    .arg(trace.latestMs(), 0, 'f', 2)
-                    .arg(compose.latestMs(), 0, 'f', 2)
-                    .arg(glow.latestMs(), 0, 'f', 2)
-                    .arg(overlay.latestMs(), 0, 'f', 2)
-                    .arg(otherMs, 0, 'f', 2)
-                    .arg(workload.dirtyTiles)
-                    .arg(workload.totalTiles)
-                    .arg(coverage, 0, 'f', 1)
-                    .arg(workload.horizontalPass1Tiles)
-                    .arg(workload.verticalPass1Tiles)
-                    .arg(workload.horizontalPass2Tiles)
-                    .arg(workload.verticalPass2Tiles)
-                    .arg(
-                        workload.horizontalPass1Tiles +
-                        workload.verticalPass1Tiles +
-                        workload.horizontalPass2Tiles +
-                        workload.verticalPass2Tiles)
-                    .arg(workload.totalTiles * 4u)
-                    .arg(
-                        workload.totalTiles > 0
-                        ? 25.0 * static_cast<double>(
-                            workload.horizontalPass1Tiles +
-                            workload.verticalPass1Tiles +
-                            workload.horizontalPass2Tiles +
-                            workload.verticalPass2Tiles) /
-                            static_cast<double>(workload.totalTiles)
-                        : 0.0,
-                        0, 'f', 1)
-                    .arg(workload.activeX)
-                    .arg(workload.activeY)
-                    .arg(workload.activeWidth)
-                    .arg(workload.activeHeight)
-                    .arg(traceParallel
-                        ? QStringLiteral("parallel")
-                        : QStringLiteral("scalar"));
-            };
-
-        const auto makeVectorscopeDetails =
-            [&](
-                const PerformanceMetricSnapshot& analyzer,
-                const PerformanceMetricSnapshot& glowPersistence,
-                const PerformanceMetricSnapshot& compose,
-                const PerformanceMetricSnapshot& overlay,
-                const GlowWorkloadSnapshot& workload)
-            {
-                const double measuredMs =
-                    analyzer.latestMs() +
-                    glowPersistence.latestMs() +
-                    compose.latestMs() +
-                    overlay.latestMs();
-
-                const double otherMs =
-                    std::max(
-                        bar.metric->latestMs() - measuredMs,
-                        0.0);
-
-                const double coverage =
-                    workload.totalTiles > 0
-                    ? 100.0 *
-                        static_cast<double>(workload.dirtyTiles) /
-                        static_cast<double>(workload.totalTiles)
-                    : 0.0;
-
-                return QString(
-                    "%1: %2ms\n"
-                    "Density / trace: %3ms\n"
-                    "Glow / persistence: %4ms\n"
-                    "Compose: %5ms\n"
-                    "Graticule / overlay: %6ms\n"
-                    "Other / renderer setup: %7ms\n"
-                    "Source dirty: %8 / %9 (%10%)\n"
-                    "Blur tiles H1/V1/H2/V2: %11 / %12 / %13 / %14\n"
-                    "Processed visits: %15 / %16 (%17%)\n"
-                    "Active bbox: %18,%19  %20x%21 px")
-                    .arg(label)
-                    .arg(bar.metric->latestMs(), 0, 'f', 2)
-                    .arg(analyzer.latestMs(), 0, 'f', 2)
-                    .arg(glowPersistence.latestMs(), 0, 'f', 2)
-                    .arg(compose.latestMs(), 0, 'f', 2)
-                    .arg(overlay.latestMs(), 0, 'f', 2)
-                    .arg(otherMs, 0, 'f', 2)
-                    .arg(workload.dirtyTiles)
-                    .arg(workload.totalTiles)
-                    .arg(coverage, 0, 'f', 1)
-                    .arg(workload.horizontalPass1Tiles)
-                    .arg(workload.verticalPass1Tiles)
-                    .arg(workload.horizontalPass2Tiles)
-                    .arg(workload.verticalPass2Tiles)
-                    .arg(
-                        workload.horizontalPass1Tiles +
-                        workload.verticalPass1Tiles +
-                        workload.horizontalPass2Tiles +
-                        workload.verticalPass2Tiles)
-                    .arg(workload.totalTiles * 4u)
-                    .arg(
-                        workload.totalTiles > 0
-                        ? 25.0 * static_cast<double>(
-                            workload.horizontalPass1Tiles +
-                            workload.verticalPass1Tiles +
-                            workload.horizontalPass2Tiles +
-                            workload.verticalPass2Tiles) /
-                            static_cast<double>(workload.totalTiles)
-                        : 0.0,
-                        0, 'f', 1)
-                    .arg(workload.activeX)
-                    .arg(workload.activeY)
-                    .arg(workload.activeWidth)
-                    .arg(workload.activeHeight);
-            };
-
-        if (bar.detail == DetailKind::WaveformScreen)
-        {
-            valueText = makeWaveformDetails(
-                snapshot_.waveformScreenPersistence,
-                snapshot_.waveformScreenTrace,
-                snapshot_.waveformScreenCompose,
-                snapshot_.waveformScreenGlow,
-                snapshot_.waveformScreenOverlay,
-                snapshot_.waveformScreenGlowWorkload,
-                snapshot_.waveformScreenTraceParallel);
-        }
-        else if (bar.detail == DetailKind::WaveformVideo)
-        {
-            valueText = makeWaveformDetails(
-                snapshot_.waveformVideoPersistence,
-                snapshot_.waveformVideoTrace,
-                snapshot_.waveformVideoCompose,
-                snapshot_.waveformVideoGlow,
-                snapshot_.waveformVideoOverlay,
-                snapshot_.waveformVideoGlowWorkload,
-                false);
-        }
-        else if (bar.detail == DetailKind::VectorscopeScreen)
-        {
-            valueText = makeVectorscopeDetails(
-                snapshot_.vectorscopeScreenAnalyzer,
-                snapshot_.vectorscopeScreenGlowPersistence,
-                snapshot_.vectorscopeScreenCompose,
-                snapshot_.vectorscopeScreenOverlay,
-                snapshot_.vectorscopeScreenGlowWorkload);
-        }
-        else if (bar.detail == DetailKind::VectorscopeVideo)
-        {
-            valueText = makeVectorscopeDetails(
-                snapshot_.vectorscopeVideoAnalyzer,
-                snapshot_.vectorscopeVideoGlowPersistence,
-                snapshot_.vectorscopeVideoCompose,
-                snapshot_.vectorscopeVideoOverlay,
-                snapshot_.vectorscopeVideoGlowWorkload);
-        }
-        else
-        {
-            valueText =
-                QString("%1: %2ms")
-                .arg(label)
-                .arg(
-                    bar.metric->latestMs(),
-                    0,
-                    'f',
-                    2);
-        }
     }
 
     QToolTip::showText(
         event->globalPosition().toPoint(),
-        valueText,
+        detail,
         this);
 }
-
 
 void PerformanceWidget::mousePressEvent(
     QMouseEvent* event)
 {
+    const QPoint position =
+        event->position().toPoint();
+
+    if (event->button() == Qt::RightButton)
+    {
+        const int rowIndex =
+            rowAtPosition(position);
+
+        if (rowIndex < 0)
+        {
+            QWidget::mousePressEvent(event);
+            return;
+        }
+
+        const QFontMetrics fontMetrics(font());
+
+        int labelWidth = 0;
+
+        for (const Row& row : kRows)
+        {
+            labelWidth =
+                std::max(
+                    labelWidth,
+                    fontMetrics.horizontalAdvance(
+                        QString::fromLatin1(
+                            row.label)));
+        }
+
+        labelWidth += 18;
+
+        const int barLeft =
+            kMargin + labelWidth;
+
+        const int barWidth =
+            std::max(
+                width() -
+                    barLeft -
+                    kMargin,
+                1);
+
+        if (position.x() < barLeft ||
+            position.x() > barLeft + barWidth)
+        {
+            QWidget::mousePressEvent(event);
+            return;
+        }
+
+        const double fraction =
+            std::clamp(
+                static_cast<double>(
+                    position.x() - barLeft) /
+                static_cast<double>(
+                    barWidth),
+                0.0,
+                1.0);
+
+        autoPauseThresholdUs_ =
+            timelineStartUs_ +
+            fraction *
+                timelineSpanUs_;
+
+        autoPauseArmed_ = true;
+
+        if (paused_)
+        {
+            paused_ = false;
+
+            if (pauseButton_ != nullptr)
+            {
+                pauseButton_->setChecked(false);
+                pauseButton_->setText(
+                    QStringLiteral("Pause"));
+            }
+        }
+
+        update();
+        event->accept();
+        return;
+    }
+
     if (event->button() != Qt::LeftButton)
     {
         QWidget::mousePressEvent(event);
         return;
     }
 
-    constexpr int barHeight = 18;
-    constexpr int spacing = 12;
-    constexpr int margin = 12;
-    constexpr int scaleHeight = barHeight + 6;
+    const int rowIndex =
+        rowAtPosition(position);
 
-    const int firstBarY = margin + scaleHeight;
-    const int relativeY =
-        event->position().toPoint().y() - firstBarY;
-
-    if (relativeY >= 0)
+    if (rowIndex < 0)
     {
-        const int rowHeight = barHeight + spacing;
-        const int index = relativeY / rowHeight;
-        const auto bars = makeBars(snapshot_);
-
-        if (index >= 0 &&
-            index < static_cast<int>(bars.size()) &&
-            (relativeY % rowHeight) < barHeight &&
-            bars[index].detail != DetailKind::None)
-        {
-            pinnedDetailBarIndex_ = index;
-            update();
-            event->accept();
-            return;
-        }
+        QWidget::mousePressEvent(event);
+        return;
     }
 
-    QWidget::mousePressEvent(event);
+    pinnedSnapshot_ = snapshot_;
+    pinnedRowIndex_ = rowIndex;
+    hasPinnedSnapshot_ = true;
+
+    update();
+    event->accept();
+}
+
+void PerformanceWidget::resizeEvent(
+    QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    layoutTimelineControls();
 }
 
 void PerformanceWidget::closeEvent(
     QCloseEvent* event)
 {
-    emit visibilityChanged(
-        false);
-
-    QWidget::closeEvent(
-        event);
+    emit visibilityChanged(false);
+    QWidget::closeEvent(event);
 }
 
 QSize PerformanceWidget::sizeHint() const
 {
-    constexpr int barHeight = 18;
-    constexpr int spacing = 12;
-    constexpr int margin = 12;
-
-    constexpr int scaleHeight =
-        barHeight + 6;
-
-    const auto bars =
-        makeBars(
-            snapshot_);
-
-    const int barCount =
-        static_cast<int>(
-            bars.size());
-
-    const int height =
-        margin +
-        scaleHeight +
-        barCount * barHeight +
-        (barCount - 1) * spacing +
-        barHeight +
-        spacing +
-        margin;
+    const int rowsHeight =
+        static_cast<int>(kRows.size()) *
+            (kBarHeight + kRowSpacing);
 
     return QSize(
-        700,
-        height + 330);
+        1180,
+        kMargin +
+            kToolbarHeight +
+            kScaleHeight +
+            kTimelineScrollHeight +
+            4 +
+            rowsHeight +
+            2 * kBarHeight +
+            300);
 }

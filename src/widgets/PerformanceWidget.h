@@ -1,12 +1,18 @@
 #pragma once
 
-#include <deque>
-
 #include <QWidget>
+
+#include <cstdint>
 
 #include "util/PerformanceStats.h"
 
 class QCloseEvent;
+class QMouseEvent;
+class QPaintEvent;
+class QPushButton;
+class QResizeEvent;
+class QScrollBar;
+class QSlider;
 
 class PerformanceWidget : public QWidget
 {
@@ -18,6 +24,7 @@ public:
 
     void setPerformanceSnapshot(
         const PerformanceSnapshot& snapshot);
+
     QSize sizeHint() const override;
 
 signals:
@@ -27,22 +34,35 @@ signals:
 protected:
     void paintEvent(
         QPaintEvent* event) override;
+
     void mouseMoveEvent(
         QMouseEvent* event) override;
+
     void mousePressEvent(
         QMouseEvent* event) override;
+
+    void resizeEvent(
+        QResizeEvent* event) override;
+
     void closeEvent(
         QCloseEvent* event) override;
 
 private:
-    struct TraceHistorySample
-    {
-        double traceMs = 0.0;
-        double megaPixels = 0.0;
-        bool parallel = false;
-    };
+    void updateTimelineControls();
+    void layoutTimelineControls();
 
     PerformanceSnapshot snapshot_;
-    std::deque<TraceHistorySample> traceHistory_;
-    int pinnedDetailBarIndex_ = 4; // PC waveform by default
+    PerformanceSnapshot pinnedSnapshot_;
+    int pinnedRowIndex_ = -1;
+    bool hasPinnedSnapshot_ = false;
+
+    QPushButton* pauseButton_ = nullptr;
+    QSlider* timelineZoomSlider_ = nullptr;
+    QScrollBar* timelineScrollBar_ = nullptr;
+
+    bool paused_ = false;
+    bool autoPauseArmed_ = false;
+    double autoPauseThresholdUs_ = 0.0;
+    double timelineStartUs_ = 0.0;
+    double timelineSpanUs_ = 80000.0;
 };

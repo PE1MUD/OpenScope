@@ -177,6 +177,7 @@ struct WaveformAssistChunkEventSnapshot
     std::uint8_t phase = static_cast<std::uint8_t>('?');
     std::uint32_t startUs = 0;
     std::uint32_t durationUs = 0;
+    std::uint32_t jobIndex = 0;
 };
 
 struct WaveformAssistTimelineSnapshot
@@ -185,6 +186,13 @@ struct WaveformAssistTimelineSnapshot
     std::uint64_t generation = 0;
     std::uint32_t count = 0;
     std::array<WaveformAssistChunkEventSnapshot, kCapacity> events{};
+};
+
+enum class FrequencyCompensationState : std::uint8_t
+{
+    Disabled = 0,
+    NoConsumer = 1,
+    Completed = 2
 };
 
 struct WaveformAssistTimelineStats
@@ -197,6 +205,7 @@ struct WaveformAssistTimelineStats
     std::array<std::atomic<std::uint8_t>, kCapacity> phase{};
     std::array<std::atomic<std::uint32_t>, kCapacity> startUs{};
     std::array<std::atomic<std::uint32_t>, kCapacity> durationUs{};
+    std::array<std::atomic<std::uint32_t>, kCapacity> jobIndex{};
 
     void reset(std::uint64_t newGeneration = 0) noexcept
     {
@@ -207,7 +216,8 @@ struct WaveformAssistTimelineStats
     void append(
         char phaseLabel,
         std::uint32_t start,
-        std::uint32_t duration) noexcept
+        std::uint32_t duration,
+        std::uint32_t chunkIndex = 0u) noexcept
     {
         const std::uint32_t index =
             count.load(std::memory_order_relaxed);
@@ -222,6 +232,7 @@ struct WaveformAssistTimelineStats
             std::memory_order_relaxed);
         startUs[index].store(start, std::memory_order_relaxed);
         durationUs[index].store(duration, std::memory_order_relaxed);
+        jobIndex[index].store(chunkIndex, std::memory_order_relaxed);
         count.store(index + 1u, std::memory_order_release);
     }
 
@@ -243,6 +254,8 @@ struct WaveformAssistTimelineStats
                 startUs[i].load(std::memory_order_relaxed);
             result.events[i].durationUs =
                 durationUs[i].load(std::memory_order_relaxed);
+            result.events[i].jobIndex =
+                jobIndex[i].load(std::memory_order_relaxed);
         }
 
         const std::uint64_t afterGeneration =
@@ -267,9 +280,8 @@ struct WaveformPhaseEventSnapshot
 
 struct WaveformPhaseTimelineSnapshot
 {
-    // PC waveform now also carries post-render V/M/E phases.  Leave enough
-    // headroom for the renderer's measured sub-phases plus those worker-loop
-    // phases without silently dropping the tail of the timeline.
+    // Screen-waveform renderer sub-phases only.  Top-level Screen/Spout/
+    // measurement/publish chronology is kept separately on the worker lane.
     static constexpr std::size_t kCapacity = 24;
     std::uint64_t generation = 0;
     std::uint32_t count = 0;
@@ -349,7 +361,7 @@ struct DisplayPhaseEventSnapshot
 
 struct DisplayPhaseTimelineSnapshot
 {
-    static constexpr std::size_t kCapacity = 16;
+    static constexpr std::size_t kCapacity = 32;
     std::uint64_t generation = 0;
     std::uint32_t count = 0;
     std::array<DisplayPhaseEventSnapshot, kCapacity> events{};
@@ -416,6 +428,55 @@ struct DisplayPhaseTimelineStats
     }
 };
 
+
+struct TimingDiagnosticEventSnapshot
+{
+    std::uint64_t count = 0;
+    std::uint64_t intervalUs = 0;
+    std::uint64_t value = 0;
+};
+
+struct TimingDiagnosticEventStats
+{
+    std::atomic<std::uint64_t> count{ 0 };
+    std::atomic<std::uint64_t> lastTimestampUs{ 0 };
+    std::atomic<std::uint64_t> intervalUs{ 0 };
+    std::atomic<std::uint64_t> value{ 0 };
+
+    void record(
+        std::uint64_t timestampUs,
+        std::uint64_t eventValue = 0) noexcept
+    {
+        const std::uint64_t previous =
+            lastTimestampUs.exchange(
+                timestampUs,
+                std::memory_order_acq_rel);
+
+        if (previous != 0u && timestampUs > previous)
+        {
+            intervalUs.store(
+                timestampUs - previous,
+                std::memory_order_relaxed);
+        }
+
+        value.store(eventValue, std::memory_order_relaxed);
+        count.fetch_add(1u, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] TimingDiagnosticEventSnapshot snapshot() const noexcept
+    {
+        return
+        {
+            count.load(std::memory_order_relaxed),
+            intervalUs.load(std::memory_order_relaxed),
+            value.load(std::memory_order_relaxed)
+        };
+    }
+};
+
+using WorkerPhaseTimelineSnapshot = DisplayPhaseTimelineSnapshot;
+using WorkerPhaseTimelineStats = DisplayPhaseTimelineStats;
+
 struct PerformanceSnapshot
 {
     PerformanceMetricSnapshot reconstruct;
@@ -448,6 +509,9 @@ struct PerformanceSnapshot
     PerformanceMetricSnapshot vectorscopeVideo;
 
     PerformanceMetricSnapshot waveformScreenPersistence;
+    PerformanceMetricSnapshot waveformScreenBaseClear;
+    PerformanceMetricSnapshot waveformScreenGraticule;
+    PerformanceMetricSnapshot waveformScreenPhosphorCompose;
     PerformanceMetricSnapshot waveformScreenTrace;
     PerformanceMetricSnapshot waveformScreenTracePrep;
     PerformanceMetricSnapshot waveformScreenTraceRaster;
@@ -466,8 +530,8 @@ struct PerformanceSnapshot
     std::uint64_t waveformScreenCatWuzleChunkRenderAvgUs = 0;
     std::uint64_t waveformScreenCatWuzleChunkRenderMaxUs = 0;
     std::uint64_t waveformScreenCatWuzleChunkQueueWaitMaxUs = 0;
-    std::array<std::uint32_t, 3> waveformScreenCatWuzleWorkerChunkCount{};
-    std::array<std::uint64_t, 3> waveformScreenCatWuzleWorkerRenderUs{};
+    std::array<std::uint32_t, 4> waveformScreenCatWuzleWorkerChunkCount{};
+    std::array<std::uint64_t, 4> waveformScreenCatWuzleWorkerRenderUs{};
     std::uint64_t waveformScreenAssistTotalUs = 0;
     std::uint64_t waveformScreenAssistFinalWaitStartUs = 0;
     std::uint64_t waveformScreenAssistFinalWaitUs = 0;
@@ -518,6 +582,16 @@ struct PerformanceSnapshot
     std::uint64_t field1DeadlineMisses = 0;
     std::uint64_t field2DeadlineMisses = 0;
 
+    TimingDiagnosticEventSnapshot presenterReanchor;
+    TimingDiagnosticEventSnapshot presenterGenerationSkip;
+    TimingDiagnosticEventSnapshot waveformGenerationSkip;
+    TimingDiagnosticEventSnapshot vectorscopeGenerationSkip;
+
+    FrequencyCompensationState frequencyCompensationState =
+        FrequencyCompensationState::Disabled;
+    std::uint64_t frequencyCompensationCompleteUs = 0;
+    std::array<WaveformAssistTimelineSnapshot, 2> frequencyWorkerPhases{};
+
     PerformanceMetricSnapshot displayAllocation;
     PerformanceMetricSnapshot displaySetup;
     PerformanceMetricSnapshot displayCompose;
@@ -525,13 +599,25 @@ struct PerformanceSnapshot
     PerformanceMetricSnapshot displayColorConversion;
     PerformanceMetricSnapshot displayOutput;
 
+    WorkerPhaseTimelineSnapshot waveformWorkerPhases;
+    WorkerPhaseTimelineSnapshot vectorscopeWorkerPhases;
+
     WaveformAssistTimelineSnapshot waveformWorkerAssist;
     WaveformAssistTimelineSnapshot displayWorker0Assist;
     WaveformAssistTimelineSnapshot displayWorker1Assist;
+    WaveformAssistTimelineSnapshot vectorscopeWorkerAssist;
     WaveformPhaseTimelineSnapshot waveformScreenPhases;
     DisplayPhaseTimelineSnapshot displayFieldPhases;
     DisplayPhaseTimelineSnapshot displayWorker0Phases;
     DisplayPhaseTimelineSnapshot displayWorker1Phases;
+
+    // Priority ownership is sampled from the central mask-transition log at
+    // snapshot time.  Keep this separate from worker work timelines: ownership
+    // can change after a worker has published its own completed phase snapshot.
+    WorkerPhaseTimelineSnapshot priorityVideo1;
+    WorkerPhaseTimelineSnapshot priorityVideo2;
+    WorkerPhaseTimelineSnapshot priorityWaveform;
+    WorkerPhaseTimelineSnapshot priorityVectorscope;
 };
 
 struct PerformanceStats
@@ -557,8 +643,12 @@ struct PerformanceStats
     PerformanceMetric displayWorker1Convert2;
     PerformanceMetric displayWorker1Spout2;
 
+    WorkerPhaseTimelineStats waveformWorkerPhaseTimeline;
+    WorkerPhaseTimelineStats vectorscopeWorkerPhaseTimeline;
+
     WaveformAssistTimelineStats waveformWorkerAssistTimeline;
     std::array<WaveformAssistTimelineStats, 2> displayWorkerAssistTimeline;
+    WaveformAssistTimelineStats vectorscopeWorkerAssistTimeline;
     WaveformPhaseTimelineStats waveformScreenPhaseTimeline;
 
     // The three assist timelines and the waveform phase timeline are written
@@ -566,10 +656,35 @@ struct PerformanceStats
     // Performance floaty must never observe a half-written generation, so
     // publish one coherent completed set only after the waveform render ends.
     mutable std::mutex waveformDiagnosticPublishMutex;
+    WorkerPhaseTimelineSnapshot publishedWaveformWorkerPhases;
     WaveformAssistTimelineSnapshot publishedWaveformWorkerAssist;
     WaveformAssistTimelineSnapshot publishedDisplayWorker0Assist;
     WaveformAssistTimelineSnapshot publishedDisplayWorker1Assist;
+    WaveformAssistTimelineSnapshot publishedVectorscopeWorkerAssist;
     WaveformPhaseTimelineSnapshot publishedWaveformScreenPhases;
+
+    mutable std::mutex vectorscopeDiagnosticPublishMutex;
+    WorkerPhaseTimelineSnapshot publishedVectorscopeWorkerPhases;
+
+    mutable std::mutex frequencyDiagnosticPublishMutex;
+    FrequencyCompensationState publishedFrequencyCompensationState =
+        FrequencyCompensationState::Disabled;
+    std::uint64_t publishedFrequencyCompensationCompleteUs = 0;
+    std::array<WaveformAssistTimelineSnapshot, 2>
+        publishedFrequencyWorkerPhases{};
+
+    void publishFrequencyDiagnostics(
+        FrequencyCompensationState state,
+        std::uint64_t completeUs,
+        const std::array<WaveformAssistTimelineSnapshot, 2>& workers) noexcept
+    {
+        std::lock_guard<std::mutex> lock(
+            frequencyDiagnosticPublishMutex);
+
+        publishedFrequencyCompensationState = state;
+        publishedFrequencyCompensationCompleteUs = completeUs;
+        publishedFrequencyWorkerPhases = workers;
+    }
 
     DisplayPhaseTimelineStats displayFieldPhaseTimeline;
     std::array<DisplayPhaseTimelineStats, 2> displayWorkerPhaseTimeline;
@@ -598,19 +713,25 @@ struct PerformanceStats
 
     void publishWaveformDiagnosticTimelines() noexcept
     {
+        const WorkerPhaseTimelineSnapshot workerPhases =
+            waveformWorkerPhaseTimeline.snapshot();
         const WaveformAssistTimelineSnapshot waveformWorker =
             waveformWorkerAssistTimeline.snapshot();
         const WaveformAssistTimelineSnapshot displayWorker0 =
             displayWorkerAssistTimeline[0].snapshot();
         const WaveformAssistTimelineSnapshot displayWorker1 =
             displayWorkerAssistTimeline[1].snapshot();
+        const WaveformAssistTimelineSnapshot vectorscopeWorker =
+            vectorscopeWorkerAssistTimeline.snapshot();
         const WaveformPhaseTimelineSnapshot phases =
             waveformScreenPhaseTimeline.snapshot();
 
         std::lock_guard<std::mutex> lock(waveformDiagnosticPublishMutex);
+        publishedWaveformWorkerPhases = workerPhases;
         publishedWaveformWorkerAssist = waveformWorker;
         publishedDisplayWorker0Assist = displayWorker0;
         publishedDisplayWorker1Assist = displayWorker1;
+        publishedVectorscopeWorkerAssist = vectorscopeWorker;
         publishedWaveformScreenPhases = phases;
     }
 
@@ -620,7 +741,23 @@ struct PerformanceStats
         publishedWaveformWorkerAssist = {};
         publishedDisplayWorker0Assist = {};
         publishedDisplayWorker1Assist = {};
+        publishedVectorscopeWorkerAssist = {};
         publishedWaveformScreenPhases = {};
+    }
+
+    void clearPublishedVectorscopeDiagnosticTimeline() noexcept
+    {
+        std::lock_guard<std::mutex> lock(vectorscopeDiagnosticPublishMutex);
+        publishedVectorscopeWorkerPhases = {};
+    }
+
+    void publishVectorscopeDiagnosticTimeline() noexcept
+    {
+        const WorkerPhaseTimelineSnapshot phases =
+            vectorscopeWorkerPhaseTimeline.snapshot();
+
+        std::lock_guard<std::mutex> lock(vectorscopeDiagnosticPublishMutex);
+        publishedVectorscopeWorkerPhases = phases;
     }
 
     PerformanceMetric videoScreen;
@@ -630,6 +767,9 @@ struct PerformanceStats
     PerformanceMetric vectorscopeVideo;
 
     PerformanceMetric waveformScreenPersistence;
+    PerformanceMetric waveformScreenBaseClear;
+    PerformanceMetric waveformScreenGraticule;
+    PerformanceMetric waveformScreenPhosphorCompose;
     PerformanceMetric waveformScreenTrace;
     PerformanceMetric waveformScreenTracePrep;
     PerformanceMetric waveformScreenTraceRaster;
@@ -648,8 +788,8 @@ struct PerformanceStats
     std::atomic<std::uint64_t> waveformScreenCatWuzleChunkRenderAvgUs{ 0 };
     std::atomic<std::uint64_t> waveformScreenCatWuzleChunkRenderMaxUs{ 0 };
     std::atomic<std::uint64_t> waveformScreenCatWuzleChunkQueueWaitMaxUs{ 0 };
-    std::array<std::atomic<std::uint32_t>, 3> waveformScreenCatWuzleWorkerChunkCount{};
-    std::array<std::atomic<std::uint64_t>, 3> waveformScreenCatWuzleWorkerRenderUs{};
+    std::array<std::atomic<std::uint32_t>, 4> waveformScreenCatWuzleWorkerChunkCount{};
+    std::array<std::atomic<std::uint64_t>, 4> waveformScreenCatWuzleWorkerRenderUs{};
     std::atomic<std::uint64_t> waveformScreenAssistTotalUs{ 0 };
     std::atomic<std::uint64_t> waveformScreenAssistFinalWaitStartUs{ 0 };
     std::atomic<std::uint64_t> waveformScreenAssistFinalWaitUs{ 0 };
@@ -700,6 +840,11 @@ struct PerformanceStats
     std::atomic<std::uint64_t> field1DeadlineMisses{ 0 };
     std::atomic<std::uint64_t> field2DeadlineMisses{ 0 };
 
+    TimingDiagnosticEventStats presenterReanchor;
+    TimingDiagnosticEventStats presenterGenerationSkip;
+    TimingDiagnosticEventStats waveformGenerationSkip;
+    TimingDiagnosticEventStats vectorscopeGenerationSkip;
+
     PerformanceMetric displayAllocation;
     PerformanceMetric displaySetup;
     PerformanceMetric displayCompose;
@@ -709,9 +854,12 @@ struct PerformanceStats
 
     PerformanceSnapshot snapshot() const
     {
+        WorkerPhaseTimelineSnapshot publishedWaveformWorkerPhaseSnapshot;
+        WorkerPhaseTimelineSnapshot publishedVectorscopeWorkerPhaseSnapshot;
         WaveformAssistTimelineSnapshot publishedWaveformWorker;
         WaveformAssistTimelineSnapshot publishedDisplayWorker0;
         WaveformAssistTimelineSnapshot publishedDisplayWorker1;
+        WaveformAssistTimelineSnapshot publishedVectorscopeWorkerAssistSnapshot;
         WaveformPhaseTimelineSnapshot publishedWaveformPhases;
         DisplayPhaseTimelineSnapshot publishedDisplayField;
         DisplayPhaseTimelineSnapshot publishedDisplayWorker0Phase;
@@ -719,12 +867,34 @@ struct PerformanceStats
         DisplayPhaseTimelineSnapshot previousDisplayField;
         DisplayPhaseTimelineSnapshot previousDisplayWorker0Phase;
         DisplayPhaseTimelineSnapshot previousDisplayWorker1Phase;
+        FrequencyCompensationState publishedFrequencyState =
+            FrequencyCompensationState::Disabled;
+        std::uint64_t publishedFrequencyCompleteUs = 0;
+        std::array<WaveformAssistTimelineSnapshot, 2>
+            publishedFrequencyWorkers{};
         {
             std::lock_guard<std::mutex> lock(waveformDiagnosticPublishMutex);
+            publishedWaveformWorkerPhaseSnapshot = publishedWaveformWorkerPhases;
             publishedWaveformWorker = publishedWaveformWorkerAssist;
             publishedDisplayWorker0 = publishedDisplayWorker0Assist;
             publishedDisplayWorker1 = publishedDisplayWorker1Assist;
+            publishedVectorscopeWorkerAssistSnapshot = publishedVectorscopeWorkerAssist;
             publishedWaveformPhases = publishedWaveformScreenPhases;
+        }
+        {
+            std::lock_guard<std::mutex> lock(vectorscopeDiagnosticPublishMutex);
+            publishedVectorscopeWorkerPhaseSnapshot =
+                publishedVectorscopeWorkerPhases;
+        }
+        {
+            std::lock_guard<std::mutex> lock(
+                frequencyDiagnosticPublishMutex);
+            publishedFrequencyState =
+                publishedFrequencyCompensationState;
+            publishedFrequencyCompleteUs =
+                publishedFrequencyCompensationCompleteUs;
+            publishedFrequencyWorkers =
+                publishedFrequencyWorkerPhases;
         }
         {
             std::lock_guard<std::mutex> lock(displayDiagnosticPublishMutex);
@@ -782,6 +952,9 @@ struct PerformanceStats
             vectorscopeVideo.snapshot(),
 
             waveformScreenPersistence.snapshot(),
+            waveformScreenBaseClear.snapshot(),
+            waveformScreenGraticule.snapshot(),
+            waveformScreenPhosphorCompose.snapshot(),
             waveformScreenTrace.snapshot(),
             waveformScreenTracePrep.snapshot(),
             waveformScreenTraceRaster.snapshot(),
@@ -815,12 +988,14 @@ struct PerformanceStats
             {
                 waveformScreenCatWuzleWorkerChunkCount[0].load(std::memory_order_relaxed),
                 waveformScreenCatWuzleWorkerChunkCount[1].load(std::memory_order_relaxed),
-                waveformScreenCatWuzleWorkerChunkCount[2].load(std::memory_order_relaxed)
+                waveformScreenCatWuzleWorkerChunkCount[2].load(std::memory_order_relaxed),
+                waveformScreenCatWuzleWorkerChunkCount[3].load(std::memory_order_relaxed)
             },
             {
                 waveformScreenCatWuzleWorkerRenderUs[0].load(std::memory_order_relaxed),
                 waveformScreenCatWuzleWorkerRenderUs[1].load(std::memory_order_relaxed),
-                waveformScreenCatWuzleWorkerRenderUs[2].load(std::memory_order_relaxed)
+                waveformScreenCatWuzleWorkerRenderUs[2].load(std::memory_order_relaxed),
+                waveformScreenCatWuzleWorkerRenderUs[3].load(std::memory_order_relaxed)
             },
             waveformScreenAssistTotalUs.load(std::memory_order_relaxed),
             waveformScreenAssistFinalWaitStartUs.load(std::memory_order_relaxed),
@@ -878,6 +1053,15 @@ struct PerformanceStats
             field2DeadlineMisses.load(
                 std::memory_order_relaxed),
 
+            presenterReanchor.snapshot(),
+            presenterGenerationSkip.snapshot(),
+            waveformGenerationSkip.snapshot(),
+            vectorscopeGenerationSkip.snapshot(),
+
+            publishedFrequencyState,
+            publishedFrequencyCompleteUs,
+            publishedFrequencyWorkers,
+
             displayAllocation.snapshot(),
             displaySetup.snapshot(),
             displayCompose.snapshot(),
@@ -885,9 +1069,13 @@ struct PerformanceStats
             displayColorConversion.snapshot(),
             displayOutput.snapshot(),
 
+            publishedWaveformWorkerPhaseSnapshot,
+            publishedVectorscopeWorkerPhaseSnapshot,
+
             publishedWaveformWorker,
             publishedDisplayWorker0,
             publishedDisplayWorker1,
+            publishedVectorscopeWorkerAssistSnapshot,
             publishedWaveformPhases,
             publishedDisplayField,
             publishedDisplayWorker0Phase,
