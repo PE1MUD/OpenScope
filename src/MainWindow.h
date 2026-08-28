@@ -3,6 +3,7 @@
 #include "settings/OpenScopeSettings.h"
 
 #include <QCloseEvent>
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QRect>
 #include <QSize>
@@ -75,6 +76,16 @@ private:
     SettingsService* settingsService_ = nullptr;
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
+    QTimer* viewFpsTimer_ = nullptr;
+    QElapsedTimer viewFpsElapsedTimer_;
+
+    int videoOpenScopeFrameCount_ = 0;
+    int videoSpoutFrameCount_ = 0;
+    int waveformOpenScopeFrameCount_ = 0;
+    int waveformSpoutFrameCount_ = 0;
+    int vectorscopeOpenScopeFrameCount_ = 0;
+    int vectorscopeSpoutFrameCount_ = 0;
+    bool preventDisplaySleepActive_ = false;
 
     // Persist selected-line changes only after navigation has settled.
     // Mouse drag / wheel / key repeat can otherwise cause a synchronous
@@ -91,6 +102,7 @@ private:
     QAction* blackmagicSourceAction_ = nullptr;
     QAction* philipsPatternRomSourceAction_ = nullptr;
     QAction* reloadPhilipsPatternRomAction_ = nullptr;
+    QAction* configAction_ = nullptr;
 
     QSize videoRenderSize_;
     QSize waveformRenderSize_;

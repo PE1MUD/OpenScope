@@ -115,6 +115,7 @@ struct OpenScopeSettings
             bool lineSelectorVisible = true;
             bool safetyArea90 = false;
             bool textSafetyArea80 = false;
+            bool preventDisplaySleep = false;
         };
 
         struct Window

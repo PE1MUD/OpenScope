@@ -44,13 +44,24 @@ public:
         int lumaHundredthsDb,
         int chromaHundredthsDb);
 
+    void setViewFps(
+        double videoOpenScopeFps,
+        double videoSpoutFps,
+        double waveformOpenScopeFps,
+        double waveformSpoutFps,
+        double vectorscopeOpenScopeFps,
+        double vectorscopeSpoutFps);
+
     bool isVideoMaximized() const;
+    bool hasMaximizedViewport() const;
 
     QPoint floatingSettingsPosition() const;
     QSize floatingSettingsSize() const;
     bool hasFloatingSettingsSize() const;
     bool hasFloatingSettingsPosition() const;
     void homeFloatingSettings(const QPoint& position);
+
+    void toggleSettingsWindow(bool forceFloating = false);
 
 signals:
     void lineNumberChanged(int lineNumber);
@@ -71,6 +82,7 @@ signals:
     void spoutVideoEnabledChanged(bool enabled);
     void spoutWaveformEnabledChanged(bool enabled);
     void spoutVectorscopeEnabledChanged(bool enabled);
+    void preventDisplaySleepChanged(bool enabled);
 
     void noiseReductionChanged(bool enabled);
     void noiseReductionIntensityChanged(int intensity);

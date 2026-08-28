@@ -29,6 +29,7 @@ public:
 
     void setAntiAliasing(bool enabled);
     void setSafetyAreas(bool safetyArea90, bool textSafetyArea80);
+    void refreshOutputSize();
 
 signals:
     void outputSizeChanged(

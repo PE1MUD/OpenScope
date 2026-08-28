@@ -4728,21 +4728,51 @@ void WaveformWidget::paintEvent(QPaintEvent* event)
 
     const QRect displayRect = imageRect();
 
-    // image() contains the waveform at physical-pixel resolution.  Mark the
-    // presentation copy with this widget's DPR and draw it at its natural
-    // device-independent size.  With matching widget/image DPR this becomes a
-    // physical-pixel-for-physical-pixel blit instead of a second QPainter
-    // resample from the high-resolution render into the logical rectangle.
+    // image() contains the waveform at physical-pixel resolution. Normally we
+    // present it as a physical-pixel-for-physical-pixel blit. During an active
+    // resize, however, the widget can already have its new size while the
+    // renderer is still producing the matching target. Stretch the most recent
+    // valid frame only for that short mismatch window; this prevents the old,
+    // smaller frame leaving a black strip at the right/bottom edge. As soon as
+    // the matching render arrives the normal 1:1 path is used again.
     QImage presentedImage = image();
     const qreal presentationDpr =
         (std::max)(qreal(1.0), devicePixelRatioF());
-    presentedImage.setDevicePixelRatio(presentationDpr);
+
+    const QSize expectedPhysicalSize(
+        (std::max)(
+            1,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(displayRect.width()) *
+                    presentationDpr))),
+        (std::max)(
+            1,
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(displayRect.height()) *
+                    presentationDpr))));
 
     painter.save();
     painter.setClipRect(displayRect);
-    painter.drawImage(
-        QPointF(displayRect.topLeft()),
-        presentedImage);
+
+    if (presentedImage.size() == expectedPhysicalSize)
+    {
+        presentedImage.setDevicePixelRatio(presentationDpr);
+        painter.drawImage(
+            QPointF(displayRect.topLeft()),
+            presentedImage);
+    }
+    else
+    {
+        painter.setRenderHint(
+            QPainter::SmoothPixmapTransform,
+            true);
+        painter.drawImage(
+            QRectF(displayRect),
+            presentedImage);
+    }
+
     painter.restore();
 
 

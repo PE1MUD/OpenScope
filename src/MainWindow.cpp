@@ -130,7 +130,14 @@ MainWindow::MainWindow(QWidget* parent)
     , videoWidget_(new VideoWidget)
     , videoEngine_(new VideoEngine(this))
 {
-    setWindowTitle("OpenScope V" OPENSCOPE_VERSION " - Delta " OPENSCOPE_DELTA);
+    if (QStringLiteral(OPENSCOPE_DELTA) == QStringLiteral("0"))
+    {
+        setWindowTitle("OpenScope V" OPENSCOPE_VERSION);
+    }
+    else
+    {
+        setWindowTitle("OpenScope V" OPENSCOPE_VERSION " - Delta " OPENSCOPE_DELTA);
+    }
 
     // Catch plain F at the QApplication level so the spectrum shortcut
     // also works while focus is inside separate Qt instrument/tool windows.
@@ -240,6 +247,39 @@ MainWindow::MainWindow(QWidget* parent)
             videoEngine_);
 
     createSourceMenu();
+
+    // The saved width is the Qt client width.  Once the menu bar and central
+    // workspace exist, normalize the initial height so the workspace itself
+    // (not the decorated/client window) has the selected display aspect.
+    QTimer::singleShot(
+        0,
+        this,
+        [this]()
+        {
+            if (workspace_ == nullptr || f11FullScreen_ || customMaximized_)
+            {
+                return;
+            }
+
+            const int clientChromeWidth =
+                (std::max)(0, width() - workspace_->width());
+
+            const int clientChromeHeight =
+                (std::max)(0, height() - workspace_->height());
+
+            const int workspaceWidth =
+                (std::max)(1, width() - clientChromeWidth);
+
+            const int workspaceHeight =
+                static_cast<int>(
+                    std::lround(
+                        static_cast<double>(workspaceWidth) /
+                        windowAspectRatio()));
+
+            resize(
+                workspaceWidth + clientChromeWidth,
+                workspaceHeight + clientChromeHeight);
+        });
 
     connect(
         workspace_,
@@ -895,6 +935,15 @@ MainWindow::MainWindow(QWidget* parent)
         videoWidget_,
         &VideoWidget::setImage);
 
+    connect(
+        videoEngine_,
+        &VideoEngine::frameChanged,
+        this,
+        [this](const QImage&)
+        {
+            ++videoOpenScopeFrameCount_;
+        });
+
     auto* inputSignalWatchdog =
         new QTimer(this);
 
@@ -935,6 +984,15 @@ MainWindow::MainWindow(QWidget* parent)
         new SpoutOutput(
             QStringLiteral("OpenScope Video"),
             this);
+
+    connect(
+        videoSpoutOutput,
+        &SpoutOutput::submissionTiming,
+        this,
+        [this](std::uint64_t, std::uint64_t, std::uint64_t)
+        {
+            ++videoSpoutFrameCount_;
+        });
 
     connect(
         videoEngine_,
@@ -994,6 +1052,15 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(
         videoEngine_,
+        &VideoEngine::waveformChanged,
+        this,
+        [this](const QImage&)
+        {
+            ++waveformOpenScopeFrameCount_;
+        });
+
+    connect(
+        videoEngine_,
         &VideoEngine::waveformMeasurementDataChanged,
         waveformWidget_,
         &WaveformWidget::setMeasurementLuma);
@@ -1048,6 +1115,15 @@ MainWindow::MainWindow(QWidget* parent)
         new SpoutOutput(
             QStringLiteral("OpenScope Waveform"),
             this);
+
+    connect(
+        waveformSpoutOutput,
+        &SpoutOutput::submissionTiming,
+        this,
+        [this](std::uint64_t, std::uint64_t, std::uint64_t)
+        {
+            ++waveformSpoutFrameCount_;
+        });
 
     connect(
         videoEngine_,
@@ -1126,10 +1202,19 @@ MainWindow::MainWindow(QWidget* parent)
         vectorscopeWidget_,
         &VideoWidget::setImage);
 
+    connect(
+        videoEngine_,
+        &VideoEngine::vectorscopeChanged,
+        this,
+        [this](const QImage&)
+        {
+            ++vectorscopeOpenScopeFrameCount_;
+        });
+
     VectorscopePresentationInfo vectorscopePresentation;
     vectorscopePresentation.source = blackmagicDeviceName_;
     vectorscopePresentation.input = QStringLiteral("Composite");
-    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.standard = QStringLiteral("625/50d");
     vectorscopePresentation.targets =
         initialSettings.control.instrument.vectorscope.showHundredPercentTargets
         ? QStringLiteral("100%")
@@ -1144,6 +1229,15 @@ MainWindow::MainWindow(QWidget* parent)
         new SpoutOutput(
             QStringLiteral("OpenScope Vectorscope"),
             this);
+
+    connect(
+        vectorscopeSpoutOutput,
+        &SpoutOutput::submissionTiming,
+        this,
+        [this](std::uint64_t, std::uint64_t, std::uint64_t)
+        {
+            ++vectorscopeSpoutFrameCount_;
+        });
 
     connect(
         videoEngine_,
@@ -1212,6 +1306,48 @@ MainWindow::MainWindow(QWidget* parent)
 
     setVectorscopeSpoutEnabled(
         initialSettings.local.spout.vectorscopeEnabled);
+
+    viewFpsTimer_ =
+        new QTimer(this);
+    viewFpsTimer_->setInterval(1000);
+
+    connect(
+        viewFpsTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            const qint64 elapsedMs =
+                viewFpsElapsedTimer_.isValid()
+                ? viewFpsElapsedTimer_.restart()
+                : 1000;
+
+            const double scale =
+                elapsedMs > 0
+                ? 1000.0 / static_cast<double>(elapsedMs)
+                : 1.0;
+
+            if (workspace_ != nullptr)
+            {
+                workspace_->setViewFps(
+                    static_cast<double>(videoOpenScopeFrameCount_) * scale,
+                    static_cast<double>(videoSpoutFrameCount_) * scale,
+                    static_cast<double>(waveformOpenScopeFrameCount_) * scale,
+                    static_cast<double>(waveformSpoutFrameCount_) * scale,
+                    static_cast<double>(vectorscopeOpenScopeFrameCount_) * scale,
+                    static_cast<double>(vectorscopeSpoutFrameCount_) * scale);
+            }
+
+            videoOpenScopeFrameCount_ = 0;
+            videoSpoutFrameCount_ = 0;
+            waveformOpenScopeFrameCount_ = 0;
+            waveformSpoutFrameCount_ = 0;
+            vectorscopeOpenScopeFrameCount_ = 0;
+            vectorscopeSpoutFrameCount_ = 0;
+        });
+
+    viewFpsElapsedTimer_.start();
+    viewFpsTimer_->start();
 
     // Initial processing/instrument state.
     videoEngine_->setDisplayGamma(
@@ -1348,6 +1484,47 @@ MainWindow::MainWindow(QWidget* parent)
     applyDisplayAspectRatio(
         displayAspectRatio,
         false);
+
+    // Power policy is opt-in. Default is false; when enabled, keep the
+    // display/system idle timers alive only for this OpenScope process.
+    const auto applyPreventDisplaySleep =
+        [this](bool enabled)
+        {
+            if (enabled)
+            {
+                const EXECUTION_STATE result =
+                    SetThreadExecutionState(
+                        ES_CONTINUOUS |
+                        ES_DISPLAY_REQUIRED |
+                        ES_SYSTEM_REQUIRED);
+
+                preventDisplaySleepActive_ =
+                    result != 0;
+            }
+            else
+            {
+                SetThreadExecutionState(ES_CONTINUOUS);
+                preventDisplaySleepActive_ = false;
+            }
+        };
+
+    applyPreventDisplaySleep(
+        initialSettings.local.display.preventDisplaySleep);
+
+    connect(
+        workspace_,
+        &ScopeWorkspace::preventDisplaySleepChanged,
+        this,
+        [this, applyPreventDisplaySleep](bool enabled)
+        {
+            settingsService_->update(
+                [enabled](OpenScopeSettings& settings)
+                {
+                    settings.local.display.preventDisplaySleep = enabled;
+                });
+
+            applyPreventDisplaySleep(enabled);
+        });
 
     // Control-panel wiring.
     connect(
@@ -2060,6 +2237,24 @@ void MainWindow::createSourceMenu()
         menuBar()->addMenu(
             tr("Source"));
 
+    // Keep Config reachable while a single scope occupies the workspace,
+    // without automatically throwing the Settings tool window over it.
+    configAction_ =
+        menuBar()->addAction(
+            tr("Config (F2)"));
+
+    connect(
+        configAction_,
+        &QAction::triggered,
+        this,
+        [this]()
+        {
+            if (workspace_ != nullptr)
+            {
+                workspace_->toggleSettingsWindow();
+            }
+        });
+
     QActionGroup* sourceGroup =
         new QActionGroup(this);
 
@@ -2141,9 +2336,6 @@ void MainWindow::selectBlackmagicSource()
 void MainWindow::setBlackmagicDeviceName(
     const QString& deviceName)
 {
-    videoEngine_->setLumaCompensationSourceEnabled(
-        true);
-
     const DeckLinkCompositeGainState gainState =
         deckLinkCompositeGainState();
 
@@ -2163,10 +2355,19 @@ void MainWindow::setBlackmagicDeviceName(
         ? QStringLiteral("BMD")
         : deviceName;
 
+    if (blackmagicSourceAction_ != nullptr)
+    {
+        blackmagicSourceAction_->setEnabled(!deviceName.isEmpty());
+        if (deviceName.isEmpty())
+        {
+            blackmagicSourceAction_->setChecked(false);
+        }
+    }
+
     VectorscopePresentationInfo vectorscopePresentation;
     vectorscopePresentation.source = blackmagicDeviceName_;
     vectorscopePresentation.input = QStringLiteral("Composite");
-    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.standard = QStringLiteral("625/50d");
     vectorscopePresentation.targets =
         settingsService_->settings()
             .control
@@ -2268,14 +2469,12 @@ void MainWindow::selectPhilipsPatternRomSource()
             0);
     }
 
-    videoEngine_->setLumaCompensationSourceEnabled(
-        false);
     philipsPatternRomSource_->start();
 
     VectorscopePresentationInfo vectorscopePresentation;
     vectorscopePresentation.source = QStringLiteral("Philips ROM");
     vectorscopePresentation.input = philipsPatternRomSource_->shortName();
-    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.standard = QStringLiteral("625/50d");
     vectorscopePresentation.targets =
         settingsService_->settings()
             .control
@@ -2348,14 +2547,12 @@ void MainWindow::reloadPhilipsPatternRomSource()
             0);
     }
 
-    videoEngine_->setLumaCompensationSourceEnabled(
-        false);
     philipsPatternRomSource_->start();
 
     VectorscopePresentationInfo vectorscopePresentation;
     vectorscopePresentation.source = QStringLiteral("Philips ROM");
     vectorscopePresentation.input = philipsPatternRomSource_->shortName();
-    vectorscopePresentation.standard = QStringLiteral("PAL 625i");
+    vectorscopePresentation.standard = QStringLiteral("625/50d");
     vectorscopePresentation.targets =
         settingsService_->settings()
             .control
@@ -2526,28 +2723,63 @@ void MainWindow::applyDisplayAspectRatio(
                 workArea.bottom -
                 workArea.top;
 
-            int windowWidth =
-                availableWidth;
+            RECT currentWindowRect{};
+            GetWindowRect(
+                hwnd,
+                &currentWindowRect);
 
-            int windowHeight =
+            const int currentWindowWidth =
+                static_cast<int>(
+                    currentWindowRect.right -
+                    currentWindowRect.left);
+
+            const int currentWindowHeight =
+                static_cast<int>(
+                    currentWindowRect.bottom -
+                    currentWindowRect.top);
+
+            const int chromeWidth =
+                workspace_ != nullptr
+                    ? (std::max)(
+                        0,
+                        currentWindowWidth -
+                            workspace_->width())
+                    : 0;
+
+            const int chromeHeight =
+                workspace_ != nullptr
+                    ? (std::max)(
+                        0,
+                        currentWindowHeight -
+                            workspace_->height())
+                    : 0;
+
+            int workspaceWidth =
+                (std::max)(1, availableWidth - chromeWidth);
+
+            int workspaceHeight =
                 static_cast<int>(
                     std::lround(
-                        static_cast<double>(
-                            windowWidth) /
+                        static_cast<double>(workspaceWidth) /
                         aspect));
 
-            if (windowHeight > availableHeight)
+            if (workspaceHeight + chromeHeight > availableHeight)
             {
-                windowHeight =
-                    availableHeight;
+                workspaceHeight =
+                    (std::max)(1, availableHeight - chromeHeight);
 
-                windowWidth =
+                workspaceWidth =
                     static_cast<int>(
                         std::lround(
-                            static_cast<double>(
-                                windowHeight) *
+                            static_cast<double>(workspaceHeight) *
                             aspect));
             }
+
+            const int windowWidth =
+                workspaceWidth + chromeWidth;
+
+            const int windowHeight =
+                workspaceHeight + chromeHeight;
 
             const int x =
                 workArea.left +
@@ -2573,15 +2805,31 @@ void MainWindow::applyDisplayAspectRatio(
         }
     }
 
-    const int newHeight =
+    // QWidget::width()/height() describe the client area, while the
+    // ScopeWorkspace excludes the menu bar.  Preserve that fixed client
+    // chrome and apply the selected aspect ratio to the workspace only.
+    const int clientChromeWidth =
+        workspace_ != nullptr
+            ? (std::max)(0, width() - workspace_->width())
+            : 0;
+
+    const int clientChromeHeight =
+        workspace_ != nullptr
+            ? (std::max)(0, height() - workspace_->height())
+            : 0;
+
+    const int workspaceWidth =
+        (std::max)(1, width() - clientChromeWidth);
+
+    const int newWorkspaceHeight =
         static_cast<int>(
             std::lround(
-                static_cast<double>(width()) /
+                static_cast<double>(workspaceWidth) /
                 aspect));
 
     resize(
-        width(),
-        newHeight);
+        workspaceWidth + clientChromeWidth,
+        newWorkspaceHeight + clientChromeHeight);
 }
 
 void MainWindow::updateVideoFullscreenUi(
@@ -2660,18 +2908,34 @@ void MainWindow::updateRenderResolutionTitle()
         break;
     }
 
+    const bool releaseBuild =
+        QStringLiteral(OPENSCOPE_DELTA) == QStringLiteral("0");
+
     if (renderSize.isValid())
     {
-        setWindowTitle(
-            QString(
-                "OpenScope V" OPENSCOPE_VERSION " - %1x%2 - Delta " OPENSCOPE_DELTA)
-            .arg(renderSize.width())
-            .arg(renderSize.height()));
+        if (releaseBuild)
+        {
+            setWindowTitle(
+                QString("OpenScope V" OPENSCOPE_VERSION " - %1x%2")
+                    .arg(renderSize.width())
+                    .arg(renderSize.height()));
+        }
+        else
+        {
+            setWindowTitle(
+                QString(
+                    "OpenScope V" OPENSCOPE_VERSION " - %1x%2 - Delta " OPENSCOPE_DELTA)
+                .arg(renderSize.width())
+                .arg(renderSize.height()));
+        }
     }
     else
     {
         setWindowTitle(
-            "OpenScope V" OPENSCOPE_VERSION " - Delta " OPENSCOPE_DELTA);
+            releaseBuild
+            ? QStringLiteral("OpenScope V" OPENSCOPE_VERSION)
+            : QStringLiteral(
+                "OpenScope V" OPENSCOPE_VERSION " - Delta " OPENSCOPE_DELTA));
     }
 }
 
@@ -2682,6 +2946,12 @@ VideoWidget* MainWindow::videoWidget() const
 
 MainWindow::~MainWindow()
 {
+    if (preventDisplaySleepActive_)
+    {
+        SetThreadExecutionState(ES_CONTINUOUS);
+        preventDisplaySleepActive_ = false;
+    }
+
     if (philipsPatternRomSource_ != nullptr)
     {
         philipsPatternRomSource_->stop();
@@ -2745,26 +3015,66 @@ bool MainWindow::nativeEvent(
                 workArea.bottom -
                 workArea.top;
 
-            int windowWidth =
-                availableWidth;
+            RECT currentWindowRect{};
+            GetWindowRect(
+                hwnd,
+                &currentWindowRect);
 
-            int windowHeight =
+            const int currentWindowWidth =
+                static_cast<int>(
+                    currentWindowRect.right -
+                    currentWindowRect.left);
+
+            const int currentWindowHeight =
+                static_cast<int>(
+                    currentWindowRect.bottom -
+                    currentWindowRect.top);
+
+            const int chromeWidth =
+                workspace_ != nullptr
+                    ? (std::max)(
+                        0,
+                        currentWindowWidth -
+                            workspace_->width())
+                    : 0;
+
+            const int chromeHeight =
+                workspace_ != nullptr
+                    ? (std::max)(
+                        0,
+                        currentWindowHeight -
+                            workspace_->height())
+                    : 0;
+
+            const double aspect =
+                windowAspectRatio();
+
+            int workspaceWidth =
+                (std::max)(1, availableWidth - chromeWidth);
+
+            int workspaceHeight =
                 static_cast<int>(
                     std::lround(
-                        windowWidth /
-                        windowAspectRatio()));
+                        static_cast<double>(workspaceWidth) /
+                        aspect));
 
-            if (windowHeight > availableHeight)
+            if (workspaceHeight + chromeHeight > availableHeight)
             {
-                windowHeight =
-                    availableHeight;
+                workspaceHeight =
+                    (std::max)(1, availableHeight - chromeHeight);
 
-                windowWidth =
+                workspaceWidth =
                     static_cast<int>(
                         std::lround(
-                            windowHeight *
-                            windowAspectRatio()));
+                            static_cast<double>(workspaceHeight) *
+                            aspect));
             }
+
+            const int windowWidth =
+                workspaceWidth + chromeWidth;
+
+            const int windowHeight =
+                workspaceHeight + chromeHeight;
 
             const int x =
                 workArea.left +
@@ -2801,6 +3111,11 @@ bool MainWindow::nativeEvent(
         RECT* const rect =
             reinterpret_cast<RECT*>(
                 msg->lParam);
+
+        const HWND hwnd =
+            reinterpret_cast<HWND>(
+                winId());
+
         const HMONITOR monitor =
             MonitorFromRect(
                 rect,
@@ -2820,120 +3135,166 @@ bool MainWindow::nativeEvent(
                 result);
         }
 
-        const RECT& workArea =
-            monitorInfo.rcWork;
+        // WM_SIZING supplies the OUTER Windows rectangle.  The video/scope
+        // workspace is smaller because that rectangle also contains the
+        // native frame/title bar and the Qt menu bar (Source).  Measure that
+        // fixed chrome from the live window instead of guessing pixel counts;
+        // this automatically follows DPI, Windows theme and menu font size.
+        RECT currentWindowRect{};
+        GetWindowRect(
+            hwnd,
+            &currentWindowRect);
 
-        const int width =
+        const int currentOuterWidth =
+            currentWindowRect.right -
+            currentWindowRect.left;
+
+        const int currentOuterHeight =
+            currentWindowRect.bottom -
+            currentWindowRect.top;
+
+        const int currentWorkspaceWidth =
+            workspace_ != nullptr
+                ? workspace_->width()
+                : width();
+
+        const int currentWorkspaceHeight =
+            workspace_ != nullptr
+                ? workspace_->height()
+                : height();
+
+        const int chromeWidth =
+            (std::max)(
+                0,
+                currentOuterWidth -
+                    currentWorkspaceWidth);
+
+        const int chromeHeight =
+            (std::max)(
+                0,
+                currentOuterHeight -
+                    currentWorkspaceHeight);
+
+        const double aspect =
+            windowAspectRatio();
+
+        int outerWidth =
             rect->right -
             rect->left;
 
-        const int height =
+        int outerHeight =
             rect->bottom -
             rect->top;
+
+        int workspaceWidth =
+            (std::max)(
+                1,
+                outerWidth - chromeWidth);
+
+        int workspaceHeight =
+            (std::max)(
+                1,
+                outerHeight - chromeHeight);
 
         switch (msg->wParam)
         {
         case WMSZ_LEFT:
         case WMSZ_RIGHT:
-        {
-            const int newHeight =
+            workspaceHeight =
                 static_cast<int>(
                     std::lround(
-                        width /
-                        windowAspectRatio()));
-
-            rect->bottom =
-                rect->top +
-                newHeight;
-
+                        static_cast<double>(workspaceWidth) /
+                        aspect));
             break;
-        }
 
         case WMSZ_TOP:
         case WMSZ_BOTTOM:
-        {
-            const int newWidth =
+            workspaceWidth =
                 static_cast<int>(
                     std::lround(
-                        height *
-                        windowAspectRatio()));
-
-            rect->right =
-                rect->left +
-                newWidth;
-
+                        static_cast<double>(workspaceHeight) *
+                        aspect));
             break;
-        }
 
         case WMSZ_TOPLEFT:
         case WMSZ_TOPRIGHT:
         case WMSZ_BOTTOMLEFT:
         case WMSZ_BOTTOMRIGHT:
-        {
-            const int newHeight =
+            // Keep the existing OpenScope behaviour for corner drags: width
+            // is authoritative, but apply the ratio to the workspace rather
+            // than to the complete decorated window.
+            workspaceHeight =
                 static_cast<int>(
                     std::lround(
-                        width /
-                        windowAspectRatio()));
-
-            if (msg->wParam == WMSZ_TOPLEFT ||
-                msg->wParam == WMSZ_TOPRIGHT)
-            {
-                rect->top =
-                    rect->bottom -
-                    newHeight;
-            }
-            else
-            {
-                rect->bottom =
-                    rect->top +
-                    newHeight;
-            }
-
+                        static_cast<double>(workspaceWidth) /
+                        aspect));
             break;
-        }
 
         default:
             break;
         }
-        const int maxWidth =
+
+        outerWidth =
+            workspaceWidth +
+            chromeWidth;
+
+        outerHeight =
+            workspaceHeight +
+            chromeHeight;
+
+        const RECT& workArea =
+            monitorInfo.rcWork;
+
+        const int maxOuterWidth =
             workArea.right -
             workArea.left;
 
-        const int maxHeight =
+        const int maxOuterHeight =
             workArea.bottom -
             workArea.top;
 
-        int currentWidth =
-            rect->right -
-            rect->left;
-
-        int currentHeight =
-            rect->bottom -
-            rect->top;
-
-        if (currentWidth > maxWidth)
+        if (outerWidth > maxOuterWidth)
         {
-            currentWidth =
-                maxWidth;
+            workspaceWidth =
+                (std::max)(
+                    1,
+                    maxOuterWidth - chromeWidth);
 
-            currentHeight =
+            workspaceHeight =
                 static_cast<int>(
                     std::lround(
-                        currentWidth /
-                        windowAspectRatio()));
+                        static_cast<double>(workspaceWidth) /
+                        aspect));
+
+            outerWidth =
+                workspaceWidth +
+                chromeWidth;
+
+            outerHeight =
+                workspaceHeight +
+                chromeHeight;
         }
 
-        if (currentHeight > maxHeight)
+        if (outerHeight > maxOuterHeight)
         {
-            currentHeight =
-                maxHeight;
+            workspaceHeight =
+                (std::max)(
+                    1,
+                    maxOuterHeight - chromeHeight);
 
-            currentWidth =
+            workspaceWidth =
                 static_cast<int>(
                     std::lround(
-                        currentHeight *
-                        windowAspectRatio()));
+                        static_cast<double>(workspaceHeight) *
+                        aspect));
+
+            outerWidth =
+                workspaceWidth +
+                chromeWidth;
+
+            outerHeight =
+                workspaceHeight +
+                chromeHeight;
         }
 
         switch (msg->wParam)
@@ -2943,13 +3304,13 @@ bool MainWindow::nativeEvent(
         case WMSZ_BOTTOMLEFT:
             rect->left =
                 rect->right -
-                currentWidth;
+                outerWidth;
             break;
 
         default:
             rect->right =
                 rect->left +
-                currentWidth;
+                outerWidth;
             break;
         }
 
@@ -2960,15 +3321,16 @@ bool MainWindow::nativeEvent(
         case WMSZ_TOPRIGHT:
             rect->top =
                 rect->bottom -
-                currentHeight;
+                outerHeight;
             break;
 
         default:
             rect->bottom =
                 rect->top +
-                currentHeight;
+                outerHeight;
             break;
         }
+
         *result = TRUE;
         return true;
     }
@@ -2998,6 +3360,22 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
     {
         auto* keyEvent =
             static_cast<QKeyEvent*>(event);
+
+        const bool configPressed =
+            keyEvent->key() == Qt::Key_F2 &&
+            keyEvent->modifiers() == Qt::NoModifier;
+
+        if (configPressed)
+        {
+            if (!keyEvent->isAutoRepeat() &&
+                workspace_ != nullptr &&
+                workspace_->hasMaximizedViewport())
+            {
+                workspace_->toggleSettingsWindow();
+            }
+
+            return true;
+        }
 
         const bool f11Pressed =
             keyEvent->key() == Qt::Key_F11 &&
@@ -3037,6 +3415,25 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 
                 showFullScreen();
                 f11FullScreen_ = true;
+
+                // F11 uses the monitor as a windowless black canvas.  Leave
+                // Matrix/quad geometry untouched; only refresh the video
+                // presentation once fullscreen geometry has settled so the
+                // selected 4:3/16:9 display aspect is maximally fitted and
+                // any remainder stays black in VideoWidget::paintEvent().
+                QTimer::singleShot(
+                    0,
+                    this,
+                    [this]()
+                    {
+                        if (!f11FullScreen_)
+                        {
+                            return;
+                        }
+
+                        videoWidget_->refreshOutputSize();
+                        videoWidget_->update();
+                    });
             }
             else
             {

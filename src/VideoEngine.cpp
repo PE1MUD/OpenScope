@@ -865,8 +865,6 @@ void VideoEngine::submitWriteFrame()
     }
 
     const bool compensationEnabled =
-        lumaCompensationSourceEnabled_.load(
-            std::memory_order_acquire) &&
         lumaCompensationEnabled_.load(
             std::memory_order_acquire);
 
@@ -4474,7 +4472,6 @@ void VideoEngine::waveformWorkerLoop()
         std::uint64_t waveformLocalFrequencyUs = 0u;
 
         if (waveformUsesRawSelectedLine &&
-            lumaCompensationSourceEnabled_.load(std::memory_order_acquire) &&
             lumaCompensationEnabled_.load(std::memory_order_acquire))
         {
             const auto localFrequencyStart =
@@ -5201,10 +5198,11 @@ void VideoEngine::waveformWorkerLoop()
             waveformWorkerEnd,
             kPriorityWaveform);
 
-        if (screenRenderEnabled)
+        if (screenRenderEnabled || videoRenderEnabled)
         {
-            // Publish only after V/M/E and priority state have been appended.
-            // The floaty then shows one complete waveform-worker iteration.
+            // Publish after V/M/E and priority state have been appended.
+            // Spout-only waveform rendering must refresh diagnostics too;
+            // otherwise the wappers freeze on the last PC-screen snapshot.
             performanceStats_.publishWaveformDiagnosticTimelines();
         }
     }

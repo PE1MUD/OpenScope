@@ -237,6 +237,12 @@ ScopeWorkspace::ScopeWorkspace(
 
     connect(
         controlWidget_,
+        &ControlWidget::preventDisplaySleepChanged,
+        this,
+        &ScopeWorkspace::preventDisplaySleepChanged);
+
+    connect(
+        controlWidget_,
         &ControlWidget::noiseReductionChanged,
         this,
         &ScopeWorkspace::noiseReductionChanged);
@@ -341,6 +347,29 @@ ScopeWorkspace::ScopeWorkspace(
     }
 }
 
+void ScopeWorkspace::setViewFps(
+    double videoOpenScopeFps,
+    double videoSpoutFps,
+    double waveformOpenScopeFps,
+    double waveformSpoutFps,
+    double vectorscopeOpenScopeFps,
+    double vectorscopeSpoutFps)
+{
+    if (controlWidget_ == nullptr)
+    {
+        return;
+    }
+
+    controlWidget_->setViewFps(
+        videoOpenScopeFps,
+        videoSpoutFps,
+        waveformOpenScopeFps,
+        waveformSpoutFps,
+        vectorscopeOpenScopeFps,
+        vectorscopeSpoutFps);
+}
+
+
 void ScopeWorkspace::setCompositeInputGainState(
     bool lumaAvailable,
     bool chromaAvailable,
@@ -424,7 +453,16 @@ void ScopeWorkspace::showMaximized(
     videoViewport_->hide();
     waveformViewport_->hide();
     vectorscopeViewport_->hide();
-    settingsViewport_->hide();
+
+    // Settings used to be forced into a floating tool window whenever a
+    // scope viewport was maximized.  On a single-monitor setup that covers
+    // the instrument the user just asked to see.  Keep an already-open
+    // floating Settings window untouched, but leave docked Settings hidden
+    // until the user explicitly requests it with Config (F2).
+    if (!settingsFloating_)
+    {
+        settingsViewport_->hide();
+    }
 
     layout_->removeWidget(
         viewport);
@@ -441,8 +479,6 @@ void ScopeWorkspace::showMaximized(
 
     maximizedViewport_ =
         viewport;
-
-    floatSettings();
 }
 
 void ScopeWorkspace::showGrid()
@@ -488,6 +524,49 @@ void ScopeWorkspace::showGrid()
 
     maximizedViewport_ =
         nullptr;
+}
+
+
+void ScopeWorkspace::toggleSettingsWindow(bool forceFloating)
+{
+    if (settingsViewport_ == nullptr)
+    {
+        return;
+    }
+
+    const bool needFloatingWindow =
+        forceFloating ||
+        maximizedViewport_ != nullptr;
+
+    // In Matrix view Settings already occupies its normal fourth quadrant.
+    // Config (F2) simply brings that existing pane to the foreground.
+    if (!needFloatingWindow && !settingsFloating_)
+    {
+        settingsViewport_->show();
+        settingsViewport_->raise();
+        settingsViewport_->focusContent();
+        return;
+    }
+
+    if (!settingsFloating_)
+    {
+        floatSettings();
+        return;
+    }
+
+    if (settingsViewport_->isVisible())
+    {
+        // Closing/hiding the floating window deliberately leaves it detached.
+        // A later F2 can show the same window again without disturbing the
+        // maximized instrument.  showGrid() will dock it again normally.
+        settingsViewport_->hide();
+        return;
+    }
+
+    settingsViewport_->show();
+    settingsViewport_->raise();
+    settingsViewport_->activateWindow();
+    settingsViewport_->focusContent();
 }
 
 void ScopeWorkspace::floatSettings()
@@ -744,4 +823,9 @@ bool ScopeWorkspace::isVideoMaximized() const
     return
         maximizedViewport_ ==
         videoViewport_;
+}
+
+bool ScopeWorkspace::hasMaximizedViewport() const
+{
+    return maximizedViewport_ != nullptr;
 }

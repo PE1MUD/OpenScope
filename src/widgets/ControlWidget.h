@@ -45,6 +45,14 @@ public:
         int lumaHundredthsDb,
         int chromaHundredthsDb);
 
+    void setViewFps(
+        double videoOpenScopeFps,
+        double videoSpoutFps,
+        double waveformOpenScopeFps,
+        double waveformSpoutFps,
+        double vectorscopeOpenScopeFps,
+        double vectorscopeSpoutFps);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
 
@@ -79,6 +87,7 @@ signals:
     void spoutVideoEnabledChanged(bool enabled);
     void spoutWaveformEnabledChanged(bool enabled);
     void spoutVectorscopeEnabledChanged(bool enabled);
+    void preventDisplaySleepChanged(bool enabled);
     void legacyAspectRatioChanged(bool legacyEnabled);
     void exportHighResolutionPngRequested();
     void exportHighResolutionPngQuickRequested();
@@ -98,6 +107,12 @@ private:
     QSlider* compositeLumaGainSlider_ = nullptr;
     QSlider* compositeChromaGainSlider_ = nullptr;
     QLabel* compositeGainStatusLabel_ = nullptr;
+    QLabel* videoOpenScopeFpsLabel_ = nullptr;
+    QLabel* videoSpoutFpsLabel_ = nullptr;
+    QLabel* waveformOpenScopeFpsLabel_ = nullptr;
+    QLabel* waveformSpoutFpsLabel_ = nullptr;
+    QLabel* vectorscopeOpenScopeFpsLabel_ = nullptr;
+    QLabel* vectorscopeSpoutFpsLabel_ = nullptr;
     QLabel* aboutLogoLabel_ = nullptr;
     QLabel* cornerLogoLabel_ = nullptr;
     int helpTabIndex_ = -1;

@@ -10,6 +10,7 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QFont>
 #include <QLabel>
 #include <QMouseEvent>
@@ -675,7 +676,7 @@ ControlWidget::ControlWidget(
 
     auto* lumaCompensationCheckBox =
         new QCheckBox(
-            "Enable Blackmagic luma frequency response correction",
+            "Enable Y frequency response correction",
             calibrationTab);
 
     lumaCompensationCheckBox->setChecked(
@@ -1281,6 +1282,97 @@ ControlWidget::ControlWidget(
         "Instrument");
 
     // ------------------------------------------------------------
+    // View FPS
+    // ------------------------------------------------------------
+    auto* viewFpsTab =
+        new QWidget(tabs);
+
+    auto* viewFpsLayout =
+        new QGridLayout(viewFpsTab);
+
+    viewFpsLayout->setContentsMargins(
+        6,
+        4,
+        6,
+        4);
+
+    viewFpsLayout->setHorizontalSpacing(12);
+    viewFpsLayout->setVerticalSpacing(6);
+
+    auto* viewHeader =
+        new QLabel("View", viewFpsTab);
+    auto* openScopeHeader =
+        new QLabel("OpenScope FPS", viewFpsTab);
+    auto* spoutHeader =
+        new QLabel("Spout FPS", viewFpsTab);
+
+    QFont fpsHeaderFont = viewHeader->font();
+    fpsHeaderFont.setBold(true);
+    viewHeader->setFont(fpsHeaderFont);
+    openScopeHeader->setFont(fpsHeaderFont);
+    spoutHeader->setFont(fpsHeaderFont);
+
+    // Keep the headers anchored to the same edge as the values.
+    // Previously the numeric values were right-aligned while their headers
+    // were left-aligned inside stretchable columns, so resizing made the
+    // labels and numbers visibly drift apart.
+    viewHeader->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    openScopeHeader->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    spoutHeader->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    viewFpsLayout->addWidget(viewHeader, 0, 0);
+    viewFpsLayout->addWidget(openScopeHeader, 0, 1);
+    viewFpsLayout->addWidget(spoutHeader, 0, 2);
+
+    videoOpenScopeFpsLabel_ = new QLabel("0.0", viewFpsTab);
+    videoSpoutFpsLabel_ = new QLabel("0.0", viewFpsTab);
+    waveformOpenScopeFpsLabel_ = new QLabel("0.0", viewFpsTab);
+    waveformSpoutFpsLabel_ = new QLabel("0.0", viewFpsTab);
+    vectorscopeOpenScopeFpsLabel_ = new QLabel("0.0", viewFpsTab);
+    vectorscopeSpoutFpsLabel_ = new QLabel("0.0", viewFpsTab);
+
+    for (QLabel* valueLabel :
+         {
+             videoOpenScopeFpsLabel_,
+             videoSpoutFpsLabel_,
+             waveformOpenScopeFpsLabel_,
+             waveformSpoutFpsLabel_,
+             vectorscopeOpenScopeFpsLabel_,
+             vectorscopeSpoutFpsLabel_
+         })
+    {
+        valueLabel->setAlignment(
+            Qt::AlignRight | Qt::AlignVCenter);
+    }
+
+    viewFpsLayout->addWidget(new QLabel("Video", viewFpsTab), 1, 0);
+    viewFpsLayout->addWidget(videoOpenScopeFpsLabel_, 1, 1);
+    viewFpsLayout->addWidget(videoSpoutFpsLabel_, 1, 2);
+
+    viewFpsLayout->addWidget(new QLabel("Waveform", viewFpsTab), 2, 0);
+    viewFpsLayout->addWidget(waveformOpenScopeFpsLabel_, 2, 1);
+    viewFpsLayout->addWidget(waveformSpoutFpsLabel_, 2, 2);
+
+    viewFpsLayout->addWidget(new QLabel("Vectorscope", viewFpsTab), 3, 0);
+    viewFpsLayout->addWidget(vectorscopeOpenScopeFpsLabel_, 3, 1);
+    viewFpsLayout->addWidget(vectorscopeSpoutFpsLabel_, 3, 2);
+
+    viewFpsLayout->setColumnStretch(0, 2);
+    viewFpsLayout->setColumnStretch(1, 1);
+    viewFpsLayout->setColumnStretch(2, 1);
+
+    const int fpsColumnMinimum =
+        (std::max)(
+            openScopeHeader->sizeHint().width(),
+            spoutHeader->sizeHint().width());
+    viewFpsLayout->setColumnMinimumWidth(1, fpsColumnMinimum);
+    viewFpsLayout->setColumnMinimumWidth(2, fpsColumnMinimum);
+    viewFpsLayout->setRowStretch(4, 1);
+
+    // The tab is inserted after Calibration below so the existing
+    // Display/Instrument/Misc/Calibration indices remain unchanged.
+
+    // ------------------------------------------------------------
     // Misc
     // ------------------------------------------------------------
     auto* miscTab =
@@ -1323,6 +1415,20 @@ ControlWidget::ControlWidget(
 
     miscLayout->addWidget(
         performanceCheckBox_);
+
+    auto* preventDisplaySleepCheckBox =
+        new QCheckBox(
+            "Prevent display sleep / screensaver",
+            miscTab);
+
+    preventDisplaySleepCheckBox->setChecked(
+        settings.local.display.preventDisplaySleep);
+
+    preventDisplaySleepCheckBox->setToolTip(
+        "Keep Windows display/system idle sleep from activating while OpenScope is running. Default is off.");
+
+    miscLayout->addWidget(
+        preventDisplaySleepCheckBox);
 
     if constexpr (OpenScopeBuild::kDebugBuild)
     {
@@ -1484,6 +1590,12 @@ ControlWidget::ControlWidget(
         &ControlWidget::performanceVisibilityChanged);
 
     connect(
+        preventDisplaySleepCheckBox,
+        &QCheckBox::toggled,
+        this,
+        &ControlWidget::preventDisplaySleepChanged);
+
+    connect(
         floatiesHomeButton,
         &QPushButton::clicked,
         this,
@@ -1526,6 +1638,10 @@ ControlWidget::ControlWidget(
     tabs->addTab(
         calibrationTab,
         "Calibration");
+
+    tabs->addTab(
+        viewFpsTab,
+        "View FPS");
 
     // ------------------------------------------------------------
     // Help - only shown while the workspace is in quad view.
@@ -1823,6 +1939,38 @@ void ControlWidget::updateBrandingLayout()
     cornerLogoLabel_->show();
     cornerLogoLabel_->raise();
 }
+
+void ControlWidget::setViewFps(
+    double videoOpenScopeFps,
+    double videoSpoutFps,
+    double waveformOpenScopeFps,
+    double waveformSpoutFps,
+    double vectorscopeOpenScopeFps,
+    double vectorscopeSpoutFps)
+{
+    const auto setFps =
+        [](QLabel* label, double fps)
+        {
+            if (label == nullptr)
+            {
+                return;
+            }
+
+            label->setText(
+                QString::number(
+                    (std::max)(0.0, fps),
+                    'f',
+                    1));
+        };
+
+    setFps(videoOpenScopeFpsLabel_, videoOpenScopeFps);
+    setFps(videoSpoutFpsLabel_, videoSpoutFps);
+    setFps(waveformOpenScopeFpsLabel_, waveformOpenScopeFps);
+    setFps(waveformSpoutFpsLabel_, waveformSpoutFps);
+    setFps(vectorscopeOpenScopeFpsLabel_, vectorscopeOpenScopeFps);
+    setFps(vectorscopeSpoutFpsLabel_, vectorscopeSpoutFps);
+}
+
 
 void ControlWidget::setHelpTabVisible(
     bool visible)

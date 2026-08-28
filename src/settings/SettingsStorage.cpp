@@ -158,6 +158,12 @@ OpenScopeSettings SettingsStorage::load() const
             result.local.display.textSafetyArea80)
         .toBool();
 
+    result.local.display.preventDisplaySleep =
+        settings.value(
+            "Local/Display/PreventDisplaySleep",
+            result.local.display.preventDisplaySleep)
+        .toBool();
+
     result.control
         .instrument
         .lineNumber =
@@ -635,6 +641,10 @@ void SettingsStorage::save(
     storage.setValue(
         "Local/Display/TextSafetyArea80",
         settings.local.display.textSafetyArea80);
+
+    storage.setValue(
+        "Local/Display/PreventDisplaySleep",
+        settings.local.display.preventDisplaySleep);
 
     storage.setValue(
         "Control/Instrument/LineNumber",

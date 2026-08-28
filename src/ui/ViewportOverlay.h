@@ -194,7 +194,7 @@ namespace ViewportOverlay
             std::min(available.width(), available.height());
 
         return QRectF(
-            available.right() - size,
+            available.center().x() - size * 0.5,
             available.center().y() - size * 0.5,
             size,
             size);

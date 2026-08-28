@@ -454,6 +454,10 @@ namespace
         case 'E': return "E";
         case 'e': return "e";
         case 'H': return "H";
+        case 'h': return "h";
+        case 's': return "s";
+        case 'g': return "g";
+        case 'y': return "y";
         case 'A': return "A";
         case 'L': return "L";
         case 'J': return "J";
@@ -484,6 +488,10 @@ namespace
         case 'E': return "Energy target allocate / resize";
         case 'e': return "Energy target clear / reset";
         case 'H': return "Glow kernel preparation";
+        case 'h': return "Glow sample preparation";
+        case 's': return "Glow setup / bucket allocation";
+        case 'g': return "Beam glow stamp / apply";
+        case 'y': return "Resolve setup / scratch allocation";
         case 'A': return "AA / stitch setup";
         case 'L': return "Raster load / cost analysis";
         case 'J': return "Chunk partition / job dispatch";
@@ -508,7 +516,7 @@ namespace
         std::uint32_t chunkIndex)
     {
         const char* base = waveformPhaseName(phase);
-        if (phase == 'R' || phase == 'X' || phase == 'r' || phase == 'x')
+        if (phase == 'R' || phase == 'X' || phase == 'r' || phase == 'x' || phase == 'h')
         {
             return QStringLiteral("%1 chunk %2")
                 .arg(QString::fromLatin1(base))
@@ -529,6 +537,10 @@ namespace
         case 'E': return QColor(190, 210, 230);
         case 'e': return QColor(175, 205, 225);
         case 'H': return QColor(205, 220, 235);
+        case 'h': return QColor(210, 210, 235);
+        case 's': return QColor(200, 205, 230);
+        case 'g': return QColor(220, 205, 235);
+        case 'y': return QColor(205, 215, 230);
         case 'A': return QColor(195, 215, 230);
         case 'L': return QColor(185, 210, 225);
         case 'J': return QColor(175, 205, 220);
@@ -775,6 +787,38 @@ namespace
         // entries are aggregate envelopes, so do not draw them here.  The
         // actual parallel R/X chunks are published by the assist timelines and
         // carry the worker that really executed each chunk.
+        int glowWorkerCount = 0;
+        const std::uint64_t currentAssistGeneration =
+            snapshot.waveformWorkerAssist.generation;
+
+        const auto hasGlowForCurrentGeneration =
+            [&](const WaveformAssistTimelineSnapshot& assist)
+            {
+                if (currentAssistGeneration != 0u &&
+                    assist.generation != currentAssistGeneration)
+                {
+                    return false;
+                }
+
+                for (std::uint32_t i = 0;
+                    i < assist.count &&
+                    i < WaveformAssistTimelineSnapshot::kCapacity;
+                    ++i)
+                {
+                    if (static_cast<char>(assist.events[i].phase) == 'g')
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+        glowWorkerCount += hasGlowForCurrentGeneration(snapshot.waveformWorkerAssist) ? 1 : 0;
+        glowWorkerCount += hasGlowForCurrentGeneration(snapshot.displayWorker0Assist) ? 1 : 0;
+        glowWorkerCount += hasGlowForCurrentGeneration(snapshot.displayWorker1Assist) ? 1 : 0;
+        glowWorkerCount += hasGlowForCurrentGeneration(snapshot.vectorscopeWorkerAssist) ? 1 : 0;
+
         const auto& phases = snapshot.waveformScreenPhases;
         for (std::uint32_t i = 0;
             i < phases.count &&
@@ -789,13 +833,18 @@ namespace
                 continue;
             }
 
+            const QString label =
+                (phase == 'g')
+                    ? QString(std::max(1, glowWorkerCount), QChar('g'))
+                    : QString::fromLatin1(waveformPhaseText(phase));
+
             drawSegment(
                 painter,
                 barRect,
                 static_cast<double>(event.startUs),
                 static_cast<double>(event.durationUs),
                 waveformPhaseColor(phase),
-                QString::fromLatin1(waveformPhaseText(phase)));
+                label);
         }
 
         // The Screen waveform row is a COMPOSITE timeline. Parallel assist

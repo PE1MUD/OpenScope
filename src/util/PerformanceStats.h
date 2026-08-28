@@ -390,16 +390,27 @@ struct DisplayPhaseTimelineStats
             return;
         }
 
-        const std::uint32_t index = count.fetch_add(1u, std::memory_order_acq_rel);
+        /*
+         * Each display timeline has a single producer.  Do not publish the
+         * new count until the complete slot has been written: snapshot() may
+         * run concurrently from the UI thread, and publishing count first
+         * allowed it to observe an uninitialised/stale slot as an Unknown
+         * display phase.
+         */
+        const std::uint32_t index =
+            count.load(std::memory_order_relaxed);
         if (index >= kCapacity)
         {
-            count.store(static_cast<std::uint32_t>(kCapacity), std::memory_order_release);
             return;
         }
 
-        phase[index].store(static_cast<std::uint8_t>(phaseLabel), std::memory_order_relaxed);
+        phase[index].store(
+            static_cast<std::uint8_t>(phaseLabel),
+            std::memory_order_relaxed);
         startUs[index].store(start, std::memory_order_relaxed);
-        durationUs[index].store(duration, std::memory_order_release);
+        durationUs[index].store(duration, std::memory_order_relaxed);
+
+        count.store(index + 1u, std::memory_order_release);
     }
 
     [[nodiscard]] DisplayPhaseTimelineSnapshot snapshot() const noexcept
@@ -744,6 +755,7 @@ struct PerformanceStats
     void clearPublishedWaveformDiagnosticTimelines() noexcept
     {
         std::lock_guard<std::mutex> lock(waveformDiagnosticPublishMutex);
+        publishedWaveformWorkerPhases = {};
         publishedWaveformWorkerAssist = {};
         publishedDisplayWorker0Assist = {};
         publishedDisplayWorker1Assist = {};

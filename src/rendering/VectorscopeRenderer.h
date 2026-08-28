@@ -41,7 +41,7 @@ struct VectorscopePresentationInfo
 {
     QString source = QStringLiteral("BMD");
     QString input = QStringLiteral("Composite");
-    QString standard = QStringLiteral("PAL 625i");
+    QString standard = QStringLiteral("625/50d");
     QString targets = QStringLiteral("100%");
     QString matrix = QStringLiteral("BT.601");
     QString processing = QStringLiteral("YUV 4:2:2 10 bit");

@@ -1142,11 +1142,16 @@ void VectorscopeRenderer::composeScreen(
     const QRectF& bounds,
     const QRectF& scopeRect)
 {
-    const double cardGap =
+    double cardGap =
         std::max(8.0, bounds.height() * 0.016);
 
-    const double ownerPadding =
+    double ownerPadding =
         std::max(10.0, bounds.height() * 0.018);
+
+    // Keep the primary information cards alive during resize. Processing is
+    // optional, but SOURCE and LINE/TARGETS/MATRIX should not blink out when
+    // the viewport briefly passes through a short intermediate geometry.
+    double cardReferenceHeight = bounds.height();
 
     const QVector<ViewportOverlay::InfoRow> sourceRows
     {
@@ -1176,23 +1181,65 @@ void VectorscopeRenderer::composeScreen(
         { presentation_.processing, QString() }
     };
 
-    const QSizeF sourceSize =
+    QSizeF sourceSize =
         ViewportOverlay::infoCardRequiredSize(
             sourceRows,
-            bounds.height(),
+            cardReferenceHeight,
             false);
 
-    const QSizeF scopeSize =
+    QSizeF scopeSize =
         ViewportOverlay::infoCardRequiredSize(
             scopeRows,
-            bounds.height(),
+            cardReferenceHeight,
             false);
 
-    const QSizeF processingSize =
+    QSizeF processingSize =
         ViewportOverlay::infoCardRequiredSize(
             processingRows,
-            bounds.height(),
+            cardReferenceHeight,
             false);
+
+    const double availableInfoHeight =
+        std::max(1.0, bounds.height() - 16.0);
+
+    auto mandatoryHeight = [&]()
+    {
+        return sourceSize.height() +
+            cardGap +
+            scopeSize.height() +
+            2.0 * ownerPadding;
+    };
+
+    if (mandatoryHeight() > availableInfoHeight)
+    {
+        // Lose decorative breathing room before losing instrument state.
+        ownerPadding = 3.0;
+        cardGap = 3.0;
+
+        // Then compact typography. The overlay helper keeps a readable
+        // minimum font size, so this is deliberately bounded.
+        while (mandatoryHeight() > availableInfoHeight &&
+               cardReferenceHeight > 80.0)
+        {
+            cardReferenceHeight *= 0.90;
+
+            sourceSize =
+                ViewportOverlay::infoCardRequiredSize(
+                    sourceRows,
+                    cardReferenceHeight,
+                    false);
+            scopeSize =
+                ViewportOverlay::infoCardRequiredSize(
+                    scopeRows,
+                    cardReferenceHeight,
+                    false);
+            processingSize =
+                ViewportOverlay::infoCardRequiredSize(
+                    processingRows,
+                    cardReferenceHeight,
+                    false);
+        }
+    }
 
     const double requiredCardWidth =
         std::max(
@@ -1244,11 +1291,11 @@ void VectorscopeRenderer::composeScreen(
         scopeSize.height() +
         2.0 * ownerPadding;
 
-    if (!mainGroupsFitWidth ||
-        minimumTwoCardHeight > infoRect.height())
-    {
-        return;
-    }
+    // Do not blank the complete information column during resize. The
+    // adaptive compaction above keeps the mandatory cards present through
+    // normal resize geometries; PROCESSING remains the first optional card.
+    (void)mainGroupsFitWidth;
+    (void)minimumTwoCardHeight;
 
     // Use the complete PC information column instead of shrinking the
     // owner panel around a compact stack.  This lets the information cards
@@ -1287,7 +1334,7 @@ void VectorscopeRenderer::composeScreen(
         painter,
         first,
         sourceRows,
-        bounds.height(),
+        cardReferenceHeight,
         false);
 
     if (drawProcessing)
@@ -1306,7 +1353,7 @@ void VectorscopeRenderer::composeScreen(
             painter,
             second,
             scopeRows,
-            bounds.height(),
+            cardReferenceHeight,
             false);
 
         const QRectF third(
@@ -1319,7 +1366,7 @@ void VectorscopeRenderer::composeScreen(
             painter,
             third,
             processingRows,
-            bounds.height(),
+            cardReferenceHeight,
             false);
     }
     else
@@ -1336,7 +1383,7 @@ void VectorscopeRenderer::composeScreen(
             painter,
             second,
             scopeRows,
-            bounds.height(),
+            cardReferenceHeight,
             false);
     }
 }

@@ -25,6 +25,7 @@
 #include <limits>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <utility>
 #include <vector>
@@ -1607,6 +1608,10 @@ void WaveformRenderer::renderSingleLine(
             catWuzleFrameStats,
             traceRasterStartUs);
 
+    const std::uint64_t resolveSetupStartUs =
+        static_cast<std::uint64_t>(
+            frameTimer.nsecsElapsed() / 1000);
+
     auto& currentPhosphorEnergy = currentPhosphorEnergy_;
 
     renderTimings_.catWuzleChunkCount =
@@ -1794,6 +1799,17 @@ void WaveformRenderer::renderSingleLine(
 
         const std::size_t resolveJobCount =
             resolveJobCountForRows(resolveRows);
+
+        const std::uint64_t resolveDispatchStartUs =
+            static_cast<std::uint64_t>(
+                frameTimer.nsecsElapsed() / 1000);
+
+        recordPhase(
+            'y',
+            resolveSetupStartUs,
+            resolveDispatchStartUs > resolveSetupStartUs
+                ? resolveDispatchStartUs - resolveSetupStartUs
+                : 0u);
 
         runResolveRows(
             resolveJobCount,
@@ -1989,7 +2005,62 @@ void WaveformRenderer::renderSingleLine(
     // Acquire a detached, already-allocated transport surface before clearing.
     // This avoids QImage copy-on-write detaching the published previous frame.
     prepareImageForRender();
-    image_.fill(Qt::black);
+
+    // Delta 70: B is pure row-owned memory clear work.  Spread it over the
+    // existing WF/V1/V2/VS assist queue instead of making the waveform thread
+    // clear the complete transport surface serially.  prepareImageForRender()
+    // stays serial because allocation/detach must complete before any worker
+    // receives a scanline pointer.
+    const int baseClearHeight = image_.height();
+    constexpr int kBaseClearRowsPerJob = 64;
+    constexpr std::size_t kMaxBaseClearJobs = 8u;
+    const std::size_t baseClearJobCount =
+        baseClearHeight > 0
+        ? std::min<std::size_t>(
+            kMaxBaseClearJobs,
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    (baseClearHeight + kBaseClearRowsPerJob - 1) /
+                        kBaseClearRowsPerJob)))
+        : 0u;
+
+    const auto clearBaseRows =
+        [&](std::size_t jobIndex, std::uint32_t /* workerId */)
+        {
+            if (baseClearJobCount == 0u ||
+                jobIndex >= baseClearJobCount)
+            {
+                return;
+            }
+
+            const int firstY =
+                static_cast<int>(
+                    (static_cast<std::int64_t>(jobIndex) * baseClearHeight) /
+                    static_cast<std::int64_t>(baseClearJobCount));
+            const int onePastLastY =
+                static_cast<int>(
+                    (static_cast<std::int64_t>(jobIndex + 1u) * baseClearHeight) /
+                    static_cast<std::int64_t>(baseClearJobCount));
+
+            const qsizetype bytesPerLine = image_.bytesPerLine();
+            for (int y = firstY; y < onePastLastY; ++y)
+            {
+                std::memset(
+                    image_.scanLine(y),
+                    0,
+                    static_cast<std::size_t>(bytesPerLine));
+            }
+        };
+
+    if (baseClearJobCount > 1u && traceJobExecutor_)
+    {
+        traceJobExecutor_('B', baseClearJobCount, clearBaseRows);
+    }
+    else if (baseClearJobCount == 1u)
+    {
+        clearBaseRows(0u, 0u);
+    }
 
     renderTimings_.baseClearUs =
         static_cast<std::uint64_t>(
@@ -2457,131 +2528,171 @@ void WaveformRenderer::renderSingleLine(
 
         const bool colorizeIllegalLuminance =
             colorizeIllegalLuminance_.load(std::memory_order_acquire);
-        constexpr double kIllegalLowVolts = 0.298;
+        constexpr double kIllegalLowVolts = 0.280;
         constexpr double kIllegalHighVolts = 1.020;
         const AnalogVideoLevels legalAnalog =
             analogLevels(VideoColorStandard::Rec601_625);
 
-        // Legality is currently applied while the finite-width phosphor beam
-        // is resolved to RGB. Without a footprint allowance the lower AA/glow
-        // edge of a perfectly legal 0.300 V black trace crosses the 0.298 V
-        // row and becomes red even though the trace centre is legal. Treat
-        // roughly the visible lower beam footprint as presentation margin.
-        // This keeps the *signal* trip point at 0.298 V instead of making the
-        // antialiased skirt look illegal immediately below 0.300 V.
-        const double voltsPerRasterRow =
-            legalAnalog.graticuleMaxVolts /
-            (std::max)(scope.height(), 1.0);
-        const double lowBeamFootprintGuardVolts =
-            3.0 * voltsPerRasterRow;
-        const double illegalLowRenderVolts =
-            kIllegalLowVolts - lowBeamFootprintGuardVolts;
+        // Keep legality presentation linear and symmetric around nominal
+        // black/white.  PAL black is 0.300 V and white is 1.000 V; the
+        // selected limits 0.280 V and 1.020 V are therefore exactly 20 mV
+        // outside either end.  Older builds carried an extra lower-only beam
+        // footprint guard dating from the former near-black limit; retaining that
+        // guard after moving to 0.280 V made the visible margins asymmetric.
 
-        for (int y = phosphorMinY;
-            y <= phosphorMaxY;
-            ++y)
-        {
-            auto* destination =
-                reinterpret_cast<QRgb*>(
-                    image_.scanLine(y));
-
-            const std::size_t row =
-                static_cast<std::size_t>(y) *
+        // Delta 70: Q owns independent destination rows, so resolve the
+        // phosphor energy into RGB over the same assist queue.  All probe and
+        // legality state above is immutable for the duration of the jobs.
+        const int phosphorRows =
+            std::max(0, phosphorMaxY - phosphorMinY + 1);
+        constexpr int kPhosphorRowsPerJob = 48;
+        constexpr std::size_t kMaxPhosphorJobs = 8u;
+        const std::size_t phosphorJobCount =
+            phosphorRows > 0
+            ? std::min<std::size_t>(
+                kMaxPhosphorJobs,
                 static_cast<std::size_t>(
-                    phosphorWidth);
+                    std::max(
+                        1,
+                        (phosphorRows + kPhosphorRowsPerJob - 1) /
+                            kPhosphorRowsPerJob)))
+            : 0u;
 
-            const double rowVolts =
-                (scope.bottom() - (static_cast<double>(y) + 0.5)) *
-                legalAnalog.graticuleMaxVolts /
-                (std::max)(scope.height(), 1.0);
-
-            const bool illegalLuminanceRow =
-                colorizeIllegalLuminance &&
-                (rowVolts < illegalLowRenderVolts ||
-                 rowVolts > kIllegalHighVolts);
-
-            for (int x = phosphorMinX;
-                x <= phosphorMaxX;
-                ++x)
+        const auto composePhosphorRows =
+            [&](std::size_t jobIndex, std::uint32_t /* workerId */)
             {
-                const std::uint16_t energy =
-                    currentPhosphorEnergy[
-                        row +
-                        static_cast<std::size_t>(x)];
-
-                if (energy == 0u)
+                if (phosphorJobCount == 0u ||
+                    jobIndex >= phosphorJobCount)
                 {
-                    continue;
+                    return;
                 }
 
-                // Q-less display gain.  The previous >>8 mapping made the
-                // 16-bit beam energy almost black (255*7 -> only ~6).
-                // >>3 restores a hot white core while preserving headroom
-                // for glow and phosphor accumulation.
-                const int tracePeakWhite =
-                    lineInfoOverlayPalOutput_
-                    ? 191
-                    : 255;
+                const int firstY =
+                    phosphorMinY +
+                    static_cast<int>(
+                        (static_cast<std::int64_t>(jobIndex) * phosphorRows) /
+                        static_cast<std::int64_t>(phosphorJobCount));
+                const int onePastLastY =
+                    phosphorMinY +
+                    static_cast<int>(
+                        (static_cast<std::int64_t>(jobIndex + 1u) * phosphorRows) /
+                        static_cast<std::int64_t>(phosphorJobCount));
 
-                int value =
-                    std::min(
-                        tracePeakWhite,
-                        static_cast<int>(
-                            energy >> 3));
-
-                if (probePresentation)
+                for (int y = firstY;
+                    y < onePastLastY;
+                    ++y)
                 {
-                    const double dx =
-                        (static_cast<double>(x) + 0.5) -
-                        probeCenterX;
+                    auto* destination =
+                        reinterpret_cast<QRgb*>(
+                            image_.scanLine(y));
 
-                    const double dy =
-                        (static_cast<double>(y) + 0.5) -
-                        probeCenterY;
+                    const std::size_t row =
+                        static_cast<std::size_t>(y) *
+                        static_cast<std::size_t>(
+                            phosphorWidth);
 
-                    const bool insideProbe =
-                        dx * dx + dy * dy <=
-                        probeRadiusSquared;
+                    const double rowVolts =
+                        (scope.bottom() - (static_cast<double>(y) + 0.5)) *
+                        legalAnalog.graticuleMaxVolts /
+                        (std::max)(scope.height(), 1.0);
 
-                    // Dim the context, but keep the trace inside the
-                    // measurement circle at its normal calibrated strength.
-                    if (!insideProbe)
+                    const bool illegalLuminanceRow =
+                        colorizeIllegalLuminance &&
+                        (rowVolts < kIllegalLowVolts ||
+                         rowVolts > kIllegalHighVolts);
+
+                    for (int x = phosphorMinX;
+                        x <= phosphorMaxX;
+                        ++x)
                     {
-                        value = (value + 1) / 2;
+                        const std::uint16_t energy =
+                            currentPhosphorEnergy[
+                                row +
+                                static_cast<std::size_t>(x)];
+
+                        if (energy == 0u)
+                        {
+                            continue;
+                        }
+
+                        // Q-less display gain.  The previous >>8 mapping made the
+                        // 16-bit beam energy almost black (255*7 -> only ~6).
+                        // >>3 restores a hot white core while preserving headroom
+                        // for glow and phosphor accumulation.
+                        const int tracePeakWhite =
+                            lineInfoOverlayPalOutput_
+                            ? 191
+                            : 255;
+
+                        int value =
+                            std::min(
+                                tracePeakWhite,
+                                static_cast<int>(
+                                    energy >> 3));
+
+                        if (probePresentation)
+                        {
+                            const double dx =
+                                (static_cast<double>(x) + 0.5) -
+                                probeCenterX;
+
+                            const double dy =
+                                (static_cast<double>(y) + 0.5) -
+                                probeCenterY;
+
+                            const bool insideProbe =
+                                dx * dx + dy * dy <=
+                                probeRadiusSquared;
+
+                            // Dim the context, but keep the trace inside the
+                            // measurement circle at its normal calibrated strength.
+                            if (!insideProbe)
+                            {
+                                value = (value + 1) / 2;
+                            }
+                        }
+
+                        const QRgb old =
+                            destination[x];
+
+                        if (illegalLuminanceRow)
+                        {
+                            // Legality colour is applied while resolving ScopePhor
+                            // energy to RGB, so both the current beam and retained
+                            // phosphor history stay red outside the legal Y range.
+                            destination[x] =
+                                qRgb(
+                                    std::min(
+                                        255,
+                                        qRed(old) + value),
+                                    0,
+                                    0);
+                        }
+                        else
+                        {
+                            destination[x] =
+                                qRgb(
+                                    std::min(
+                                        255,
+                                        qRed(old) + value),
+                                    std::min(
+                                        255,
+                                        qGreen(old) + value),
+                                    std::min(
+                                        255,
+                                        qBlue(old) + value));
+                        }
                     }
                 }
+            };
 
-                const QRgb old =
-                    destination[x];
-
-                if (illegalLuminanceRow)
-                {
-                    // Legality colour is applied while resolving ScopePhor
-                    // energy to RGB, so both the current beam and retained
-                    // phosphor history stay red outside the legal Y range.
-                    destination[x] =
-                        qRgb(
-                            std::min(
-                                255,
-                                qRed(old) + value),
-                            0,
-                            0);
-                }
-                else
-                {
-                    destination[x] =
-                        qRgb(
-                            std::min(
-                                255,
-                                qRed(old) + value),
-                            std::min(
-                                255,
-                                qGreen(old) + value),
-                            std::min(
-                                255,
-                                qBlue(old) + value));
-                }
-            }
+        if (phosphorJobCount > 1u && traceJobExecutor_)
+        {
+            traceJobExecutor_('Q', phosphorJobCount, composePhosphorRows);
+        }
+        else if (phosphorJobCount == 1u)
+        {
+            composePhosphorRows(0u, 0u);
         }
     }
 
@@ -4417,182 +4528,433 @@ void WaveformRenderer::renderCurrentPhosphorEnergy(
             timer.nsecsElapsed() / 1000);
 
     /*
-     * Cheap local glow pass.
+     * Cheap local glow pass -- Delta 63: spread the stamp/apply work over
+     * the existing WF/V1/V2/VS assist queue.
      *
-     * Sample at ~1 target-pixel spacing.  Because this pass contains only
-     * diffuse halo energy, tiny gaps/phase differences are not visible in
-     * the white beam core.
+     * Each assist job owns a disjoint band of target rows.  All jobs scan the
+     * same polyline, but a job only applies kernel rows that land inside its
+     * own band.  That keeps currentEnergy writes race-free without atomics or
+     * per-worker full-frame scratch buffers.  The executor is synchronous, so
+     * completion of traceJobExecutor_ is the barrier before resolve/output X.
      */
+    const std::uint64_t glowStampStartUs =
+        timelineBaseUs +
+        static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+
     timer.restart();
 
-    if (glowGain > 0.0)
+    bool usedParallelGlow = false;
+
+    if (glowGain > 0.0 && polyline.size() > 1u)
     {
-        for (std::size_t i = 1u;
-            i < polyline.size();
-            ++i)
+        double minimumBeamX = polyline.front().x;
+        double maximumBeamX = polyline.front().x;
+        double minimumBeamY = polyline.front().y;
+        double maximumBeamY = polyline.front().y;
+
+        for (const BeamPoint& point : polyline)
         {
-            const BeamPoint& first =
-                polyline[i - 1u];
+            minimumBeamX = std::min(minimumBeamX, point.x);
+            maximumBeamX = std::max(maximumBeamX, point.x);
+            minimumBeamY = std::min(minimumBeamY, point.y);
+            maximumBeamY = std::max(maximumBeamY, point.y);
+        }
 
-            const BeamPoint& second =
-                polyline[i];
+        // One extra pixel covers the phase-rounding carry that can move a
+        // centre from floor(x/y) to the next pixel.
+        const int glowMinX =
+            static_cast<int>(std::floor(minimumBeamX)) -
+            kGlowKernelRadius;
+        const int glowMaxX =
+            static_cast<int>(std::ceil(maximumBeamX)) +
+            kGlowKernelRadius + 1;
+        const int glowMinY =
+            static_cast<int>(std::floor(minimumBeamY)) -
+            kGlowKernelRadius;
+        const int glowMaxY =
+            static_cast<int>(std::ceil(maximumBeamY)) +
+            kGlowKernelRadius + 1;
 
-            const double segmentDx =
-                second.x -
-                first.x;
+        activeMinX = std::min(activeMinX, glowMinX);
+        activeMaxX = std::max(activeMaxX, glowMaxX);
+        activeMinY = std::min(activeMinY, glowMinY);
+        activeMaxY = std::max(activeMaxY, glowMaxY);
 
-            const double segmentDy =
-                second.y -
-                first.y;
+        const int firstTargetRow = std::max(0, glowMinY);
+        const int lastTargetRow = std::min(height - 1, glowMaxY);
+        const int targetRows =
+            std::max(0, lastTargetRow - firstTargetRow + 1);
 
-            const double segmentLength =
-                std::hypot(
-                    segmentDx,
-                    segmentDy);
+        constexpr int kTargetGlowRowsPerJob = 48;
+        constexpr std::size_t kMaxGlowJobs = 8u;
 
-            if (segmentLength <= 1.0e-9)
-            {
-                continue;
-            }
-
-            const int steps =
+        const std::size_t desiredGlowJobs =
+            targetRows > 0
+            ? static_cast<std::size_t>(
                 std::max(
                     1,
-                    static_cast<int>(
-                        std::ceil(
-                            segmentLength)));
+                    (targetRows + kTargetGlowRowsPerJob - 1) /
+                        kTargetGlowRowsPerJob))
+            : 1u;
 
-            const int firstStep =
-                i == 1u
-                ? 0
-                : 1;
+        const std::size_t glowJobCount =
+            std::min(kMaxGlowJobs, desiredGlowJobs);
 
-            for (int step = firstStep;
-                step <= steps;
-                ++step)
+        struct GlowSample
+        {
+            int centerX = 0;
+            int centerY = 0;
+            std::uint16_t kernelIndex = 0u;
+        };
+
+        /*
+         * Delta 67: prepare every glow sample exactly once, then bucket it
+         * into only the output-row jobs whose 5x5 kernel can touch that band.
+         *
+         * Delta 63 already made the destination rows race-free, but every
+         * worker still walked the complete polyline and recomputed every
+         * segment step/phase before rejecting rows it did not own.  That
+         * multiplied most of the CPU work by the worker count and explained
+         * why four busy g workers gave almost no wallclock improvement.
+         *
+         * Bucket insertion preserves source-sample order per output band, so
+         * energy accumulation order within every destination pixel remains
+         * the same as in the row-owned Delta 63 path.
+         */
+        /*
+         * Delta 68: parallelise the expensive sample preparation too.
+         *
+         * Each prep job owns a contiguous range of polyline segments and
+         * builds private row-band buckets.  Private buckets avoid locks while
+         * preserving source order: renderGlowJob visits prep jobs in segment
+         * order, then the samples produced by each job in their original
+         * segment/step order.
+         *
+         * This removes the Delta 67 serial polyline walk that merely moved the
+         * old ~4 ms glow cost in front of the parallel g workers.
+         */
+        const std::size_t segmentCount = polyline.size() - 1u;
+        const std::size_t glowPrepJobCount =
+            std::min<std::size_t>(
+                kMaxGlowJobs,
+                std::max<std::size_t>(1u, segmentCount));
+
+        using GlowBuckets = std::vector<std::vector<GlowSample>>;
+        std::vector<GlowBuckets> prepBuckets(
+            glowPrepJobCount,
+            GlowBuckets(glowJobCount));
+
+        const auto jobFirstY =
+            [&](std::size_t jobIndex)
             {
-                const double t =
-                    static_cast<double>(step) /
-                    static_cast<double>(steps);
-
-                const double beamX =
-                    first.x +
-                    segmentDx * t;
-
-                const double beamY =
-                    first.y +
-                    segmentDy * t;
-
-                int centerX =
+                return firstTargetRow +
                     static_cast<int>(
-                        std::floor(
-                            beamX));
+                        (static_cast<std::int64_t>(jobIndex) *
+                            static_cast<std::int64_t>(targetRows)) /
+                        static_cast<std::int64_t>(glowJobCount));
+            };
 
-                int centerY =
+        const auto jobOnePastLastY =
+            [&](std::size_t jobIndex)
+            {
+                return firstTargetRow +
                     static_cast<int>(
-                        std::floor(
-                            beamY));
+                        (static_cast<std::int64_t>(jobIndex + 1u) *
+                            static_cast<std::int64_t>(targetRows)) /
+                        static_cast<std::int64_t>(glowJobCount));
+            };
 
-                const double fracX =
-                    beamX -
-                    static_cast<double>(
-                        centerX);
+        const auto rowToGlowJob =
+            [&](int row)
+            {
+                const int clippedRow =
+                    std::clamp(row, firstTargetRow, lastTargetRow);
+                const std::int64_t offset =
+                    static_cast<std::int64_t>(clippedRow - firstTargetRow);
+                const std::int64_t numerator =
+                    (offset + 1) * static_cast<std::int64_t>(glowJobCount) - 1;
 
-                const double fracY =
-                    beamY -
-                    static_cast<double>(
-                        centerY);
+                return std::min<std::size_t>(
+                    glowJobCount - 1u,
+                    static_cast<std::size_t>(
+                        numerator / static_cast<std::int64_t>(targetRows)));
+            };
 
-                int phaseX =
-                    static_cast<int>(
-                        std::lround(
-                            fracX *
-                            static_cast<double>(
-                                kSubpixelPhases)));
+        const std::uint64_t glowSetupEndUs =
+            timelineBaseUs +
+            static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
 
-                int phaseY =
-                    static_cast<int>(
-                        std::lround(
-                            fracY *
-                            static_cast<double>(
-                                kSubpixelPhases)));
+        recordLocalPhase(
+            's',
+            glowStampStartUs,
+            glowSetupEndUs > glowStampStartUs
+                ? glowSetupEndUs - glowStampStartUs
+                : 0u);
 
-                if (phaseX >= kSubpixelPhases)
+        const auto prepareGlowJob =
+            [&](std::size_t prepJobIndex)
+            {
+                const std::size_t firstSegment =
+                    (prepJobIndex * segmentCount) / glowPrepJobCount;
+                const std::size_t onePastLastSegment =
+                    ((prepJobIndex + 1u) * segmentCount) / glowPrepJobCount;
+
+                GlowBuckets& buckets = prepBuckets[prepJobIndex];
+
+                for (auto& bucket : buckets)
                 {
-                    phaseX = 0;
-                    ++centerX;
+                    bucket.reserve(
+                        std::max<std::size_t>(
+                            32u,
+                            polyline.size() /
+                                std::max<std::size_t>(
+                                    1u,
+                                    glowPrepJobCount * glowJobCount)));
                 }
 
-                if (phaseY >= kSubpixelPhases)
+                for (std::size_t segmentIndex = firstSegment;
+                    segmentIndex < onePastLastSegment;
+                    ++segmentIndex)
                 {
-                    phaseY = 0;
-                    ++centerY;
-                }
+                    const BeamPoint& first = polyline[segmentIndex];
+                    const BeamPoint& second = polyline[segmentIndex + 1u];
 
-                const GlowKernel& glowKernel =
-                    glowKernels[
-                        static_cast<std::size_t>(
-                            phaseY *
-                                kSubpixelPhases +
-                            phaseX)];
+                    const double segmentDx = second.x - first.x;
+                    const double segmentDy = second.y - first.y;
+                    const double segmentLength =
+                        std::hypot(segmentDx, segmentDy);
 
-                activeMinX =
-                    std::min(
-                        activeMinX,
-                        centerX -
-                            kGlowKernelRadius);
-
-                activeMaxX =
-                    std::max(
-                        activeMaxX,
-                        centerX +
-                            kGlowKernelRadius);
-
-                activeMinY =
-                    std::min(
-                        activeMinY,
-                        centerY -
-                            kGlowKernelRadius);
-
-                activeMaxY =
-                    std::max(
-                        activeMaxY,
-                        centerY +
-                            kGlowKernelRadius);
-
-                for (int ky = -kGlowKernelRadius;
-                    ky <= kGlowKernelRadius;
-                    ++ky)
-                {
-                    for (int kx = -kGlowKernelRadius;
-                        kx <= kGlowKernelRadius;
-                        ++kx)
+                    if (segmentLength <= 1.0e-9)
                     {
-                        const int value =
-                            glowKernel[
-                                static_cast<std::size_t>(
-                                    (ky + kGlowKernelRadius) *
-                                        kGlowKernelSize +
-                                    (kx + kGlowKernelRadius))];
+                        continue;
+                    }
 
-                        if (value <= 0)
+                    const int steps =
+                        std::max(
+                            1,
+                            static_cast<int>(
+                                std::ceil(segmentLength)));
+
+                    // Preserve the original whole-polyline sampling rule:
+                    // only the very first segment emits step zero.
+                    const int firstStep =
+                        segmentIndex == 0u ? 0 : 1;
+
+                    for (int step = firstStep;
+                        step <= steps;
+                        ++step)
+                    {
+                        const double t =
+                            static_cast<double>(step) /
+                            static_cast<double>(steps);
+
+                        const double beamX = first.x + segmentDx * t;
+                        const double beamY = first.y + segmentDy * t;
+
+                        int centerX =
+                            static_cast<int>(std::floor(beamX));
+                        int centerY =
+                            static_cast<int>(std::floor(beamY));
+
+                        const double fracX =
+                            beamX - static_cast<double>(centerX);
+                        const double fracY =
+                            beamY - static_cast<double>(centerY);
+
+                        int phaseX =
+                            static_cast<int>(
+                                std::lround(
+                                    fracX *
+                                    static_cast<double>(kSubpixelPhases)));
+                        int phaseY =
+                            static_cast<int>(
+                                std::lround(
+                                    fracY *
+                                    static_cast<double>(kSubpixelPhases)));
+
+                        if (phaseX >= kSubpixelPhases)
+                        {
+                            phaseX = 0;
+                            ++centerX;
+                        }
+
+                        if (phaseY >= kSubpixelPhases)
+                        {
+                            phaseY = 0;
+                            ++centerY;
+                        }
+
+                        const GlowSample sample{
+                            centerX,
+                            centerY,
+                            static_cast<std::uint16_t>(
+                                phaseY * kSubpixelPhases + phaseX)
+                        };
+
+                        const int sampleFirstY =
+                            centerY - kGlowKernelRadius;
+                        const int sampleLastY =
+                            centerY + kGlowKernelRadius;
+
+                        if (sampleLastY < firstTargetRow ||
+                            sampleFirstY > lastTargetRow)
                         {
                             continue;
                         }
 
-                        addEnergy(
-                            centerX + kx,
-                            centerY + ky,
-                            value * 7);
+                        const std::size_t firstGlowJob =
+                            rowToGlowJob(
+                                std::max(sampleFirstY, firstTargetRow));
+                        const std::size_t lastGlowJob =
+                            rowToGlowJob(
+                                std::min(sampleLastY, lastTargetRow));
+
+                        for (std::size_t glowJobIndex = firstGlowJob;
+                            glowJobIndex <= lastGlowJob;
+                            ++glowJobIndex)
+                        {
+                            buckets[glowJobIndex].push_back(sample);
+                        }
+                    }
+                }
+            };
+
+        const std::uint64_t glowPrepStartUs =
+            timelineBaseUs +
+            static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+
+        if (glowPrepJobCount > 1u && traceJobExecutor_)
+        {
+            traceJobExecutor_(
+                'h',
+                glowPrepJobCount,
+                [&](std::size_t prepJobIndex, std::uint32_t /* workerId */)
+                {
+                    prepareGlowJob(prepJobIndex);
+                });
+        }
+        else
+        {
+            prepareGlowJob(0u);
+        }
+
+        const std::uint64_t glowPrepEndUs =
+            timelineBaseUs +
+            static_cast<std::uint64_t>(phaseClock.nsecsElapsed() / 1000);
+
+        // Whole-pass wallclock marker.  The per-worker h chunks (when
+        // present) remain in the assist timelines; this aggregate marker
+        // guarantees that the interval itself can never disappear from the
+        // authoritative waveform chronology.
+        recordLocalPhase(
+            'h',
+            glowPrepStartUs,
+            glowPrepEndUs > glowPrepStartUs
+                ? glowPrepEndUs - glowPrepStartUs
+                : 0u);
+
+        const auto renderGlowJob =
+            [&](std::size_t jobIndex)
+            {
+                const int ownedFirstY = jobFirstY(jobIndex);
+                const int onePastOwnedLastY = jobOnePastLastY(jobIndex);
+
+                if (onePastOwnedLastY <= ownedFirstY)
+                {
+                    return;
+                }
+
+                const int ownedLastY = onePastOwnedLastY - 1;
+
+                for (std::size_t prepJobIndex = 0u;
+                    prepJobIndex < prepBuckets.size();
+                    ++prepJobIndex)
+                {
+                    const auto& samples =
+                        prepBuckets[prepJobIndex][jobIndex];
+
+                    for (const GlowSample& sample : samples)
+                    {
+                        const int kernelFirstY =
+                        std::max(
+                            -kGlowKernelRadius,
+                            ownedFirstY - sample.centerY);
+                        const int kernelLastY =
+                            std::min(
+                            kGlowKernelRadius,
+                            ownedLastY - sample.centerY);
+
+                    const GlowKernel& glowKernel =
+                        glowKernels[
+                            static_cast<std::size_t>(sample.kernelIndex)];
+
+                    for (int ky = kernelFirstY;
+                        ky <= kernelLastY;
+                        ++ky)
+                    {
+                        const std::size_t kernelRow =
+                            static_cast<std::size_t>(
+                                (ky + kGlowKernelRadius) *
+                                kGlowKernelSize);
+
+                        for (int kx = -kGlowKernelRadius;
+                            kx <= kGlowKernelRadius;
+                            ++kx)
+                        {
+                            const int value =
+                                glowKernel[
+                                    kernelRow +
+                                    static_cast<std::size_t>(
+                                        kx + kGlowKernelRadius)];
+
+                            if (value <= 0)
+                            {
+                                continue;
+                            }
+
+                            addEnergy(
+                                sample.centerX + kx,
+                                sample.centerY + ky,
+                                value * 7);
+                        }
                     }
                 }
             }
+            };
+
+        if (targetRows > 0 &&
+            glowJobCount > 1u &&
+            traceJobExecutor_)
+        {
+            usedParallelGlow = true;
+
+            traceJobExecutor_(
+                'g',
+                glowJobCount,
+                [&](std::size_t jobIndex, std::uint32_t /* workerId */)
+                {
+                    renderGlowJob(jobIndex);
+                });
+        }
+        else if (targetRows > 0)
+        {
+            renderGlowJob(0u);
         }
     }
 
     glowUs =
         static_cast<std::uint64_t>(
             timer.nsecsElapsed() / 1000);
+
+    // Parallel g chunks are already emitted by the shared assist executor.
+    // Keep a local whole-pass g event only on the serial fallback path.
+    if (glowGain > 0.0 && !usedParallelGlow)
+    {
+        recordLocalPhase(
+            'g',
+            glowStampStartUs,
+            glowUs);
+    }
 
     return;
 }

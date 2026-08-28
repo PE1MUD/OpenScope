@@ -68,6 +68,13 @@ void VideoWidget::setAspectRatio(
     update();
 }
 
+void VideoWidget::refreshOutputSize()
+{
+    emitOutputSize();
+    update();
+}
+
+
 void VideoWidget::setAntiAliasing(bool enabled)
 {
     if (antiAliasing_ == enabled)

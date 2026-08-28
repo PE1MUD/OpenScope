@@ -1,3 +1,12 @@
+
+## Delta 59 Mk4 — workspace-only resize geometry compile fix
+- Compile fix: convert Win32 `RECT` width/height (`LONG`) to `int` before `std::max`, avoiding MSVC mixed-type template errors.
+- Rebuilt directly from the original Delta58 baseline.
+- Keeps the native Windows title bar and existing Source menu unchanged.
+- WM_SIZING now measures actual outer-window chrome (native frame/title bar + Source menu) and applies 4:3/16:9 only to ScopeWorkspace.
+- Normal aspect switches preserve client chrome and resize only the workspace portion.
+- No frameless/titlebar overlay/window-style code added.
+
 # OpenScope 0.8.4 - rolling delta log
 
 ## Delta 01 - Performance floaty consistency
@@ -706,3 +715,139 @@ Screen waveform diagnostics now show the actual renderer chronology directly, in
 - Pinned Spout/worker reports show the actual worker ownership for parallel Spout chunks.
 - CatWuzle worker accounting expanded to four worker IDs so VS assist is no longer folded into V2.
 - No change to waveform appearance or priority arbitration.
+
+### Delta 59 Mk5 — cleanup repair
+- Repair package now explicitly restores `src/MainWindow.h` from the clean Delta58-derived tree.
+- Removes stale `moveEvent`, `resizeEvent`, `showEvent`, and `hideEvent` declarations left behind when a previous titlebar delta had been applied to the working tree.
+- Keeps the Delta59 Mk4 workspace-only aspect/resize geometry unchanged.
+- Delta package intentionally includes `MainWindow.h`, `MainWindow.cpp`, `CMakeLists.txt`, and this README so it can safely repair a tree contaminated by Delta63/64 titlebar experiments.
+
+
+## Delta 60 — display timeline publish-order fix
+
+- Fixes intermittent `? Unknown display phase` entries in the pinned Video worker details.
+- `DisplayPhaseTimelineStats::append()` now writes phase/start/duration first and release-publishes `count` only after the slot is complete.
+- Removes the race where the Performance UI could snapshot a newly counted but not-yet-written event, producing stale/zero phase data and misleading durations.
+- Diagnostic/accounting change only; no video processing, waveform rendering, worker scheduling, priority, or Spout behavior changed.
+
+## Delta 62 - Beam-glow gap instrumentation
+
+- Adds waveform phase `g` = `Beam glow stamp / apply`.
+- The existing local Beam Glow stamping pass is now published on the waveform phase timeline with capture-relative start and duration.
+- This specifically exposes the previously blank interval after the final trace-raster `R` chunk and before resolve/output `X` when Beam Glow is greater than zero.
+- No render, scheduler, worker, Spout, or glow algorithm behavior is changed; this delta is diagnostics-only apart from the version marker.
+
+
+## Delta 63 - Parallel Beam Glow stamp/apply
+
+- Splits waveform `g` (Beam glow stamp/apply) over the existing shared WF/V1/V2/VS assist queue.
+- Glow jobs own disjoint output-row bands, so they write the shared phosphor-energy target without atomics or per-worker full-frame buffers.
+- The shared assist executor remains the synchronization barrier before resolve/output `X`.
+- Parallel `g` chunks now expose real worker ownership in Performance diagnostics.
+- No AVX2 changes yet; this delta isolates the wallclock gain from worker spreading alone.
+
+
+## Delta 66 - Glow label only
+
+- Built directly from the known-good Delta63 presentation.
+- Leaves all physical WF/V1/V2/VS worker lanes and all X/R rendering unchanged.
+- Keeps the existing correctly positioned aggregate Screen-waveform `g` span and changes only its text to repeat `g` once per worker that actually executed a parallel glow chunk (for example `gggg`).
+- Removes the Delta64/65 extra glow-envelope approach entirely, so glow is not duplicated or shifted after `X`.
+- No renderer, scheduler, worker, Spout, or timing behavior changed.
+
+## Delta 67 - Beam Glow real workload partition
+
+- Fixes the Delta63 Beam Glow parallelisation so assist workers no longer rescan and recompute the complete waveform polyline independently.
+- Glow sample positions/subpixel phases are prepared once, then bucketed only to the disjoint output-row jobs whose 5x5 kernel can touch those rows.
+- Each WF/V1/V2/VS glow job therefore processes only its relevant samples while retaining race-free row ownership and the existing assist barrier before resolve/output X.
+- Preserves sample accumulation order within each destination row/pixel; no intended visual Beam Glow change.
+- No AVX2 changes yet; this delta isolates the gain from removing duplicated parallel work.
+
+## Delta 68 - Parallel Beam Glow sample preparation
+
+- Removes the new serial gap introduced by Delta67 before the parallel `g` jobs.
+- Splits the expensive polyline-to-glow-sample preparation over the existing WF/V1/V2/VS assist queue as phase `h` (`Glow sample preparation`).
+- Each `h` job owns a contiguous segment range and writes only private row-band buckets; no locks or shared vector writes are required.
+- Glow row workers consume those private buckets in segment order, preserving the original sample accumulation order per output band.
+- Maps each sample directly to the one or two row-band jobs its 5x5 kernel can touch instead of testing every band.
+- No AVX2 changes yet; this isolates the wallclock gain from parallelising the previously serial preparation pass.
+
+
+## Delta 69 - Close the Beam Glow accounting gaps
+
+- Diagnostics-only follow-up on Delta68: every wallclock interval between the end of trace raster `R` and the first resolve/output `X` now gets an explicit waveform phase.
+- Adds `s` = Glow setup / bucket allocation (bounds scan, row-band setup, private bucket construction).
+- Adds an aggregate `h` = Glow sample preparation wallclock marker around the existing parallel prep dispatcher; per-worker `h` assist chunks remain available independently.
+- Adds `y` = Resolve setup / scratch allocation between the end of Beam Glow and the first `X` resolve job.
+- No glow math, worker scheduling, resolve math, Spout behavior, or output pixels are changed. This delta is measurement-only apart from the version marker.
+
+
+## Delta 70 - Parallel B and Q waveform phases
+
+- Spreads waveform `B` (Base image clear) over the existing WF/V1/V2/VS assist queue using disjoint scanline bands.
+- Keeps `prepareImageForRender()` serial so QImage allocation/detach completes before workers touch scanlines.
+- Spreads waveform `Q` (Phosphor energy -> output image) over the same assist queue using disjoint phosphor/output row bands.
+- `B` and `Q` assist chunks retain their real worker ownership in the worker timelines; aggregate B/Q wallclock phases remain in the waveform chronology.
+- No new threads, no AVX2 changes, no pixel-format or phosphor math changes.
+
+## Delta 71 - Authoritative WF worker timeline
+
+- `Waveform worker (Screen + Spout) [timeline]` now draws directly from the same authoritative event sources as the pinned/hover underwater chronology, filtered to events whose real worker is `WF`.
+- Removed the mixed wrapper/aggregate presentation from that lane (`S`/`V` envelopes and duplicate aggregate `R`/`X` paths).
+- Screen phases and WF assist chunks now appear on the upper WF lane if and only if the corresponding `| WF |` event exists in the detailed chronology.
+- Processing, scheduling, renderer output and worker distribution are unchanged.
+
+
+### Delta 72 — source-independent Y frequency compensation / no-BM source state
+- Y HF / frequency-response compensation is now OpenScope processing, not Blackmagic-only processing.
+- Compensation remains active for Philips Pattern ROM sources when enabled.
+- The Calibration checkbox is renamed to `Enable Y frequency response correction`.
+- Blackmagic composite Y/UV gain controls remain hardware-specific and stay disabled for Philips/no-device operation.
+- When probing returns no DeckLink device/driver, the Blackmagic Source action is disabled while OpenScope remains usable with non-DeckLink sources.
+
+
+### Delta 73 — correct lower illegal-luma threshold
+- Corrects the lower illegal-luma signal threshold from `0.298 V` to `0.280 V`.
+- Keeps the existing upper threshold at `1.020 V`.
+- The finite beam-footprint presentation guard remains unchanged; only the intended signal threshold is corrected.
+- No other waveform, worker, source, or calibration behavior is changed.
+
+
+### Delta 74 - Deferred DeckLink startup probe
+- OpenScope now enters the Qt event loop and paints the main window before DeckLink/Desktop Video probing starts.
+- Startup begins in a safe no-DeckLink state: Blackmagic source selection and hardware-only Y/UV gain controls remain disabled until a device probe succeeds.
+- The DeckLink probe is queued shortly after startup; missing/failed Desktop Video probing can no longer prevent the OpenScope UI from appearing before the probe is attempted.
+- Philips Pattern ROM operation remains available without Blackmagic hardware.
+
+
+### Delta 79 — remove temporary startup diagnostics
+- Removes the temporary startup checkpoint logging added in Deltas 75–78 (`OpenScope-startup.txt`).
+- Restores `main.cpp`, `MainWindow`, `ScopeWorkspace`, and `ControlWidget` to the clean Delta74 functional startup path.
+- Retains all functional changes through Delta74, including generic Y frequency-response correction, the 0.280 V lower luma threshold, no-DeckLink source disabling, and deferred DeckLink probing.
+- No processing, rendering, worker scheduling, capture, or UI behavior is otherwise changed.
+
+### Delta 80 — Config (F2) for single-screen fullscreen use
+
+- Added `Config (F2)` directly beside `Source` in the main menu bar.
+- F2 opens/hides the Settings tool window while a scope viewport is maximized; F2 remains available in F11 windowless mode.
+- Maximizing Video/Waveform/Vectorscope no longer automatically floats Settings over the instrument.
+- An already-open floating Settings window is left visible when switching/maximizing scope viewports.
+- Returning to Matrix view docks Settings back into its normal fourth quadrant.
+- No renderer, worker, capture, Spout, or processing changes.
+
+## Delta 81 - F11 fit, View FPS, power option and luma-limit symmetry
+
+- Keeps Matrix/quad layout behavior unchanged. F11 remains windowless fullscreen and refreshes the video output size after fullscreen geometry settles; VideoWidget continues to aspect-fit 4:3/16:9 and paints all unused monitor area black.
+- Adds a `View FPS` Config tab with three columns: `View`, `OpenScope FPS`, and `Spout FPS`, updated once per second from lightweight presentation counters rather than the performance profiler.
+- Changes the displayed PAL deinterlaced mode label from `PAL 625i` to `625/50d`.
+- Adds `Prevent display sleep / screensaver` to Misc. It defaults to OFF, is persisted, and only when enabled requests Windows display/system execution state.
+- Verifies the lower illegal-luma threshold at `0.280 V` and removes the obsolete lower-only AA/glow footprint guard that belonged to the old `0.298 V` limit. The visible legality mapping is now directly linear at `0.280 V` / `1.020 V`, giving symmetric 20 mV margins around 0.300 V black and 1.000 V white.
+
+## Delta 82 - Live wappers and stable View FPS columns
+
+- Waveform diagnostics now publish after a completed worker iteration when either the PC waveform view or waveform Spout renderer is active; Spout-only operation no longer leaves the waveform wappers frozen on an old screen snapshot.
+- Clearing waveform diagnostics now also clears the published WF worker-phase snapshot, so switching both waveform Screen and Spout off immediately removes stale worker bars.
+- Vectorscope keeps its existing explicit empty-publication path when both Screen and Spout are disabled; no vectorscope processing or scheduling is changed.
+- `View FPS` numeric column headers are right-aligned like their values and both FPS columns get equal stable minimum widths; resizing the Config window no longer makes headers and FPS numbers drift apart.
+- No capture, rendering, worker scheduling, Spout transport, or signal-processing behavior is changed.
+
